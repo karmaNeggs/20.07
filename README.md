@@ -226,10 +226,12 @@ compiler or an emulator).
 
 ## Get the app
 
-**Prebuilt APK**: download the latest `.apk` from this repo's [Releases](../../releases) (or the
-`releases/` folder if you're browsing the source) and install it — you'll need to allow installs
-from that source once in Android's settings. This is a debug build unless a release build is
-explicitly noted; see Known Limitations above regarding release-build verification status.
+**Prebuilt APK**: download the latest `.apk` from this repo's
+[**Releases**](https://github.com/karmaNeggs/20.07/releases/latest) page and install it —
+you'll need to allow installs from that source once in Android's settings. (The same file also
+sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
+Releases page.) This is a debug build unless a release build is explicitly noted; see Known
+Limitations above regarding release-build verification status.
 
 **Build from source**:
 ```
