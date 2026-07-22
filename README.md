@@ -1,0 +1,281 @@
+# 20.07
+
+A phone-to-phone Bluetooth mesh app for staying in contact with your group, navigating toward
+them, and sharing evidence — when cellular networks are jammed, shut down, or not trusted.
+No servers, no cellular/Wi-Fi internet dependency, no account.
+
+Built for peaceful protesters, human rights defenders, and civil society groups who need to
+coordinate and document safely during unrest, riots, or emergencies.
+
+## What it does (3 features, on purpose — nothing else)
+
+1. **Navigate** — a forward-up radar: your group members show up as dots at their real bearing
+   and distance from you, computed from GPS coordinates shared over the mesh (never stored —
+   kept in memory for about two minutes, then gone), then rotated by your phone's compass so
+   "up" means "in front of you right now" — walk toward the dot, don't read a map. If GPS isn't
+   available (no fix, indoors, permission denied), it falls back to hop-count hot/cold — no
+   direction, but still tells you if you're getting closer or farther, using only Bluetooth.
+2. **Send evidence** — pick a photo from your gallery and it propagates through the mesh to your
+   group, phone-to-phone, however long that takes.
+3. **SOS** — a high-priority broadcast to your group that also lets other members navigate
+   toward you.
+
+## Screens
+
+- **Home** — a combined radar showing every group member across all your groups at once, each
+  group in its own color, dots pulsing faster the closer they are. Below it, your group list
+  (tap to open), a general SOS button, and a `+` to add a group.
+- **Add group** — join with a code/link someone shared, or create a new group (just a name —
+  generates a random key and a shareable code/link, nothing to type on the other end that could
+  get mistyped).
+- **General SOS** — every group pre-selected, uncheck whichever this doesn't concern, send.
+- **Group chat** — one chronological feed mixing messages and shared files, a mini radar up top
+  (tap to expand to the full Navigate screen), an input for a quick in-group-only SOS or file,
+  and delete-group.
+- **Navigate** — the full-screen radar for one group.
+
+## How it works
+
+**Groups are a random key, shared as a code — not a typed passphrase, not an account.**
+Creating a group generates a random group id and a random 256-bit key on the spot, packed into
+one shareable code (and a `mesh2007://join?c=...` link for one-tap opening). Whoever has the
+exact code is in the exact same group — no two people separately typing "the same" secret and
+hoping it matches. The code gets shared "over whatever channel you already trust" — in person,
+an existing chat app, read aloud, or scanned as a QR code — same trust model either way, just a
+more reliable payload than a typed passphrase.
+
+**Discovery uses rotating, anonymous beacon IDs.** Instead of broadcasting anything that
+identifies your group, your phone advertises `HMAC(group_key, current_60s_time_window)` — a
+value that changes every minute and is meaningless to anyone without the group key. Other
+members of your group compute the same value independently and recognize it; everyone else just
+sees a random-looking string. This is the same principle Bluetooth's own privacy mode (and the
+old COVID exposure-notification apps) use for rotating device identifiers.
+
+**Every phone relays for every group, whether or not it's a member.** Encrypted content is
+opaque bytes — a phone carrying data for a group it doesn't belong to can't read it, only pass
+it along. This means propagation speed depends on the whole local population of app users, not
+just your handful of group members: strangers' phones act as blind couriers. Each phone also
+keeps a "here's the diff" bitset in memory before pushing any large item to a peer, so once
+data has spread through an area, later contacts exchange a few hundred bytes of bookkeeping
+instead of resending anything already delivered — this is what keeps bigger files (evidence
+photos) viable instead of collapsing into redundant retransmission.
+
+**The radar is forward-up: GPS for bearing/distance, compass for rotation.** Each phone shares
+its current GPS fix over the mesh (short hop range, latest-fix-wins, kept in memory only — see
+Permissions below). Every other phone computes true bearing and distance to each group member,
+then rotates that by its own compass heading so "up" on screen always means "in front of you
+right now," not true north. The compass reading is smoothed and the app surfaces a
+low-confidence warning when the sensor itself reports poor accuracy, since magnetometers drift
+and get thrown off by exactly the kind of things common at a protest (metal barricades,
+vehicles, structures) — that's a real, known weak point, shown rather than hidden. When GPS
+isn't available it falls back to a hop-count "hot/cold" indicator: no direction, just whether
+the number of relay-hops to your nearest group member is rising or falling as you move. That
+part depends on nothing but Bluetooth, so it still works when GPS doesn't. (Hop-count-to-presence
+currently only reflects "a group member is in direct Bluetooth range or not," not an extending
+multi-hop gradient — see Known Limitations.)
+
+**SOS works the same way, with its own hop-count.** Sending SOS starts a distance-vector field
+seeded at the sender; anyone in the group can then see how many hops away that SOS originated
+and close in on it the hot/cold way, same as group presence.
+
+**Evidence photos are compressed, encrypted, chunked, then flood-relayed.** BLE bandwidth is
+low, so a picked photo gets downscaled and compressed first — "slow but delivered" beats
+"never arrives." The whole compressed file is encrypted once (AES-GCM), *then* split into
+small chunks, so no partial subset of chunks is ever decryptable — only a device holding the
+group key can reconstruct and decrypt the full file once all chunks converge on it. Chunks
+propagate independently through whoever's nearby, group member or not.
+
+## Permissions — and why each one is there
+
+- **Bluetooth (scan / advertise / connect)** — the entire mesh transport.
+- **Location — a real, intentional use now.** Powers the GPS radar. This is a deliberate
+  tradeoff your group should knowingly accept, not a hidden cost: your phone briefly holds
+  other members' recent positions in memory (never written to disk, never added to the app's
+  database) so it can relay them onward and plot the radar. Entries expire on their own after
+  about 90 seconds. If a phone is seized, there's no persisted location trail to find — at
+  worst, a stale snapshot already sitting in RAM at that moment.
+- **Notifications** — required to run BLE scanning reliably in the background via a foreground
+  service (shows a minimal, low-priority "Syncing" notification, deliberately disguised so a
+  glance at your lock screen doesn't reveal a mesh app is running), plus a separate, high-priority
+  channel for SOS alerts (sound/vibration — the one thing in this app that should interrupt you).
+- **Camera — opt-in only, never requested at launch.** Evidence photos are still chosen via
+  Android's built-in Photo Picker (read-only reference to one file, no gallery-wide storage
+  permission). Camera access exists for exactly one thing: the QR scan icon on the Join screen,
+  for reading someone else's invite code with your own camera instead of retyping it. The
+  permission prompt only appears the moment you tap that icon; declining it (or never tapping it)
+  leaves the rest of the app fully functional — paste/type a code, tap a `mesh2007://` link, or
+  have someone else's camera scan the QR code *this* app displays all still work with zero camera
+  access. No photo or video is ever captured or stored by the scanner; frames are decoded in
+  memory and discarded.
+- **Uninstalling wipes everything.** Groups, keys, messages, and evidence files all live in the
+  app's private storage (Room database, `EncryptedSharedPreferences`, internal files dir) with
+  `android:allowBackup="false"` — nothing here is written anywhere Android preserves across an
+  uninstall or could restore from a backup. Removing the app is a real, complete wipe.
+
+## Power tiers
+
+Two BLE tuning profiles, switched automatically — no setting to think about in the common case:
+- **Active** — used while the app is actually on-screen. Favors responsiveness: faster
+  scan/advertise, since you're watching the radar right now and want it to update.
+- **Relay** — used the rest of the time, including whenever the app is backgrounded. Favors
+  battery for the hours the phone just sits there carrying mesh traffic.
+
+A **Power saver** toggle on the home screen (off by default) manually pins the Relay tier even
+while the app is open, for someone who wants to trade responsiveness for runtime regardless of
+what they're doing. The tradeoff either way is real, not hidden: Relay tier means slower
+discovery — fewer chances for a peer's scan window to catch your advertisement, and vice versa.
+
+## Security model
+
+- **Confidentiality**: GPS positions and evidence photo bytes are sealed with **AES-256-GCM**
+  under the group's random 256-bit key before they ever go on the wire — a phone relaying them
+  without the key sees only opaque ciphertext.
+- **Authenticity**: SOS, evidence headers, nicknames, and presence heartbeats carry a truncated
+  **HMAC-SHA256** (128-bit) tag under the group key. A phone without the key can relay these but
+  cannot forge one a real member will act on — verified with a constant-time comparison.
+- **Key storage**: group keys live only in `EncryptedSharedPreferences`, backed by the Android
+  Keystore (hardware-backed on most devices) — never in the app's regular (Room) database.
+- **Key exchange is entirely out-of-band.** There is no server, account, or key-exchange
+  protocol: creating a group generates a random id + random 256-bit key on-device, packed into
+  one shareable code/QR/link. You share that code over whatever channel you already trust — the
+  app never brokers trust for you, it only encrypts once you both have the same key.
+- **Discovery is pseudonymous**: phones advertise `HMAC(group_key, current_60s_window)`, not
+  anything that identifies the group, so passive BLE scanning by an outsider sees rotating
+  random-looking values, not group membership.
+
+**What this does *not* protect against** — read this before relying on the app for anything
+where it matters:
+
+- **SOS message text is authenticated but not encrypted.** Unlike positions and evidence, the
+  free-text body of an SOS travels in the clear (with an auth tag) so that non-member phones can
+  still relay it — meaning any nearby phone running this app, member or not, can read the
+  contents of an SOS message, not just detect that one was sent.
+- **Group IDs are not hidden on the wire.** SOS/evidence/nickname frames carry their `groupId`
+  in the clear. An adversary who can capture mesh traffic (even without any group's key) can
+  correlate which packets belong to the same group and build a traffic-analysis picture, even
+  though they can't read the content.
+- **No forward secrecy, no membership revocation.** The group key is a single static secret for
+  the group's lifetime. Anyone who ever had it can decrypt all past and future traffic for that
+  group from a mesh capture. There's no way to remove a member's access short of dismantling the
+  group and recreating it with an entirely new key/code for everyone remaining.
+- **The decoy/disguised launcher icon is a UI-level disguise only, not a hidden-app one.** It
+  changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, see below),
+  not the installed package name, requested permissions, or its presence in Android
+  Settings → Apps — anyone who knows to check there will find it regardless of which launcher
+  identity is active. It's also currently **scaffolded but not wired to an in-app toggle**
+  (switching identities today means enabling/disabling the two `activity-alias` entries via
+  `adb`, not a button in the app).
+- **Clipboard copies of a join code/link are marked sensitive (`EXTRA_IS_SENSITIVE`, Android 13+)**
+  so the OS should skip clipboard history and cross-device sync for them — but that flag is
+  advisory, ignored entirely on older Android, and not guaranteed to be honored by every keyboard
+  or clipboard-manager app. A copied code contains the group's raw key; treat "copy code" as
+  leaving a trace outside the app's control.
+
+## Known limitations (honest ones)
+
+- **BLE stack behavior varies by phone manufacturer.** Connection stability, MTU negotiation,
+  and background-scanning limits are inconsistent across Android OEMs. Real debugging happens
+  on real devices, not in a compiler.
+- **Two phones minimum to see anything work.** Discovery, navigation, and relay need at least
+  two devices in the same group, physically near each other.
+- **Only tested at small scale so far (2-3 physical phones).** The app's actual target — roughly
+  10 people in a ~100m² area — has not been validated live. A defensive cap on simultaneous
+  inbound BLE connections exists (`MeshGattServer`) but its enforcement is currently **disabled**
+  (logging only) pending real dense-crowd data on whether it's needed and safe.
+- **Large files take real time.** A short low-res photo should propagate through a populated
+  area in minutes. Anything larger depends heavily on how continuously populated the physical
+  area is between sender and destination — a gap in coverage is a gap no protocol can bridge.
+- **Hop-count-to-presence is capped at "in direct range or not," not a true extending gradient.**
+  Only actual group members can emit a group's rotating beacon (it requires the group key), and
+  every member always advertises itself at hop 0 — there's no mechanism yet for a phone to relay
+  "I heard someone 1 hop away" further outward the way SOS, evidence, and position data already
+  do over GATT. SOS hop-count does not have this limitation — it's relayed properly and gives a
+  true multi-hop distance.
+- **Background survival is best-effort.** The app runs a correctly-declared Android foreground
+  service and asks once for a battery-optimization exemption, but aggressive OEM battery
+  managers (common on some manufacturers) are known to kill foreground services regardless of
+  correct API usage — there is no code-level guarantee against this, only the standard mitigation.
+- **The release build is compile-verified and unit-test-verified only, not yet run end-to-end on
+  a physical device.** R8 minification is on for release builds (~90% smaller than debug); that's
+  a large enough surface of change to warrant its own device test pass before you trust it, not
+  an assumption that "it compiled" means "it works."
+- **One dependency (`androidx.security:security-crypto`) is pinned to an alpha release** — used
+  only to wrap local key storage (see Security model above), not for any cryptographic operation
+  itself. This reflects the state of that library upstream (no stable release exists), not a
+  chosen risk.
+- **Automated test coverage is logic-only.** ~70 pure-JVM/Robolectric unit tests cover crypto,
+  wire-format encode/decode, and connection/dedup state machines (`./gradlew test`). There are no
+  automated UI tests and no CI pipeline — both are manual/planned, not built.
+
+See [`TESTING.md`](TESTING.md) for how the test suite is organized, and
+[`test_rubric.md`](test_rubric.md) for the manual, physical-device test plan real bugs in this
+project have actually been found by (BLE radio behavior at this level doesn't show up in a
+compiler or an emulator).
+
+## Specs
+
+- **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.1.0-dev` — pre-1.0, see Known Limitations.
+- **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
+  build it yourself; sideloading is the only install path by design.
+- **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
+  `android.location`/`android.bluetooth.le` — no Google Play Services dependency anywhere, so it
+  works on de-Googled/custom-ROM phones.
+- **Wire transport**: Bluetooth LE only — GATT for content, BLE advertising for discovery/beacons.
+  No internet, cellular, or Wi-Fi involved at any point.
+
+## Get the app
+
+**Prebuilt APK**: download the latest `.apk` from this repo's [Releases](../../releases) (or the
+`releases/` folder if you're browsing the source) and install it — you'll need to allow installs
+from that source once in Android's settings. This is a debug build unless a release build is
+explicitly noted; see Known Limitations above regarding release-build verification status.
+
+**Build from source**:
+```
+git clone <this repo>
+cd 20.07
+export JAVA_HOME=<a JDK 17 install>   # e.g. Homebrew: /opt/homebrew/opt/openjdk@17 on macOS
+./gradlew assembleDebug                # APK at app/build/outputs/apk/debug/
+./gradlew test detekt                  # Tier 1 test suite + static analysis, see TESTING.md
+```
+Needs the Android SDK (platform 34, build-tools 34.0.0) — Android Studio sets this up
+automatically, or install the command-line SDK tools and set `ANDROID_HOME`/`local.properties`
+yourself.
+
+## How to use it
+
+1. **Install** the APK on your phone (sideload via `adb install`, or download it and tap to
+   install — you'll need to allow installs from that source once).
+2. **Grant permissions** when asked on first launch (Bluetooth, and location for the radar —
+   see above for what that is and isn't used for).
+3. **Create or join a group.** Creating one just needs a name — it generates a random key and a
+   shareable code/link/QR code. Joining just needs that code, pasted, scanned, or tapped from a
+   link — nothing to type that could get mistyped.
+4. **Open the group.** You'll see:
+   - A red **SOS** button — tap it, optionally add a short message, send. It broadcasts to
+     the group and lets others navigate toward you.
+   - A **Navigate** button — opens the radar. With a GPS fix, group members show up as dots at
+     their real bearing and distance, rotated so "up" is always the direction you're currently
+     facing — walk toward the dot. Without a fix, it falls back to a hop-count number and a
+     trend ("getting closer" / "getting farther") that only needs Bluetooth.
+   - A **Send evidence** button — opens your photo gallery, pick an image, it gets compressed,
+     encrypted, and queued for relay. You'll see it listed with a chunk-progress count until
+     the group (or you, for images received from others) has all pieces and it's marked
+     complete.
+5. **Leave it running.** The mesh only works while the app's background service is alive —
+   don't force-stop it, and if your phone aggressively kills background apps (common on some
+   Android OEMs), you may need to exempt it from battery optimization in system settings.
+
+## Contributing
+
+Issues and pull requests are welcome. If you're reporting a bug in the BLE/mesh layer
+specifically, a description of the phones/Android versions involved is more useful than a stack
+trace — see [`TESTING.md`](TESTING.md) for why (most real bugs here have been radio-behavior
+ones that only show up on physical hardware). If you're reporting a security issue, please open
+it as a regular issue unless it's actively exploitable against real users — there's no dedicated
+security-contact channel set up yet.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).

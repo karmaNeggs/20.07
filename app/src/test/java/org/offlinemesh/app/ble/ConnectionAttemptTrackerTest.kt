@@ -1,0 +1,138 @@
+package org.offlinemesh.app.ble
+
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/**
+ * Tier 1: the exact state machine behind the Pass 16 bug ("far away, connection breaks, doesn't
+ * come back"; "Bluetooth off/on breaks it"; "breaks after 4-5 messages") — a peer whose connection
+ * attempt never received a single callback stayed marked "connecting" forever. A fake clock makes
+ * the 15-second-timeout / 45-second-cooldown behavior deterministic without a real wait.
+ */
+class ConnectionAttemptTrackerTest {
+    private var clock = 0L
+    private fun tracker(maxConcurrent: Int = 3, cooldownMs: Long = 45_000L, syncedCooldownMs: Long = cooldownMs) =
+        ConnectionAttemptTracker(maxConcurrent, cooldownMs, syncedCooldownMs, now = { clock })
+
+    @Test
+    fun `a fresh address can attempt`() {
+        assertTrue(tracker().canAttempt("AA:BB"))
+    }
+
+    @Test
+    fun `an address already attempting cannot be attempted again`() {
+        val t = tracker()
+        t.attemptStarted("AA:BB")
+        assertFalse(t.canAttempt("AA:BB"))
+    }
+
+    @Test
+    fun `an attempt that never receives any callback is reported stuck`() {
+        val t = tracker()
+        t.attemptStarted("AA:BB")
+        assertTrue(t.isStuck("AA:BB"))
+    }
+
+    @Test
+    fun `receiving any callback — even a failure status — means the attempt is not stuck`() {
+        val t = tracker()
+        t.attemptStarted("AA:BB")
+        t.callbackReceived("AA:BB") // caller marks this for ANY onConnectionStateChange, not just success
+        assertFalse(t.isStuck("AA:BB"))
+    }
+
+    @Test
+    fun `an address never attempted is not reported stuck`() {
+        assertFalse(tracker().isStuck("AA:BB"))
+    }
+
+    @Test
+    fun `connectionEnded clears the connecting state and starts the reconnect cooldown`() {
+        val t = tracker(cooldownMs = 45_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB")
+        assertFalse(t.canAttempt("AA:BB")) // still cooling down
+    }
+
+    @Test
+    fun `the cooldown expires and the address becomes attemptable again`() {
+        val t = tracker(cooldownMs = 45_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB")
+        clock += 45_001
+        assertTrue(t.canAttempt("AA:BB"))
+    }
+
+    @Test
+    fun `a stuck attempt force-cleaned by the caller can eventually be retried`() {
+        // The exact Pass 16 regression scenario end to end: start an attempt, never get a callback
+        // (peer went out of range / Bluetooth toggled mid-attempt), the caller's own timer confirms
+        // isStuck() after its wait and calls connectionEnded() to force cleanup — the address must
+        // NOT stay permanently unattemptable, which is exactly what the original bug did.
+        val t = tracker(cooldownMs = 45_000L)
+        t.attemptStarted("AA:BB")
+        assertTrue(t.isStuck("AA:BB"))
+        t.connectionEnded("AA:BB")
+        assertFalse(t.canAttempt("AA:BB"))
+        clock += 45_001
+        assertTrue(t.canAttempt("AA:BB"))
+    }
+
+    @Test
+    fun `respects the max concurrent connection limit`() {
+        val t = tracker(maxConcurrent = 2)
+        t.attemptStarted("A")
+        t.attemptStarted("B")
+        assertFalse(t.canAttempt("C"))
+    }
+
+    @Test
+    fun `a completed connection frees a concurrency slot`() {
+        val t = tracker(maxConcurrent = 1)
+        t.attemptStarted("A")
+        assertFalse(t.canAttempt("B"))
+        t.connectionEnded("A")
+        clock += 100_000 // clear A's own cooldown too, isolate the concurrency-limit assertion
+        assertTrue(t.canAttempt("B"))
+    }
+
+    @Test
+    fun `different addresses are tracked independently`() {
+        val t = tracker()
+        t.attemptStarted("A")
+        assertTrue(t.canAttempt("B"))
+        assertFalse(t.isStuck("B"))
+    }
+
+    // ---- peer-selection: synced peers get a longer cooldown than failed/unsynced ones ----
+
+    @Test
+    fun `an unsynced disconnect uses the short cooldown`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = false)
+        clock += 45_001
+        assertTrue(t.canAttempt("AA:BB")) // short cooldown already expired
+    }
+
+    @Test
+    fun `a synced disconnect uses the longer cooldown, biasing slots toward unvisited peers`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = true)
+        clock += 45_001
+        assertFalse(t.canAttempt("AA:BB")) // short cooldown alone would have expired, long one hasn't
+        clock += 135_000
+        assertTrue(t.canAttempt("AA:BB")) // long cooldown now expired
+    }
+
+    @Test
+    fun `defaults to the reconnect cooldown for synced too when no synced cooldown is configured`() {
+        val t = ConnectionAttemptTracker(maxConcurrent = 3, reconnectCooldownMs = 45_000L, now = { clock })
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = true)
+        clock += 45_001
+        assertTrue(t.canAttempt("AA:BB")) // no behavior change when syncedCooldownMs isn't specified
+    }
+}

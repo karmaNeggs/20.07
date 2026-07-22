@@ -1,0 +1,93 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" tools:targetApi="31" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Real, intentional use now: GPS position for the radar screen (opt-in tradeoff — never
+         written to disk, latest-fix-only, expires from memory on its own). Requested on every
+         OS version for that reason, not just the pre-Android-12 BLE-scan quirk. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- A correctly-declared foreground service (see MeshService below) is Android's own guarantee
+         against being killed in the background, but OEM battery managers (MIUI, Samsung, OnePlus,
+         etc.) are well known to kill foreground services anyway regardless of correct API usage —
+         this is what actually lets the user exempt the app from that, via MainActivity's one-time
+         Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS prompt. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Opt-in only: requested the moment (and only if) someone taps the camera icon on the Join
+         screen to scan a QR code, never at launch. App is fully usable without ever granting this —
+         pasting/typing a code, tapping a mesh2007:// link, or having someone else's camera scan the
+         QR *this* app displays all still work with zero camera access. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <application
+        android:name=".MeshApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher_real"
+        android:label="@string/app_name_real"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:label="@string/app_name_real"
+            android:icon="@mipmap/ic_launcher_real" />
+
+        <!-- Real launcher identity: enabled by default, disable to switch to decoy -->
+        <activity-alias
+            android:name=".LauncherReal"
+            android:targetActivity=".ui.MainActivity"
+            android:enabled="true"
+            android:exported="true"
+            android:label="@string/app_name_real"
+            android:icon="@mipmap/ic_launcher_real">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mesh2007" android:host="join" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Decoy launcher identity: disabled by default, enable to hide the app as a plain notes utility -->
+        <activity-alias
+            android:name=".LauncherDecoy"
+            android:targetActivity=".ui.MainActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/app_name_decoy"
+            android:icon="@mipmap/ic_launcher_decoy">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mesh2007" android:host="join" />
+            </intent-filter>
+        </activity-alias>
+
+        <service
+            android:name=".ble.MeshService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+    </application>
+</manifest>

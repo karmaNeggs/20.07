@@ -1,0 +1,209 @@
+package org.offlinemesh.app.ble
+
+import android.content.Context
+import android.util.Log
+import org.offlinemesh.app.crypto.CryptoUtils
+import org.offlinemesh.app.data.EvidenceChunkEntity
+import org.offlinemesh.app.data.EvidenceEntity
+import org.offlinemesh.app.data.GroupRepository
+import org.offlinemesh.app.data.NicknameEntity
+import org.offlinemesh.app.data.SeenMessageEntity
+import org.offlinemesh.app.data.SosEntity
+import java.io.File
+import java.io.FileOutputStream
+import java.util.UUID
+
+/**
+ * Chunking, dedup, and reassembly logic — kept independent of the actual BLE plumbing so
+ * both the GATT server and client code paths (and tests) can share it.
+ */
+class RelayEngine(private val context: Context, private val repo: GroupRepository) {
+
+    companion object {
+        const val CHUNK_SIZE = 400
+        const val DEFAULT_TTL = 8
+        private const val TAG = "RelayEngine"
+
+        // This app is for live coordination, not a permanent archive — and every phone relays
+        // for groups it isn't even a member of, so without this, storage grows forever from
+        // other people's traffic alone. 48h covers a multi-day event without becoming a
+        // standing record of it.
+        const val CONTENT_MAX_AGE_MILLIS = 48L * 60 * 60 * 1000
+        private const val SEEN_ID_MAX_AGE_MILLIS = 6L * 60 * 60 * 1000
+    }
+
+    private val db = org.offlinemesh.app.data.AppDatabase.get(context)
+    private val seenDao = db.seenMessageDao()
+    private val sosDao = db.sosDao()
+    private val evidenceDao = db.evidenceDao()
+    private val chunkDao = db.evidenceChunkDao()
+    private val nicknameDao = db.nicknameDao()
+
+    // ---------- creating local items ----------
+
+    suspend fun createSos(groupId: String, text: String): SosEntity {
+        val id = UUID.randomUUID().toString()
+        val timestamp = System.currentTimeMillis()
+        val senderId = repo.deviceId
+        val key = repo.getGroupKey(groupId)
+        val mac = key?.let { CryptoUtils.authTag(it, MeshFrameCodec.sosMacInput(id, groupId, senderId, text, timestamp)) }
+        val sos = SosEntity(
+            id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
+            message = text, timestamp = timestamp, ttl = DEFAULT_TTL, mac = mac
+        )
+        sosDao.insert(sos)
+        seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
+        return sos
+    }
+
+    suspend fun createEvidence(groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?): EvidenceEntity {
+        val key = repo.getGroupKey(groupId) ?: error("no key for group")
+        val ciphertext = CryptoUtils.encrypt(key, plaintext)
+        val id = UUID.randomUUID().toString()
+        val hash = CryptoUtils.sha256Hex(ciphertext)
+        val chunks = ciphertext.toList().chunked(CHUNK_SIZE)
+        val timestamp = System.currentTimeMillis()
+        val senderId = repo.deviceId
+        val mac = CryptoUtils.authTag(key, MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType))
+        val evidence = EvidenceEntity(
+            id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
+            timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
+            mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true, mac = mac
+        )
+        evidenceDao.insert(evidence)
+        seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
+        chunks.forEachIndexed { idx, bytes ->
+            val chunkEntity = EvidenceChunkEntity(id, idx, bytes.toByteArray())
+            chunkDao.insert(chunkEntity)
+            seenDao.insert(SeenMessageEntity("$id:$idx", System.currentTimeMillis()))
+        }
+        return evidence
+    }
+
+    /** Sets/overwrites this device's display name for one group only — not global; the same
+     *  device can show a different name in each group. Re-submitting always overwrites, keyed on
+     *  [updatedAt] so a peer that already has a newer copy (from us, relayed) doesn't regress. */
+    suspend fun setNickname(groupId: String, username: String): NicknameEntity {
+        val trimmed = username.trim().take(MeshFrameCodec.MAX_USERNAME_CHARS)
+        val updatedAt = System.currentTimeMillis()
+        val senderId = repo.deviceId
+        val key = repo.getGroupKey(groupId) ?: error("no key for group")
+        val mac = CryptoUtils.authTag(key, MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt))
+        val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac)
+        nicknameDao.upsert(n)
+        return n
+    }
+
+    suspend fun myNickname(groupId: String): NicknameEntity? = nicknameDao.get(groupId, repo.deviceId)
+
+    // ---------- ingesting items heard over the mesh ----------
+
+    suspend fun ingestSos(sos: SosEntity): Boolean {
+        if (seenDao.find(sos.id) != null) return false
+        seenDao.insert(SeenMessageEntity(sos.id, System.currentTimeMillis()))
+        sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1))
+        return true
+    }
+
+    suspend fun ingestEvidenceMeta(meta: EvidenceEntity): Boolean {
+        if (seenDao.find(meta.id) != null) return false
+        seenDao.insert(SeenMessageEntity(meta.id, System.currentTimeMillis()))
+        evidenceDao.insert(meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null))
+        return true
+    }
+
+    /** Latest-[NicknameEntity.updatedAt]-wins, not flood-dedup — this is mutable per-member state,
+     *  not a one-shot event, so there's no seenDao entry to grow unboundedly for it. */
+    suspend fun ingestNickname(n: NicknameEntity): Boolean {
+        val existing = nicknameDao.get(n.groupId, n.senderId)
+        if (existing != null && existing.updatedAt >= n.updatedAt) return false
+        nicknameDao.upsert(n)
+        return true
+    }
+
+    suspend fun ingestChunk(chunk: EvidenceChunkEntity): Boolean {
+        val seenId = "${chunk.evidenceId}:${chunk.chunkIndex}"
+        if (seenDao.find(seenId) != null) return false
+        seenDao.insert(SeenMessageEntity(seenId, System.currentTimeMillis()))
+        chunkDao.insert(chunk)
+        maybeReassemble(chunk.evidenceId)
+        return true
+    }
+
+    private suspend fun maybeReassemble(evidenceId: String) {
+        val meta = evidenceDao.get(evidenceId) ?: return
+        if (meta.complete) return
+        val have = chunkDao.receivedCount(evidenceId)
+        if (have < meta.totalChunks) return
+
+        val key = repo.getGroupKey(meta.groupId) ?: return // not a group we're in — stay a blind carrier
+        val chunks = chunkDao.allChunks(evidenceId).sortedBy { it.chunkIndex }
+        // Pre-sized array + arraycopy, not repeated `+=` (O(n) instead of O(n^2) — matters once
+        // this is thousands of chunks, found during QC while checking the large-file path).
+        val ciphertext = ByteArray(chunks.sumOf { it.data.size })
+        var offset = 0
+        for (c in chunks) {
+            System.arraycopy(c.data, 0, ciphertext, offset, c.data.size)
+            offset += c.data.size
+        }
+        val actualHash = CryptoUtils.sha256Hex(ciphertext)
+        if (actualHash != meta.sha256) {
+            Log.w(TAG, "evidence $evidenceId hash mismatch — corrupted or tampered, discarding reassembly")
+            return
+        }
+        val plaintext = CryptoUtils.decrypt(key, ciphertext) ?: return
+
+        val outDir = File(context.filesDir, "evidence").apply { mkdirs() }
+        val ext = if (meta.mimeType.startsWith("video")) "mp4" else "jpg"
+        val outFile = File(outDir, "$evidenceId.$ext")
+        FileOutputStream(outFile).use { it.write(plaintext) }
+
+        evidenceDao.update(meta.copy(complete = true))
+    }
+
+    // ---------- what to offer a peer we just connected to ----------
+
+    suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable().filter { it.ttl > 0 }
+
+    suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable().filter { it.ttl > 0 }
+
+    suspend fun haveIndexSet(evidenceId: String): Set<Int> = chunkDao.receivedIndexes(evidenceId).toSet()
+
+    suspend fun chunksByIndexes(evidenceId: String, indexes: List<Int>): List<EvidenceChunkEntity> =
+        indexes.mapNotNull { chunkDao.getChunk(evidenceId, it) }
+
+    suspend fun nicknamesForGroup(groupId: String): List<NicknameEntity> = nicknameDao.getForGroup(groupId)
+
+    /**
+     * Called periodically from MeshService. Not a permanent archive — deletes content past
+     * CONTENT_MAX_AGE_MILLIS (this covers both age-expiry and anything a group's own deletion
+     * missed, since a group being dismantled removes its evidence/SOS rows immediately via
+     * GroupRepository — this is the backstop, not the primary path for that case).
+     */
+    suspend fun pruneExpired() {
+        val cutoff = System.currentTimeMillis() - CONTENT_MAX_AGE_MILLIS
+        val expiredIds = evidenceDao.idsOlderThan(cutoff)
+        for (id in expiredIds) chunkDao.deleteForEvidence(id)
+        evidenceDao.pruneOlderThan(cutoff)
+        sosDao.pruneOlderThan(cutoff)
+        seenDao.prune(System.currentTimeMillis() - SEEN_ID_MAX_AGE_MILLIS)
+        // Deliberately not pruning nicknames on the same 48h "content" cadence: unlike SOS/evidence
+        // (one-shot events from a live incident) a nickname is meant to persist for as long as
+        // you're in the group, per the requirement it stay set until explicitly changed again — it's
+        // one small row per (group, member), bounded by group size, not an unbounded event stream.
+        // deleteForGroup on group deletion (GroupRepository.dismantleGroup) is what actually clears it.
+
+        // Orphan sweep: delete any reassembled evidence file with no matching DB row left —
+        // covers both the age-expiry above and files orphaned by a group being deleted outright.
+        try {
+            val outDir = File(context.filesDir, "evidence")
+            val liveIds = evidenceDao.allIds().toSet()
+            outDir.listFiles()?.forEach { file ->
+                val id = file.nameWithoutExtension
+                if (id !in liveIds) file.delete()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "evidence file sweep failed: ${e.message}")
+        }
+    }
+}

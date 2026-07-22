@@ -1,0 +1,278 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues></ManuallySuppressedIssues>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:AddGroupScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -&gt; Unit)</ID>
+    <ID>CyclomaticComplexMethod:GroupChatScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun GroupChatScreen( groupId: String, repo: GroupRepository, meshService: MeshService?, onExpandRadar: () -&gt; Unit, onDeleted: () -&gt; Unit, )</ID>
+    <ID>CyclomaticComplexMethod:MeshFrameCodec.kt$MeshFrameCodec$fun decode(bytes: ByteArray): Frame?</ID>
+    <ID>CyclomaticComplexMethod:RelayResponder.kt$RelayResponder$suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -&gt; Unit)</ID>
+    <ID>DestructuringDeclarationWithTooManyEntries:GroupChatScreen.kt$val (sender, isMe, body, time) = when (item) { is FeedItem.Message -&gt; Quad( label(item.sos.senderId, item.sos.senderIsMe), item.sos.senderIsMe, item.sos.message, item.sos.timestamp ) is FeedItem.File -&gt; Quad( label(item.evidence.senderId, item.evidence.senderIsMe), item.evidence.senderIsMe, if (item.evidence.complete) "File received — tap to view" else "Receiving file: ${item.receivedChunks} / ${item.evidence.totalChunks} chunks", item.evidence.timestamp ) }</ID>
+    <ID>EmptyElseBlock:MeshFrameCodec.kt$MeshFrameCodec$if (n == 0) return null</ID>
+    <ID>FunctionNaming:AddGroupScreen.kt$@Composable private fun ModeToggle(mode: Mode, onChange: (Mode) -&gt; Unit)</ID>
+    <ID>FunctionNaming:AddGroupScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -&gt; Unit)</ID>
+    <ID>FunctionNaming:GroupChatScreen.kt$@Composable private fun FeedRow(item: FeedItem, groupColor: Color, nicknameMap: Map&lt;String, String&gt;)</ID>
+    <ID>FunctionNaming:GroupChatScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun GroupChatScreen( groupId: String, repo: GroupRepository, meshService: MeshService?, onExpandRadar: () -&gt; Unit, onDeleted: () -&gt; Unit, )</ID>
+    <ID>FunctionNaming:HomeScreen.kt$@Composable private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -&gt; Unit)</ID>
+    <ID>FunctionNaming:HomeScreen.kt$@Composable private fun PowerSaverRow(meshService: MeshService?)</ID>
+    <ID>FunctionNaming:HomeScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun HomeScreen( repo: GroupRepository, meshService: MeshService?, onAddGroup: () -&gt; Unit, onOpenGroup: (String) -&gt; Unit, onGeneralSos: () -&gt; Unit, )</ID>
+    <ID>FunctionNaming:MainActivity.kt$@Composable fun AppNavHost( repo: GroupRepository, meshService: MeshService?, pendingJoinCode: String?, onJoinCodeConsumed: () -&gt; Unit, pendingOpenGroupId: String? = null, onOpenGroupIdConsumed: () -&gt; Unit = {}, )</ID>
+    <ID>FunctionNaming:MainActivity.kt$@Composable fun PermissionGate(permanentlyDenied: Boolean, onRequest: () -&gt; Unit)</ID>
+    <ID>FunctionNaming:NavigateScreen.kt$@Composable private fun HopFallback(groupHop: Int, sosHop: Int)</ID>
+    <ID>FunctionNaming:NavigateScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun NavigateScreen(groupId: String, meshService: MeshService?)</ID>
+    <ID>FunctionNaming:QrCode.kt$@Composable fun QrCodeCard(content: String, modifier: Modifier = Modifier, sizeDp: Dp = 180.dp)</ID>
+    <ID>FunctionNaming:QrScannerScreen.kt$@Composable fun QrScannerScreen(onScanned: (String) -&gt; Unit, onDismiss: () -&gt; Unit)</ID>
+    <ID>FunctionNaming:RadarView.kt$@Composable fun BluetoothOffNotice(modifier: Modifier = Modifier, sizeDp: Dp = 260.dp)</ID>
+    <ID>FunctionNaming:RadarView.kt$@Composable fun RadarCanvas(dots: List&lt;RadarDot&gt;, headingDegrees: Float, modifier: Modifier = Modifier, sizeDp: Dp = 260.dp)</ID>
+    <ID>FunctionNaming:SosComposeScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: () -&gt; Unit)</ID>
+    <ID>FunctionNaming:Theme.kt$@Composable fun AppTheme(content: @Composable () -&gt; Unit)</ID>
+    <ID>LongMethod:AddGroupScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -&gt; Unit)</ID>
+    <ID>LongMethod:GroupChatScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun GroupChatScreen( groupId: String, repo: GroupRepository, meshService: MeshService?, onExpandRadar: () -&gt; Unit, onDeleted: () -&gt; Unit, )</ID>
+    <ID>LongMethod:HomeScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun HomeScreen( repo: GroupRepository, meshService: MeshService?, onAddGroup: () -&gt; Unit, onOpenGroup: (String) -&gt; Unit, onGeneralSos: () -&gt; Unit, )</ID>
+    <ID>LongMethod:MeshFrameCodec.kt$MeshFrameCodec$fun decode(bytes: ByteArray): Frame?</ID>
+    <ID>LongMethod:NavigateScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun NavigateScreen(groupId: String, meshService: MeshService?)</ID>
+    <ID>LongMethod:QrScannerScreen.kt$@Composable fun QrScannerScreen(onScanned: (String) -&gt; Unit, onDismiss: () -&gt; Unit)</ID>
+    <ID>LongMethod:RadarView.kt$@Composable fun RadarCanvas(dots: List&lt;RadarDot&gt;, headingDegrees: Float, modifier: Modifier = Modifier, sizeDp: Dp = 260.dp)</ID>
+    <ID>LongMethod:RelayResponder.kt$RelayResponder$suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -&gt; Unit)</ID>
+    <ID>LongMethod:SosComposeScreen.kt$@OptIn(ExperimentalMaterial3Api::class) @Composable fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: () -&gt; Unit)</ID>
+    <ID>LongParameterList:MainActivity.kt$( repo: GroupRepository, meshService: MeshService?, pendingJoinCode: String?, onJoinCodeConsumed: () -&gt; Unit, pendingOpenGroupId: String? = null, onOpenGroupIdConsumed: () -&gt; Unit = {}, )</ID>
+    <ID>LongParameterList:MeshFrameCodec.kt$MeshFrameCodec$( groupId: String, key: ByteArray, senderId: String, lat: Double, lon: Double, accuracyM: Int, timestampSec: Long, hop: Int )</ID>
+    <ID>LongParameterList:MeshFrameCodec.kt$MeshFrameCodec$( id: String, groupId: String, senderId: String, timestamp: Long, sha256Hex: String, totalChunks: Int, mimeType: String )</ID>
+    <ID>LongParameterList:PositionTracker.kt$PositionTracker$(groupId: String, senderId: String, lat: Double, lon: Double, accuracyM: Int, timestampSec: Long, hop: Int)</ID>
+    <ID>LongParameterList:RadarView.kt$( meLat: Double, meLon: Double, meAccuracyM: Float, peerLat: Double, peerLon: Double, peerAccuracyM: Int, headingDegrees: Float, )</ID>
+    <ID>LoopWithTooManyJumpStatements:RelayResponder.kt$RelayResponder$for</ID>
+    <ID>MagicNumber:BeaconRadio.kt$BeaconRadio$3</ID>
+    <ID>MagicNumber:BeaconRadio.kt$BeaconRadio$3000</ID>
+    <ID>MagicNumber:BeaconRadio.kt$BeaconRadio.Companion$0xFF</ID>
+    <ID>MagicNumber:BeaconRadio.kt$BeaconRadio.Companion$4</ID>
+    <ID>MagicNumber:CompassTracker.kt$CompassTracker$360.0</ID>
+    <ID>MagicNumber:CompassTracker.kt$CompassTracker$5</ID>
+    <ID>MagicNumber:CompassTracker.kt$CompassTracker.&lt;no name provided&gt;$3</ID>
+    <ID>MagicNumber:CompassTracker.kt$CompassTracker.&lt;no name provided&gt;$360f</ID>
+    <ID>MagicNumber:CompassTracker.kt$CompassTracker.&lt;no name provided&gt;$9</ID>
+    <ID>MagicNumber:CryptoUtils.kt$CryptoUtils$1000</ID>
+    <ID>MagicNumber:GroupChatScreen.kt$1000</ID>
+    <ID>MagicNumber:GroupChatScreen.kt$2000</ID>
+    <ID>MagicNumber:GroupChatScreen.kt$8</ID>
+    <ID>MagicNumber:HomeScreen.kt$0xFF3A4149</ID>
+    <ID>MagicNumber:HomeScreen.kt$1000</ID>
+    <ID>MagicNumber:HomeScreen.kt$50</ID>
+    <ID>MagicNumber:JoinCode.kt$JoinCode$0xFF</ID>
+    <ID>MagicNumber:JoinCode.kt$JoinCode$16</ID>
+    <ID>MagicNumber:JoinCode.kt$JoinCode$255</ID>
+    <ID>MagicNumber:LocationTracker.kt$LocationTracker$5f</ID>
+    <ID>MagicNumber:LocationTracker.kt$LocationTracker$8000L</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$0xFF</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$0xFFFF</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$16</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$1e7</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$255</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$32</ID>
+    <ID>MagicNumber:MeshFrameCodec.kt$MeshFrameCodec$4</ID>
+    <ID>MagicNumber:MeshGattClient.kt$MeshGattClient$15_000L</ID>
+    <ID>MagicNumber:MeshGattClient.kt$MeshGattClient$3</ID>
+    <ID>MagicNumber:MeshGattClient.kt$MeshGattClient$45_000L</ID>
+    <ID>MagicNumber:MeshGattClient.kt$MeshGattClient$500</ID>
+    <ID>MagicNumber:MeshGattClient.kt$MeshGattClient.&lt;no name provided&gt;$517</ID>
+    <ID>MagicNumber:MeshProtocol.kt$HopTracker$90_000L</ID>
+    <ID>MagicNumber:MeshProtocol.kt$MeshProtocol$0xFF</ID>
+    <ID>MagicNumber:MeshProtocol.kt$MeshProtocol$255</ID>
+    <ID>MagicNumber:MeshProtocol.kt$MeshProtocol$7</ID>
+    <ID>MagicNumber:MeshProtocol.kt$MeshProtocol$8</ID>
+    <ID>MagicNumber:MeshService.kt$MeshService$1000L</ID>
+    <ID>MagicNumber:MeshService.kt$MeshService$30</ID>
+    <ID>MagicNumber:MeshService.kt$MeshService$60</ID>
+    <ID>MagicNumber:NavigateScreen.kt$1000</ID>
+    <ID>MagicNumber:NavigateScreen.kt$8</ID>
+    <ID>MagicNumber:PeerDeliveryTracker.kt$PeerDeliveryTracker.&lt;no name provided&gt;$0.75f</ID>
+    <ID>MagicNumber:PeerDeliveryTracker.kt$PeerDeliveryTracker.&lt;no name provided&gt;$16</ID>
+    <ID>MagicNumber:PositionTracker.kt$PositionTracker$1000</ID>
+    <ID>MagicNumber:PositionTracker.kt$PositionTracker$90L</ID>
+    <ID>MagicNumber:QrCode.kt$512</ID>
+    <ID>MagicNumber:QrScannerScreen.kt$0.6f</ID>
+    <ID>MagicNumber:QrScannerScreen.kt$50</ID>
+    <ID>MagicNumber:RadarView.kt$0.3</ID>
+    <ID>MagicNumber:RadarView.kt$0.4</ID>
+    <ID>MagicNumber:RadarView.kt$0.5f</ID>
+    <ID>MagicNumber:RadarView.kt$0.75f</ID>
+    <ID>MagicNumber:RadarView.kt$0.85f</ID>
+    <ID>MagicNumber:RadarView.kt$0xFF34D399</ID>
+    <ID>MagicNumber:RadarView.kt$0xFF6B7580</ID>
+    <ID>MagicNumber:RadarView.kt$1000.0</ID>
+    <ID>MagicNumber:RadarView.kt$12f</ID>
+    <ID>MagicNumber:RadarView.kt$14f</ID>
+    <ID>MagicNumber:RadarView.kt$180</ID>
+    <ID>MagicNumber:RadarView.kt$18f</ID>
+    <ID>MagicNumber:RadarView.kt$2.5</ID>
+    <ID>MagicNumber:RadarView.kt$20</ID>
+    <ID>MagicNumber:RadarView.kt$200</ID>
+    <ID>MagicNumber:RadarView.kt$270</ID>
+    <ID>MagicNumber:RadarView.kt$3</ID>
+    <ID>MagicNumber:RadarView.kt$360</ID>
+    <ID>MagicNumber:RadarView.kt$360f</ID>
+    <ID>MagicNumber:RadarView.kt$3f</ID>
+    <ID>MagicNumber:RadarView.kt$4</ID>
+    <ID>MagicNumber:RadarView.kt$40</ID>
+    <ID>MagicNumber:RadarView.kt$40.0</ID>
+    <ID>MagicNumber:RadarView.kt$4000</ID>
+    <ID>MagicNumber:RadarView.kt$45</ID>
+    <ID>MagicNumber:RadarView.kt$5f</ID>
+    <ID>MagicNumber:RadarView.kt$6f</ID>
+    <ID>MagicNumber:RadarView.kt$7f</ID>
+    <ID>MagicNumber:RadarView.kt$80</ID>
+    <ID>MagicNumber:RadarView.kt$8f</ID>
+    <ID>MagicNumber:RadarView.kt$90</ID>
+    <ID>MagicNumber:RelayResponder.kt$RelayResponder$1000</ID>
+    <ID>MagicNumber:RelayResponder.kt$RelayResponder$15</ID>
+    <ID>MagicNumber:RelayResponder.kt$RelayResponder$150</ID>
+    <ID>MagicNumber:RelayResponder.kt$RelayResponder$4</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF0A0D10</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF14181C</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF1C2126</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF22D3EE</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF34D399</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF38BDF8</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF818CF8</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFF8B95A1</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFC084FC</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFD6A77A</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFEDEFF1</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFEF4444</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFF472B6</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFF59E0B</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFFB7185</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFFB923C</ID>
+    <ID>MagicNumber:Theme.kt$AppColors$0xFFFBBF24</ID>
+    <ID>MatchingDeclarationName:Theme.kt$AppColors</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$"Share this so others can join the same group. Anyone with this code — pasted, read aloud, scanned, or sent as a link — is in."</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(AppColors.Surface).padding(18.dp)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Row</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Text("Group created", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Text("Name your group — this is just a label, shown to whoever joins.", style = MaterialTheme.typography.bodyMedium, color = AppColors.OnSurfaceMuted)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Text("Paste a code or link someone shared with you, or scan their QR code.", style = MaterialTheme.typography.bodyMedium, color = AppColors.OnSurfaceMuted)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Text(generatedCode ?: "", style = MaterialTheme.typography.bodyMedium, color = AppColors.OnSurface)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$Text(label, color = if (selected) Color.White else AppColors.OnSurfaceMuted, style = MaterialTheme.typography.labelLarge)</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$val</ID>
+    <ID>MaxLineLength:AddGroupScreen.kt$val hasCamera = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED</ID>
+    <ID>MaxLineLength:BeaconRadio.kt$BeaconRadio$ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GENERIC, ByteArray(MeshProtocol.ROTATING_ID_LEN), MeshProtocol.UNKNOWN_HOP, "generic")</ID>
+    <ID>MaxLineLength:BeaconRadio.kt$BeaconRadio$ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, "${g.id}:${rid.toHex()}:$sHop")</ID>
+    <ID>MaxLineLength:BeaconRadio.kt$BeaconRadio$private</ID>
+    <ID>MaxLineLength:CryptoUtils.kt$CryptoUtils$fun</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$"Any member can generate this — it's not tied to whoever originally created the group, so the group still works even if they're gone."</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$"Shown to this group only — you can use a different name in each group. Leave blank to just show as a short id."</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$)</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$.</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time)), style = MaterialTheme.typography.labelSmall, color = AppColors.OnSurfaceMuted)</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$Text(sender, style = MaterialTheme.typography.labelMedium, color = groupColor, fontWeight = FontWeight.SemiBold)</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$TextButton(onClick = { clipboard.setText(AnnotatedString(JoinCode.shareLink(inviteCode ?: ""))) }) { Text("Copy link") }</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$if (item.evidence.complete) "File received — tap to view" else "Receiving file: ${item.receivedChunks} / ${item.evidence.totalChunks} chunks"</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$radarDots</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$text = { Text("Removes this group, its key, and its messages/files from your device. Doesn't affect copies already relayed to others.") }</ID>
+    <ID>MaxLineLength:GroupChatScreen.kt$val</ID>
+    <ID>MaxLineLength:HomeScreen.kt$placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)</ID>
+    <ID>MaxLineLength:MainActivity.kt$MainActivity$Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", packageName, null))</ID>
+    <ID>MaxLineLength:MainActivity.kt$MainActivity$pendingOpenGroupId = pendingOpenGroupId</ID>
+    <ID>MaxLineLength:MainActivity.kt$MainActivity.&lt;no name provided&gt;$service.setForegroundActive(isStarted)</ID>
+    <ID>MaxLineLength:MainActivity.kt$Text("This needs Bluetooth to find nearby group members over the mesh, and location for the GPS radar screen. Positions are never stored — only kept in memory for a couple of minutes.")</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$for (i in b.indices) { val v = b[i].toInt() and 0xFF; out[i * 2] = HEX[v ushr 4]; out[i * 2 + 1] = HEX[v and 0x0F] }</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$for (i in out.indices) out[i] = ((Character.digit(clean[i * 2], 16) shl 4) or Character.digit(clean[i * 2 + 1], 16)).toByte()</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$if (b == null) { writeByte(0) } else { writeByte(b.size.coerceAtMost(255)); write(b, 0, b.size.coerceAtMost(255)) }</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$private fun ByteBuffer.readBlob(): ByteArray?</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$private fun ByteBuffer.readStr(): String</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$private fun ByteBuffer.readStr16(): String</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec$private fun ByteBuffer.readStr16Bytes(): ByteArray</ID>
+    <ID>MaxLineLength:MeshFrameCodec.kt$MeshFrameCodec.Frame.Presence$data</ID>
+    <ID>MaxLineLength:MeshGattClient.kt$MeshGattClient$private</ID>
+    <ID>MaxLineLength:MeshGattClient.kt$MeshGattClient.&lt;no name provided&gt;$override</ID>
+    <ID>MaxLineLength:MeshGattClient.kt$MeshGattClient.&lt;no name provided&gt;$responder.handleIncoming(characteristic.value, address) { respBytes -&gt; write(gatt, characteristic, respBytes) }</ID>
+    <ID>MaxLineLength:MeshGattServer.kt$MeshGattServer$private</ID>
+    <ID>MaxLineLength:MeshGattServer.kt$MeshGattServer.&lt;no name provided&gt;$responder.handleIncoming(value, device.address) { respBytes -&gt; notify(device, characteristic, respBytes) }</ID>
+    <ID>MaxLineLength:MeshService.kt$MeshService$suspend</ID>
+    <ID>MaxLineLength:NavigateScreen.kt$"Compass confidence is low — move away from metal, or wave the phone in a figure-8 to recalibrate."</ID>
+    <ID>MaxLineLength:NavigateScreen.kt$Text("Active SOS: $sosHop hop(s) away", color = AppColors.Danger, style = MaterialTheme.typography.titleMedium)</ID>
+    <ID>MaxLineLength:NavigateScreen.kt$Text("Hold the phone flat — dots show which way to walk.", style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)</ID>
+    <ID>MaxLineLength:NavigateScreen.kt$if (groupHop == MeshProtocol.UNKNOWN_HOP) "No group member in range yet" else "$groupHop hop(s) to nearest group member"</ID>
+    <ID>MaxLineLength:NavigateScreen.kt$style = MaterialTheme.typography.bodySmall</ID>
+    <ID>MaxLineLength:PositionTracker.kt$PositionTracker$fun</ID>
+    <ID>MaxLineLength:RadarMathTest.kt$RadarMathTest$val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 100f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 49, headingDegrees = 0f)</ID>
+    <ID>MaxLineLength:RadarMathTest.kt$RadarMathTest$val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 100f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 50, headingDegrees = 0f)</ID>
+    <ID>MaxLineLength:RadarMathTest.kt$RadarMathTest$val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 200f, peerLat = 0.0, peerLon = 0.0, peerAccuracyM = 200, headingDegrees = 0f)</ID>
+    <ID>MaxLineLength:RadarMathTest.kt$RadarMathTest$val p = placePeerOnRadar(meLat = 0.0, meLon = 0.0, meAccuracyM = 5f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 5, headingDegrees = 0f)</ID>
+    <ID>MaxLineLength:RadarView.kt$drawCircle(color = Color.White.copy(alpha = 0.25f), radius = 10f, center = center, style = Stroke(width = 1f))</ID>
+    <ID>MaxLineLength:RadarView.kt$drawCircle(color = GlowGreen.copy(alpha = 0.06f), radius = r, center = center, style = Stroke(width = 7f))</ID>
+    <ID>MaxLineLength:RadarView.kt$drawCircle(color = GlowGreen.copy(alpha = 0.35f), radius = r, center = center, style = Stroke(width = 1.4f))</ID>
+    <ID>MaxLineLength:RadarView.kt$drawLine(GlowGreen.copy(alpha = 0.25f), Offset(center.x - maxRadius, center.y), Offset(center.x + maxRadius, center.y), strokeWidth = 1f)</ID>
+    <ID>MaxLineLength:RadarView.kt$drawLine(GlowGreen.copy(alpha = 0.25f), Offset(center.x, center.y - maxRadius), Offset(center.x, center.y + maxRadius), strokeWidth = 1f)</ID>
+    <ID>MaxLineLength:RadarView.kt$val inner = Offset(center.x + (maxRadius - 8f) * cos(rad).toFloat(), center.y + (maxRadius - 8f) * sin(rad).toFloat())</ID>
+    <ID>MaxLineLength:RadarView.kt$val outer = Offset(center.x + (maxRadius + 6f) * cos(rad).toFloat(), center.y + (maxRadius + 6f) * sin(rad).toFloat())</ID>
+    <ID>MaxLineLength:RelayEngine.kt$RelayEngine$evidenceDao.insert(meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null))</ID>
+    <ID>MaxLineLength:RelayEngine.kt$RelayEngine$suspend</ID>
+    <ID>MaxLineLength:RelayEngine.kt$RelayEngine$val mac = CryptoUtils.authTag(key, MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType))</ID>
+    <ID>MaxLineLength:RelayEngine.kt$RelayEngine$val mac = key?.let { CryptoUtils.authTag(it, MeshFrameCodec.sosMacInput(id, groupId, senderId, text, timestamp)) }</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$CryptoUtils.authTag(key, MeshFrameCodec.presenceMacInput(frame.groupId, frame.senderId, frame.timestamp))</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$MeshFrameCodec.evidMacInput(frame.meta.id, frame.meta.groupId, frame.meta.senderId, frame.meta.timestamp, frame.meta.sha256, frame.meta.totalChunks, frame.meta.mimeType)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$MeshFrameCodec.nicknameMacInput(frame.nickname.groupId, frame.nickname.senderId, frame.nickname.username, frame.nickname.updatedAt)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$MeshFrameCodec.sosMacInput(frame.sos.id, frame.sos.groupId, frame.sos.senderId, frame.sos.message, frame.sos.timestamp)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$frames += PushFrame(MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id)), null)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$frames += PushFrame(MeshFrameCodec.encodePresence(g.id, repo.deviceId, System.currentTimeMillis(), key), null)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$groupId</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$if (!deliveryTracker.alreadyDelivered(peerAddress, itemKey)) frames += PushFrame(MeshFrameCodec.encodeEvidMeta(meta), itemKey)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$if (!deliveryTracker.alreadyDelivered(peerAddress, itemKey)) frames += PushFrame(MeshFrameCodec.encodeNickname(n), itemKey)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$if (!deliveryTracker.alreadyDelivered(peerAddress, itemKey)) frames += PushFrame(MeshFrameCodec.encodeSos(sos), itemKey)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$positionTracker.offer(frame.groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, body.hop)</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$relay.ingestChunk(EvidenceChunkEntity(frame.chunk.evidenceId, frame.chunk.chunkIndex, frame.chunk.data))</ID>
+    <ID>MaxLineLength:RelayResponder.kt$RelayResponder$respond(MeshFrameCodec.encodeManifest(frame.meta.id, frame.meta.totalChunks, relay.haveIndexSet(frame.meta.id)))</ID>
+    <ID>NestedBlockDepth:RelayResponder.kt$RelayResponder$suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -&gt; Unit)</ID>
+    <ID>ReturnCount:ConnectionAttemptTracker.kt$ConnectionAttemptTracker$fun canAttempt(address: String): Boolean</ID>
+    <ID>ReturnCount:GroupRepository.kt$GroupRepository$suspend fun getShareCode(groupId: String): String?</ID>
+    <ID>ReturnCount:MeshFrameCodec.kt$MeshFrameCodec$fun decode(bytes: ByteArray): Frame?</ID>
+    <ID>ReturnCount:MeshGattServer.kt$MeshGattServer$@SuppressLint("MissingPermission") private suspend fun pushOnConnect(device: BluetoothDevice)</ID>
+    <ID>ReturnCount:MeshProtocol.kt$HopTracker$fun myHop(groupId: String, target: String): Int</ID>
+    <ID>ReturnCount:RelayEngine.kt$RelayEngine$private suspend fun maybeReassemble(evidenceId: String)</ID>
+    <ID>ReturnCount:RelayResponder.kt$RelayResponder$suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -&gt; Unit)</ID>
+    <ID>SwallowedException:CryptoUtils.kt$CryptoUtils$e: Exception</ID>
+    <ID>SwallowedException:GattOperationQueue.kt$GattOperationQueue$e: Exception</ID>
+    <ID>SwallowedException:GroupChatScreen.kt$e: Exception</ID>
+    <ID>SwallowedException:JoinCode.kt$JoinCode$e: Exception</ID>
+    <ID>SwallowedException:MeshFrameCodec.kt$MeshFrameCodec$e: Exception</ID>
+    <ID>SwallowedException:MeshGattClient.kt$MeshGattClient$e: Exception</ID>
+    <ID>SwallowedException:MeshGattServer.kt$MeshGattServer$e: Exception</ID>
+    <ID>SwallowedException:QrCode.kt$e: Exception</ID>
+    <ID>SwallowedException:QrScannerScreen.kt$e: Exception</ID>
+    <ID>SwallowedException:QrScannerScreen.kt$e: NotFoundException</ID>
+    <ID>TooGenericExceptionCaught:BeaconRadio.kt$BeaconRadio$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:CryptoUtils.kt$CryptoUtils$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:GattOperationQueue.kt$GattOperationQueue$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:GroupChatScreen.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:JoinCode.kt$JoinCode$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:MeshFrameCodec.kt$MeshFrameCodec$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:MeshGattClient.kt$MeshGattClient$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:MeshGattServer.kt$MeshGattServer$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:QrCode.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:QrScannerScreen.kt$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RelayEngine.kt$RelayEngine$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:RelayResponder.kt$RelayResponder$e: Exception</ID>
+    <ID>TooManyFunctions:MeshFrameCodec.kt$MeshFrameCodec</ID>
+    <ID>TooManyFunctions:MeshService.kt$MeshService : Service</ID>
+    <ID>TooManyFunctions:RelayEngine.kt$RelayEngine</ID>
+    <ID>WildcardImport:AddGroupScreen.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:AddGroupScreen.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:AddGroupScreen.kt$import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:GroupChatScreen.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:GroupChatScreen.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:GroupChatScreen.kt$import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:HomeScreen.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:HomeScreen.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:HomeScreen.kt$import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:MainActivity.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:MainActivity.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:MainActivity.kt$import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:NavigateScreen.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:NavigateScreen.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:NavigateScreen.kt$import androidx.compose.runtime.*</ID>
+    <ID>WildcardImport:SosComposeScreen.kt$import androidx.compose.foundation.layout.*</ID>
+    <ID>WildcardImport:SosComposeScreen.kt$import androidx.compose.material3.*</ID>
+    <ID>WildcardImport:SosComposeScreen.kt$import androidx.compose.runtime.*</ID>
+  </CurrentIssues>
+</SmellBaseline>

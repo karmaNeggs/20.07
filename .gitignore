@@ -1,0 +1,24 @@
+# Local machine config — contains local SDK path, never commit
+local.properties
+
+# Build outputs
+*/build/
+build/
+.gradle/
+*.apk
+*.aab
+# ...except the intentionally-committed release APK(s) — see README "Get the app".
+!releases/*.apk
+
+# Signing (none exist yet, but never commit if they do)
+*.jks
+*.keystore
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Kotlin/Java
+*.class
+*.log
