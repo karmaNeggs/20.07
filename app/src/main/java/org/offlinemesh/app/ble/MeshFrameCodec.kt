@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Encodes/decodes the application-level frames exchanged over the GATT relay characteristic —
@@ -33,6 +34,13 @@ object MeshFrameCodec {
     const val FRAME_POSITION: Byte = 0x15   // AES-GCM-sealed live position — latest-wins, never persisted
     const val FRAME_NICKNAME: Byte = 0x16   // per-group display name + auth tag, latest-updatedAt-wins
     const val FRAME_PRESENCE: Byte = 0x17   // "an authenticated member of this group is on this connection"
+    // Bloom filter of held sos/evidence-header/nickname keys — see CatalogFilter.
+    const val FRAME_CATALOG_FILTER: Byte = 0x18
+    // WiFi Direct evidence-chunk accelerator handoff — see WifiDirectHandoffCoordinator.
+    // Experimental, opt-in, off by default; see WifiDirectAccelerator's class doc.
+    const val FRAME_WIFI_DIRECT_CAP: Byte = 0x19      // "I support WFD acceleration, opt-in is on"
+    const val FRAME_WIFI_DIRECT_HANDOFF: Byte = 0x1A  // "here's a chunk deficit worth accelerating"
+    const val FRAME_WIFI_DIRECT_ACCEPT: Byte = 0x1B   // "yes, forming the link"
 
     /** Display names are a small courtesy label, not an identity — kept short so it stays a
      *  one-line, cheap-to-relay addition rather than a second chat field. */
@@ -52,6 +60,41 @@ object MeshFrameCodec {
         /** Not stored, not relayed — a direct-neighbor heartbeat proving group co-membership over the
          *  GATT link, so presence doesn't depend solely on hearing a beacon (which can be one-way). */
         data class Presence(val groupId: String, val senderId: String, val timestamp: Long, val mac: ByteArray?) : Frame()
+        /** One filter per connection, covering ALL of the sender's current relayable sos/evidence-
+         *  header/nickname holdings across every group — see [CatalogFilter] and
+         *  [RelayResponder.handleIncoming]'s handling of this case for what the receiver does with
+         *  it (computes and pushes its own deficit against it). Not stored, not relayed. */
+        data class CatalogFilter(val seed: Long, val bits: ByteArray) : Frame()
+
+        /** "I support the WiFi Direct accelerator and my opt-in is on" — device-level, no MAC (see
+         *  [WifiDirectHandoffCoordinator]'s doc for why this carries no sensitive claim: it can
+         *  only ever cause an extra, harmless proposal attempt, never a forged transfer). */
+        data class WifiDirectCap(val version: Int) : Frame()
+
+        /** "I have a chunk deficit for this evidence item worth accelerating over WiFi Direct."
+         *  Only ever produced by a sender that holds [groupId]'s key (a blind relay can compute a
+         *  chunk deficit but can never produce a verifiable [mac] here, so a forged frame from a
+         *  non-member just fails verification and is dropped — same shape as every other authOk
+         *  failure in this codec). */
+        data class WifiDirectHandoff(
+            val evidenceId: String,
+            val groupId: String,
+            val deficitCount: Int,
+            val senderNonce: ByteArray,
+            val mac: ByteArray,
+        ) : Frame()
+
+        /** Accepts a [WifiDirectHandoff] proposal. [mac] here doubles as the handoff token
+         *  presented over the raw WFD socket — see [WifiDirectHandoffCoordinator]'s doc for why
+         *  reusing this MAC as the socket token needs no separate key-derivation step. */
+        data class WifiDirectAccept(
+            val evidenceId: String,
+            val groupId: String,
+            val senderNonce: ByteArray,
+            val receiverNonce: ByteArray,
+            val readyAtEpochMs: Long,
+            val mac: ByteArray,
+        ) : Frame()
     }
 
     /** Decrypted inner of a position frame. */
@@ -83,6 +126,31 @@ object MeshFrameCodec {
     fun presenceMacInput(groupId: String, senderId: String, timestamp: Long): ByteArray =
         build { d -> d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp) }
 
+    fun wifiDirectHandoffMacInput(
+        evidenceId: String,
+        groupId: String,
+        deficitCount: Int,
+        senderNonce: ByteArray,
+    ): ByteArray = build { d ->
+        d.writeStr(evidenceId); d.writeStr(groupId); d.writeInt(deficitCount); d.write(senderNonce)
+    }
+
+    // LongParameterList: wire-protocol fields as plain scalars, matching every other MAC-input/
+    // encode function in this file (e.g. encodePosition below already has 8) rather than
+    // introducing a DTO type just for this pair of functions.
+    @Suppress("LongParameterList")
+    fun wifiDirectAcceptMacInput(
+        evidenceId: String,
+        groupId: String,
+        senderNonce: ByteArray,
+        receiverNonce: ByteArray,
+        readyAtEpochMs: Long,
+    ): ByteArray = build { d ->
+        d.writeStr(evidenceId); d.writeStr(groupId)
+        d.write(senderNonce); d.write(receiverNonce)
+        d.writeLong(readyAtEpochMs)
+    }
+
     // ---------- encode ----------
 
     fun encodeSos(sos: SosEntity): ByteArray = frame(FRAME_SOS) { d ->
@@ -101,8 +169,39 @@ object MeshFrameCodec {
         d.writeStr(c.evidenceId); d.writeInt(c.chunkIndex); d.write(c.data)
     }
 
+    // Position frames are the one place in this app that repeatedly encrypts under a SINGLE key
+    // shared by every member of a group, for as long as that group exists (days, potentially —
+    // there's no key rotation). CryptoUtils.encrypt's random 96-bit IV is safe per NIST SP 800-38D
+    // only up to roughly 2^32 encryptions under one key before the birthday bound becomes a real
+    // (not just theoretical) collision risk — and GCM nonce reuse is catastrophic: it recovers the
+    // XOR of both plaintexts AND breaks the authentication tag's forgery resistance. A busy group
+    // over a multi-day event is the one traffic pattern in this app that could plausibly approach
+    // that ceiling, so position frames get a nonce built to never repeat instead: a 4-byte prefix
+    // derived from the sender's deviceId (stable forever, so restarts can't reuse an old prefix
+    // against an old counter) plus the message's own timestampSec (4 bytes) plus an in-process
+    // monotonic counter (4 bytes) disambiguating same-second sends. Two different senders'
+    // 4-byte deviceId-hash prefixes colliding is already a ~1-in-4-billion-per-pair event; an
+    // actual nonce collision additionally requires their timestampSec+counter to also coincide —
+    // astronomically less likely than that. No persistence needed: the counter only has to be
+    // unique *within* the current process's lifetime for a given prefix+second, and timestampSec
+    // itself is what protects against reuse *across* restarts.
+    private const val GCM_NONCE_LEN = 12 // AES-GCM's standard 96-bit nonce length, in bytes
+    private const val NONCE_PREFIX_LEN = 4 // bytes of sha256(senderId) used as the nonce's sender prefix
+    private const val NANO_TIME_SIGN_MASK = 0x7fffffffL // clears the sign bit so the seed is a non-negative Int
+    private val positionNonceCounter = AtomicInteger((System.nanoTime() and NANO_TIME_SIGN_MASK).toInt())
+
+    private fun positionNonce(senderId: String, timestampSec: Long): ByteArray {
+        val buf = ByteBuffer.allocate(GCM_NONCE_LEN)
+        buf.put(CryptoUtils.sha256(senderId.toByteArray(UTF8)), 0, NONCE_PREFIX_LEN)
+        buf.putInt(timestampSec.toInt())
+        buf.putInt(positionNonceCounter.incrementAndGet())
+        return buf.array()
+    }
+
     /** Seals the sensitive body with the group key before framing. Only a member holding the key
-     *  can produce or read this — non-members that relay it move opaque bytes. */
+     *  can produce or read this — non-members that relay it move opaque bytes. Uses a deterministic
+     *  nonce (see [positionNonce]) rather than [CryptoUtils.encrypt]'s random one — see the doc
+     *  comment above [positionNonceCounter] for why this frame type specifically needs it. */
     fun encodePosition(
         groupId: String, key: ByteArray, senderId: String, lat: Double, lon: Double,
         accuracyM: Int, timestampSec: Long, hop: Int
@@ -113,7 +212,7 @@ object MeshFrameCodec {
             d.writeByte(accuracyM.coerceIn(0, 255)); d.writeInt(timestampSec.toInt())
             d.writeByte(hop.coerceIn(0, 255))
         }
-        val sealed = CryptoUtils.encrypt(key, inner)
+        val sealed = CryptoUtils.encryptWithNonce(key, inner, positionNonce(senderId, timestampSec))
         return frame(FRAME_POSITION) { d -> d.writeStr(groupId); d.writeStr16Bytes(sealed) }
     }
 
@@ -129,6 +228,43 @@ object MeshFrameCodec {
         return frame(FRAME_PRESENCE) { d ->
             d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
         }
+    }
+
+    /** [bits] can be shorter than [CatalogFilter.SIZE_BITS] / 8 bytes (trailing-zero truncation —
+     *  see [CatalogFilter.toBits]'s doc), so this uses the 2-byte-length [writeStr16Bytes] rather
+     *  than the 1-byte [writeBlob] (which would silently truncate anything over 255 bytes). */
+    fun encodeCatalogFilter(seed: Long, bits: ByteArray): ByteArray = frame(FRAME_CATALOG_FILTER) { d ->
+        d.writeLong(seed); d.writeStr16Bytes(bits)
+    }
+
+    fun encodeWifiDirectCap(version: Int): ByteArray = frame(FRAME_WIFI_DIRECT_CAP) { d ->
+        d.writeByte(version.coerceIn(0, 255))
+    }
+
+    @Suppress("LongParameterList") // see wifiDirectAcceptMacInput's identical suppress above for why
+    fun encodeWifiDirectHandoff(
+        evidenceId: String,
+        groupId: String,
+        deficitCount: Int,
+        senderNonce: ByteArray,
+        mac: ByteArray,
+    ): ByteArray = frame(FRAME_WIFI_DIRECT_HANDOFF) { d ->
+        d.writeStr(evidenceId); d.writeStr(groupId)
+        d.writeInt(deficitCount); d.writeBlob(senderNonce); d.writeBlob(mac)
+    }
+
+    @Suppress("LongParameterList") // see wifiDirectAcceptMacInput's identical suppress above for why
+    fun encodeWifiDirectAccept(
+        evidenceId: String,
+        groupId: String,
+        senderNonce: ByteArray,
+        receiverNonce: ByteArray,
+        readyAtEpochMs: Long,
+        mac: ByteArray,
+    ): ByteArray = frame(FRAME_WIFI_DIRECT_ACCEPT) { d ->
+        d.writeStr(evidenceId); d.writeStr(groupId)
+        d.writeBlob(senderNonce); d.writeBlob(receiverNonce)
+        d.writeLong(readyAtEpochMs); d.writeBlob(mac)
     }
 
     fun encodeManifest(evidenceId: String, totalChunks: Int, have: Set<Int>): ByteArray {
@@ -210,6 +346,30 @@ object MeshFrameCodec {
                     val groupId = buf.readStr(); val senderId = buf.readStr()
                     val timestamp = buf.long; val mac = buf.readBlob()
                     Frame.Presence(groupId, senderId, timestamp, mac)
+                }
+                FRAME_CATALOG_FILTER -> {
+                    val seed = buf.long
+                    val bits = buf.readStr16Bytes()
+                    Frame.CatalogFilter(seed, bits)
+                }
+                FRAME_WIFI_DIRECT_CAP -> {
+                    val capVersion = buf.get().toInt() and 0xFF
+                    Frame.WifiDirectCap(capVersion)
+                }
+                FRAME_WIFI_DIRECT_HANDOFF -> {
+                    val evidenceId = buf.readStr(); val groupId = buf.readStr()
+                    val deficitCount = buf.int
+                    val senderNonce = buf.readBlob() ?: return null
+                    val mac = buf.readBlob() ?: return null
+                    Frame.WifiDirectHandoff(evidenceId, groupId, deficitCount, senderNonce, mac)
+                }
+                FRAME_WIFI_DIRECT_ACCEPT -> {
+                    val evidenceId = buf.readStr(); val groupId = buf.readStr()
+                    val senderNonce = buf.readBlob() ?: return null
+                    val receiverNonce = buf.readBlob() ?: return null
+                    val readyAtEpochMs = buf.long
+                    val mac = buf.readBlob() ?: return null
+                    Frame.WifiDirectAccept(evidenceId, groupId, senderNonce, receiverNonce, readyAtEpochMs, mac)
                 }
                 else -> null
             }

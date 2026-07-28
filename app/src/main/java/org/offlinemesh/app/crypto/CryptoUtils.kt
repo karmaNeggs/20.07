@@ -46,12 +46,25 @@ object CryptoUtils {
         }
     }
 
+    // Shared across the process, not per-call — SecureRandom is safe for concurrent use and
+    // reconstructing it (and re-seeding from the OS entropy pool) on every single encrypt() call
+    // was pure waste on a path evidence chunking can call thousands of times for one large file.
+    private val secureRandom = SecureRandom()
+
     fun encrypt(key: ByteArray, plaintext: ByteArray): ByteArray {
-        val iv = ByteArray(GCM_IV_LEN).also { SecureRandom().nextBytes(it) }
+        val iv = ByteArray(GCM_IV_LEN).also { secureRandom.nextBytes(it) }
+        return encryptWithNonce(key, plaintext, iv)
+    }
+
+    /** Same construction as [encrypt] but takes an explicit 12-byte nonce instead of drawing one
+     *  from [SecureRandom] — see [org.offlinemesh.app.ble.MeshFrameCodec.encodePosition] for why
+     *  position frames need this instead of the random-IV path. */
+    fun encryptWithNonce(key: ByteArray, plaintext: ByteArray, nonce: ByteArray): ByteArray {
+        require(nonce.size == GCM_IV_LEN) { "nonce must be $GCM_IV_LEN bytes" }
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_LEN_BITS, iv))
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(key, "AES"), GCMParameterSpec(GCM_TAG_LEN_BITS, nonce))
         val ct = cipher.doFinal(plaintext)
-        return iv + ct
+        return nonce + ct
     }
 
     fun decrypt(key: ByteArray, blob: ByteArray): ByteArray? {
@@ -66,8 +79,9 @@ object CryptoUtils {
         }
     }
 
-    fun sha256Hex(bytes: ByteArray): String =
-        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+    fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    fun sha256Hex(bytes: ByteArray): String = sha256(bytes).joinToString("") { "%02x".format(it) }
 
     private const val MAC_TAG_LEN = 16
 

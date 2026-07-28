@@ -17,6 +17,7 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import org.offlinemesh.app.R
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -65,6 +66,12 @@ class MeshService : Service() {
     private lateinit var beaconRadio: BeaconRadio
     private lateinit var gattServer: MeshGattServer
     private lateinit var gattClient: MeshGattClient
+    // A class field (not a local val in onCreate, which it started as) specifically so
+    // setMeshActive(false) can reach it — a WFD transfer that happens to be mid-flight (socket
+    // open, group formed) the moment "Offline" is flipped on would otherwise keep running in the
+    // background, silently breaking that toggle's "no radio activity" promise. Found by an
+    // automated regression scan of this session's changes, fixed here rather than left as a gap.
+    private lateinit var wifiDirectAccelerator: WifiDirectAccelerator
 
     // Power tier: ACTIVE while the app is actually on-screen (favors responsiveness — you're
     // watching the radar or about to send something), RELAY the rest of the time (favors battery
@@ -81,6 +88,41 @@ class MeshService : Service() {
     fun setPowerSaverForced(forced: Boolean) { _powerSaverForced.value = forced }
     private fun currentTier(): PowerTier =
         if (_powerSaverForced.value || !foregroundActive) PowerTier.RELAY else PowerTier.ACTIVE
+
+    // User-facing "go offline" control — distinct from onDestroy: this never tears down the
+    // Service object, serviceScope, or MainActivity's binding to it, only the things that actually
+    // matter for "not discoverable, not draining battery" — both radios, the GPS/compass sensors,
+    // and the persistent notification itself. Before this existed, the ONLY way to actually stop
+    // any of that was to force-stop the app from Android Settings or uninstall — closing the app
+    // (onStop) only lowered the power tier, it never stopped anything.
+    private val _meshActive = MutableStateFlow(true)
+    val meshActive: StateFlow<Boolean> = _meshActive
+
+    /** Safe to call repeatedly / toggle back and forth — every stop()/start() this delegates to is
+     *  already idempotent and already exercised once each by onCreate/onDestroy. A GATT connection
+     *  that's already open at the moment of going offline isn't force-closed here; it idles out on
+     *  its own existing connectionIdleMs/connectionMaxMs schedule (max ~20s) — a known, small,
+     *  bounded residual rather than an instant hard stop, and not worth the extra surface of
+     *  reaching into MeshGattClient's connection bookkeeping just to shave off that last ~20s. */
+    fun setMeshActive(active: Boolean) {
+        if (active == _meshActive.value) return
+        if (active) {
+            locationTracker.start()
+            compassTracker.start()
+            gattServer.start()
+            beaconRadio.startAdvertising()
+            beaconRadio.startScanning()
+            startForegroundNotification()
+        } else {
+            beaconRadio.stop()
+            gattServer.stop()
+            locationTracker.stop()
+            compassTracker.stop()
+            wifiDirectAccelerator.abortCurrent()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+        _meshActive.value = active
+    }
 
     private var pruneJob: Job? = null
 
@@ -107,9 +149,20 @@ class MeshService : Service() {
         locationTracker = LocationTracker(applicationContext).also { it.start() }
         compassTracker = CompassTracker(applicationContext).also { it.start() }
         createSosNotificationChannel()
-        responder = RelayResponder(repo, relay, hopTracker, positionTracker, locationTracker) { sos, groupName ->
-            notifySos(sos, groupName)
-        }
+        // Experimental, opt-in (default OFF), see WifiDirectAccelerator's class doc — constructed
+        // unconditionally (cheap: WifiP2pManager.initialize just registers a callback channel, no
+        // radio activity starts) but never actually does anything unless WifiDirectSettings.
+        // isEnabled is true, checked fresh on every connection by RelayResponder.
+        wifiDirectAccelerator = WifiDirectAccelerator(applicationContext)
+        val wifiDirectCoordinator = WifiDirectHandoffCoordinator(
+            relay,
+            wifiDirectAccelerator,
+            serviceScope,
+            capabilityCheck = { WifiDirectCapabilities.supported(applicationContext) },
+        )
+        responder = RelayResponder(
+            repo, relay, hopTracker, positionTracker, locationTracker, wifiDirectCoordinator
+        ) { sos, groupName -> notifySos(sos, groupName) }
 
         gattServer = MeshGattServer(this, bluetoothManager, responder, serviceScope).also { it.start() }
         gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier)
@@ -173,13 +226,60 @@ class MeshService : Service() {
                 NotificationChannel(channelId, "Sync", NotificationManager.IMPORTANCE_MIN)
             )
         }
+        val (title, text) = decoyLabel()
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Notes")
-            .setContentText("Syncing")
-            .setSmallIcon(android.R.drawable.stat_notify_sync)
+            .setContentTitle(title)
+            .setContentText(text)
+            .setSmallIcon(decoyIconRes())
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
         startForeground(1, notification)
+    }
+
+    // A small library of plain, generic-utility-looking status icons — one is picked at random the
+    // first time this device ever shows the decoy notification, then reused every time after
+    // (stored alongside GroupRepository's own per-install deviceId, same prefs file). Deliberately
+    // NOT re-randomized on every service start: an icon that keeps changing on the SAME phone is
+    // itself a tell ("why does this one app's notification icon keep moving"). The actual
+    // anti-fingerprinting value is that DIFFERENT phones running this app show DIFFERENT icons —
+    // there's no single, greppable "the mesh app always shows icon X" signature to look for.
+    private val decoyIcons = intArrayOf(
+        R.drawable.ic_decoy_dot, R.drawable.ic_decoy_bars, R.drawable.ic_decoy_grid,
+        R.drawable.ic_decoy_check, R.drawable.ic_decoy_arrow_up, R.drawable.ic_decoy_lines,
+        R.drawable.ic_decoy_ring, R.drawable.ic_decoy_triangle,
+    )
+
+    // Same reasoning as decoyIcons, applied to the title/text pair too — a fixed "Notes"/"Syncing"
+    // string was itself a stable, greppable signature independent of which icon showed next to it
+    // (anyone building a list of "known mesh-app notification text" only needed one entry). Picked
+    // independently of the icon (not paired 1:1) for more combinations across installs.
+    private val decoyLabels = arrayOf(
+        "Notes" to "Syncing",
+        "Files" to "Backing up",
+        "Cloud" to "Syncing",
+        "System" to "Optimizing",
+        "Backup" to "In progress",
+        "Storage" to "Indexing",
+        "Updates" to "Checking",
+        "Photos" to "Backing up",
+    )
+
+    private fun decoyIconRes(): Int =
+        decoyIcons[pickOncePerInstall("decoy_icon_index", decoyIcons.size)]
+
+    private fun decoyLabel(): Pair<String, String> =
+        decoyLabels[pickOncePerInstall("decoy_label_index", decoyLabels.size)]
+
+    /** Shared by [decoyIconRes] and [decoyLabel]: picks a random index in `0 until size` the first
+     *  time this device ever needs one for [key], then reuses that same index forever after —
+     *  see [decoyIcons]'s doc for why staying stable per-install (not re-randomizing on every
+     *  service start) is what actually matters for the anti-fingerprinting goal. */
+    private fun pickOncePerInstall(key: String, size: Int): Int {
+        val prefs = getSharedPreferences("mesh_device", Context.MODE_PRIVATE)
+        val stored = prefs.getInt(key, -1)
+        return if (stored in 0 until size) stored else {
+            (0 until size).random().also { prefs.edit().putInt(key, it).apply() }
+        }
     }
 
     // ---------------- SOS alert notification ----------------

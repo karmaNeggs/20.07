@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Exposes only filesDir/evidence/ via FileProvider — nothing else in internal storage is
+     shareable, matching RelayEngine.outputFile's own naming convention exactly. -->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="evidence" path="evidence/" />
+</paths>

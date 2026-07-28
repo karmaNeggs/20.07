@@ -116,12 +116,8 @@ class MeshGattClient(
 
     private suspend fun pushOnConnect(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         val address = gatt.device.address
-        for (item in responder.framesToPushOnConnect(address)) {
-            val ok = write(gatt, characteristic, item.bytes)
-            // Only mark delivered on a confirmed successful write — an optimistic mark here would
-            // mean a write that actually failed (dropped connection mid-push, timed out, etc.) is
-            // never retried to this peer, silently losing it rather than just delaying it.
-            if (ok && item.dedupKey != null) responder.markDelivered(address, item.dedupKey)
+        for (bytes in responder.framesToPushOnConnect()) {
+            write(gatt, characteristic, bytes)
         }
         // Reaching here means we got through MTU negotiation, service discovery, and the CCCD write
         // well enough to actually offer our content — that's "synced" for cooldown purposes even if

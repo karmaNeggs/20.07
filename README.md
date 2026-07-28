@@ -7,6 +7,41 @@ No servers, no cellular/Wi-Fi internet dependency, no account.
 Built for peaceful protesters, human rights defenders, and civil society groups who need to
 coordinate and document safely during unrest, riots, or emergencies.
 
+## Why this exists
+
+Mesh messaging for exactly this situation isn't a new idea — it's been tried, adopted at real
+scale, and found broken. Bridgefy, the mesh app people were told to install during the Hong Kong
+protests, Belarus, and BLM protests in the US, was independently broken by security researchers
+twice: once in 2021 ("Mesh Messaging in Large-Scale Protests: Breaking Bridgefy," CT-RSA 2021 —
+no real encryption, users trackable, messages forgeable), and again in 2022 at USENIX Security
+("Breaking Bridgefy, again: Adopting libsignal is not enough") — *after* Bridgefy patched itself
+with Signal's own encryption library and was still broken. That's not a hypothetical risk; that's
+the exact tool real people trusted with their safety, failing at the one thing it promised, twice.
+FireChat, the other app from the same era (Hong Kong's 2014 Umbrella protests), is effectively
+discontinued. The demand for this is proven. Getting it right clearly isn't automatic.
+
+Against the current field:
+- **No accounts, ever.** One QR code creates a group. No creator, no owner, no phone number tied
+  to anyone — removing one person doesn't expose or kill the group. Briar (the most
+  security-reviewed open alternative) is contact-based instead — you add people individually, in
+  person — a different, heavier trust model built for one-to-one activist/journalist contact, not
+  fast ad-hoc group coordination in a crowd.
+- **Every phone that isn't in your group still carries your traffic — but can't read it.** Not
+  "encrypted so please don't," architecturally opaque to a non-member relay.
+- **The BLE identifier itself rotates every 60 seconds.** Even
+  [bitchat](https://github.com/permissionlesstech/bitchat) — the most technically serious
+  open-source mesh chat app as of this writing — documents in its own protocol whitepaper that its
+  on-air peer ID *never* rotates, and names that its own biggest unresolved privacy weakness.
+- **GPS lives in memory only**, never touches disk, gone the instant the app is force-quit.
+- **Evidence photos are relayed across the mesh as they're captured** — copies exist on other
+  members' phones before any single device stops being available.
+- Meshtastic and goTenna solve a related but different problem (long-range off-grid comms) with
+  *dedicated hardware radios* — not something everyone in a crowd already has in their pocket.
+
+Nobody else currently bundles all of this into one purpose-built kit. See Security model below for
+exactly what this app's own design does *not* protect against — the same plain-spoken standard
+applied to everyone above.
+
 ## What it does (3 features, on purpose — nothing else)
 
 1. **Navigate** — a forward-up radar: your group members show up as dots at their real bearing
@@ -162,9 +197,9 @@ where it matters:
   changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, see below),
   not the installed package name, requested permissions, or its presence in Android
   Settings → Apps — anyone who knows to check there will find it regardless of which launcher
-  identity is active. It's also currently **scaffolded but not wired to an in-app toggle**
-  (switching identities today means enabling/disabling the two `activity-alias` entries via
-  `adb`, not a button in the app).
+  identity is active. A "Disguise app icon" switch on the Home screen flips it (`AppIdentity.kt`);
+  the notification icon shown while the mesh service runs is independently randomized per install
+  from a small library of plain, generic-looking icons, so it isn't the same on every phone either.
 - **Clipboard copies of a join code/link are marked sensitive (`EXTRA_IS_SENSITIVE`, Android 13+)**
   so the OS should skip clipboard history and cross-device sync for them — but that flag is
   advisory, ignored entirely on older Android, and not guaranteed to be honored by every keyboard
@@ -195,17 +230,51 @@ where it matters:
   service and asks once for a battery-optimization exemption, but aggressive OEM battery
   managers (common on some manufacturers) are known to kill foreground services regardless of
   correct API usage — there is no code-level guarantee against this, only the standard mitigation.
-- **The release build is compile-verified and unit-test-verified only, not yet run end-to-end on
-  a physical device.** R8 minification is on for release builds (~90% smaller than debug); that's
-  a large enough surface of change to warrant its own device test pass before you trust it, not
-  an assumption that "it compiled" means "it works."
+- **The release build has no signing config and is currently unsigned** — `./gradlew assembleRelease`
+  produces `app-release-unsigned.apk`, which Android will refuse to install as-is. It's also only
+  compile-verified and unit-test-verified, not yet run end-to-end on a physical device — R8
+  minification (~90% smaller than debug) is a large enough surface of change to warrant its own
+  device pass regardless. The APK actually distributed below is the **debug** build, signed with
+  the standard auto-generated debug keystore, which is why it's what `releases/` and the download
+  link point to. Nobody has generated a release signing key for this project — do that yourself
+  (`keytool`/Android Studio's signing wizard) before distributing a release build; this repo will
+  never contain one.
 - **One dependency (`androidx.security:security-crypto`) is pinned to an alpha release** — used
   only to wrap local key storage (see Security model above), not for any cryptographic operation
   itself. This reflects the state of that library upstream (no stable release exists), not a
   chosen risk.
-- **Automated test coverage is logic-only.** ~70 pure-JVM/Robolectric unit tests cover crypto,
+- **BT5 Coded PHY long-range beacon channel and Bloom-filter catalog sync are new, compile-verified
+  only, not device-tested.** The long-range channel (`BleCapabilities.kt`/`TrickleTimer.kt`,
+  extends beacon range on hardware that supports it) is capability-gated and purely additive — on
+  unsupported hardware, or if anything about it misbehaves, it's a silent no-op that can't affect
+  the proven legacy discovery path. The catalog sync (`CatalogFilter.kt`, replaced the old
+  per-peer `PeerDeliveryTracker`) changes the actual SOS/evidence-header/nickname connect-time
+  delivery mechanism and is the higher-stakes of the two — it needs its own live 2-phone pass
+  before being trusted the way the rest of the mesh core is.
+- **`GattOperationQueue`'s per-peer write lock isn't guaranteed to release if a connection hangs
+  between `CONNECTED` and `DISCONNECTED`.** Once a connection gets past the initial `CONNECTED`
+  callback, `MeshGattClient`'s stuck-attempt timeout (the Pass 16 fix) no longer watches it — if
+  the underlying radio then goes silent without ever firing `DISCONNECTED` (the same class of
+  undocumented Android BLE failure Pass 16 fixed for the *pre-connect* case), that peer's queue
+  entries leak and it can never be reconnected to. Real but narrow; a proper fix needs a second,
+  later connection-lifecycle timeout — deliberately not attempted blind here given how much live
+  2-phone testing this exact GATT lifecycle code has already needed to get right (see CHANGELOG
+  Pass 16).
+- **Automated test coverage is logic-only.** 99 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, and connection/dedup state machines (`./gradlew test`). There are no
   automated UI tests and no CI pipeline — both are manual/planned, not built.
+- **The WiFi Direct evidence accelerator is experimental, opt-in (default OFF), and
+  compile-verified only — the least-trusted thing in this codebase.** Turned on from the Home
+  screen (own toggle, separate from the disguise/power-saver tiles, with its own permission
+  prompt), it lets two phones that already share a group key move a *large* evidence deficit over
+  a faster ephemeral WiFi Direct link instead of BLE — SOS, position, presence, and normal-size
+  evidence always stay BLE-only regardless of this setting, and any WFD failure falls back to the
+  existing BLE chunk push silently and completely. The single biggest unverified risk:
+  `WifiP2pManager.connect()` is widely reported (Android developer community, not confirmed on
+  any device here) to sometimes trigger a system "Invitation to connect" dialog on the *other*
+  phone — which would visibly break both phones' disguise the moment it fires. This is the first
+  thing to check on a real 2-phone test with the toggle on; until then, treat it as unverified and
+  leave it off for anything real.
 
 See [`TESTING.md`](TESTING.md) for how the test suite is organized, and
 [`test_rubric.md`](test_rubric.md) for the manual, physical-device test plan real bugs in this
@@ -230,8 +299,8 @@ compiler or an emulator).
 [**Releases**](https://github.com/karmaNeggs/20.07/releases/latest) page and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
-Releases page.) This is a debug build unless a release build is explicitly noted; see Known
-Limitations above regarding release-build verification status.
+Releases page.) This is always a **debug** build — no signed release build exists yet; see Known
+Limitations above for exactly why.
 
 **Build from source**:
 ```

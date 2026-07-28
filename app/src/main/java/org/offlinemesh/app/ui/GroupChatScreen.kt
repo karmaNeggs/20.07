@@ -20,8 +20,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -29,12 +29,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import android.content.ActivityNotFoundException
+import android.content.Intent
+import android.widget.Toast
+import androidx.core.content.FileProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.ble.MeshService
+import org.offlinemesh.app.ble.RelayEngine
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -159,10 +165,12 @@ fun GroupChatScreen(
 
             LazyColumn(
                 Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 item { Spacer(Modifier.height(4.dp)) }
-                items(feed) { item -> FeedRow(item, groupColor, nicknameMap) }
+                items(feed) { item ->
+                    FeedRow(item, groupColor, nicknameMap) { evidence -> viewEvidenceFile(context, evidence) }
+                }
                 item { Spacer(Modifier.height(4.dp)) }
             }
 
@@ -196,7 +204,7 @@ fun GroupChatScreen(
                             }
                         },
                     contentAlignment = Alignment.Center
-                ) { Icon(Icons.Filled.Send, contentDescription = "Send", tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted) }
+                ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted) }
             }
 
             TextButton(
@@ -297,10 +305,23 @@ fun GroupChatScreen(
     }
 }
 
+/** Console-style feed row: flat, no card/background, monospace — replaces an earlier chat-bubble
+ *  design that (per direct feedback) took up too much vertical space for what this screen actually
+ *  needs to show. Sender identity is carried by text color ([groupColor] for others, muted for
+ *  "you") instead of a background tint, since there's no card left to tint. Keeps exactly the same
+ *  information and the same tap-to-view behavior as before — this is a density/style change only. */
+@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
+// (and every other screen) already uses for composables — see detekt-baseline.xml, which
+// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
-private fun FeedRow(item: FeedItem, groupColor: Color, nicknameMap: Map<String, String>) {
+private fun FeedRow(
+    item: FeedItem,
+    groupColor: Color,
+    nicknameMap: Map<String, String>,
+    onViewFile: (EvidenceEntity) -> Unit,
+) {
     fun label(senderId: String, isMe: Boolean): String =
-        if (isMe) "You" else nicknameMap[senderId]?.takeIf { it.isNotBlank() } ?: senderId.take(8)
+        if (isMe) "you" else nicknameMap[senderId]?.takeIf { it.isNotBlank() } ?: senderId.take(8)
 
     val (sender, isMe, body, time) = when (item) {
         is FeedItem.Message -> Quad(
@@ -314,30 +335,66 @@ private fun FeedRow(item: FeedItem, groupColor: Color, nicknameMap: Map<String, 
             item.evidence.timestamp
         )
     }
+    val viewable = item is FeedItem.File && item.evidence.complete
+    val timeText = remember(time) { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time)) }
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (isMe) groupColor.copy(alpha = 0.16f) else AppColors.Surface)
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .let { m -> if (viewable) m.clickable { onViewFile((item as FeedItem.File).evidence) } else m }
+            .padding(vertical = 3.dp)
     ) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(sender, style = MaterialTheme.typography.labelMedium, color = groupColor, fontWeight = FontWeight.SemiBold)
-            Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time)), style = MaterialTheme.typography.labelSmall, color = AppColors.OnSurfaceMuted)
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text(
+                timeText,
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.labelSmall,
+                color = AppColors.OnSurfaceMuted
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "$sender>",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (isMe) AppColors.OnSurfaceMuted else groupColor,
+                fontWeight = FontWeight.SemiBold
+            )
         }
-        Spacer(Modifier.height(2.dp))
-        Text(body, style = MaterialTheme.typography.bodyMedium, color = AppColors.OnSurface)
+        Text(
+            body,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppColors.OnSurface
+        )
     }
 }
 
 private data class Quad(val sender: String, val isMe: Boolean, val body: String, val time: Long)
 
-// Downsamples *during* decode rather than after — a gallery photo from a modern camera (12-48MP)
-// can be 8MB+ on disk and, decoded at full resolution, 50-150MB as an in-memory ARGB_8888 Bitmap
-// on older/lower-RAM phones (the kind this app explicitly targets) before EvidenceCapture.compress()
-// ever gets a chance to throw almost all of that away. Sampling to roughly MAX_DIMENSION up front
-// avoids that peak-memory spike entirely; compress() still does the final exact resize/JPEG encode,
-// so output size/quality is unchanged from before — this only fixes how much RAM decoding costs.
+/** Opens a completed evidence file in whatever app the user has for its mime type (gallery, photo
+ *  viewer) — the file itself never leaves app-private storage; [FileProvider] only grants the
+ *  receiving app a temporary read on this one URI. Toasts rather than crashes on the two ways this
+ *  can fail: the file is gone (pruned past its 48h retention window, or was never actually
+ *  reassembled despite the feed row saying "complete" — shouldn't happen, but a stale row is
+ *  cheaper to handle here than to prevent), or there's no app installed that can view this mime
+ *  type at all (rare for image/jpeg or video/mp4, but not impossible on a stripped-down phone). */
+internal fun viewEvidenceFile(context: android.content.Context, evidence: EvidenceEntity) {
+    val file = RelayEngine.outputFile(context, evidence.id, evidence.mimeType)
+    if (!file.exists()) {
+        Toast.makeText(context, "File is no longer available", Toast.LENGTH_SHORT).show()
+        return
+    }
+    try {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, evidence.mimeType)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(intent)
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "No app installed to open this file", Toast.LENGTH_SHORT).show()
+    }
+}
+
 /** Copies a join code/link to the clipboard, marked sensitive on Android 13+ (`EXTRA_IS_SENSITIVE`)
  *  so the OS skips clipboard history and cross-device/cloud clipboard sync for it and clears it
  *  faster than ordinary clipboard content — this text contains the group's raw 256-bit decryption

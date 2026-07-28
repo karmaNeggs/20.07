@@ -115,4 +115,40 @@ class CryptoUtilsTest {
         assertNotEquals(a, c)
         assertEquals(64, a.length) // 32 bytes, hex-encoded
     }
+
+    @Test
+    fun `sha256 raw bytes hex-encode to the same value as sha256Hex`() {
+        val bytes = CryptoUtils.sha256("hello".toByteArray())
+        assertEquals(32, bytes.size)
+        assertEquals(CryptoUtils.sha256Hex("hello".toByteArray()), bytes.joinToString("") { "%02x".format(it) })
+    }
+
+    @Test
+    fun `encryptWithNonce then decrypt returns the original plaintext`() {
+        val key = randomKey()
+        val nonce = ByteArray(12) { it.toByte() }
+        val plaintext = "position body".toByteArray()
+        val ciphertext = CryptoUtils.encryptWithNonce(key, plaintext, nonce)
+        assertArrayEquals(plaintext, CryptoUtils.decrypt(key, ciphertext))
+        assertArrayEquals(nonce, ciphertext.copyOfRange(0, 12)) // the exact nonce we gave it, not a random one
+    }
+
+    @Test
+    fun `encryptWithNonce rejects a nonce of the wrong length`() {
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            CryptoUtils.encryptWithNonce(randomKey(), "x".toByteArray(), ByteArray(11))
+        }
+    }
+
+    @Test
+    fun `reusing the same nonce under the same key produces identical ciphertext`() {
+        // This is the exact property that makes GCM nonce reuse dangerous — confirming it here
+        // documents *why* encodePosition's nonce construction (sha256(senderId) prefix + timestamp
+        // + counter) must never repeat, rather than asserting that indirectly only.
+        val key = randomKey()
+        val nonce = ByteArray(12) { it.toByte() }
+        val a = CryptoUtils.encryptWithNonce(key, "same plaintext".toByteArray(), nonce)
+        val b = CryptoUtils.encryptWithNonce(key, "same plaintext".toByteArray(), nonce)
+        assertArrayEquals(a, b)
+    }
 }

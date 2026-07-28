@@ -1,24 +1,40 @@
 package org.offlinemesh.app.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.location.Location
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
@@ -117,7 +133,9 @@ fun HomeScreen(
             ) { Text("SOS", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
 
             Spacer(Modifier.height(14.dp))
-            PowerSaverRow(meshService)
+            QuickToggleTiles(meshService)
+            Spacer(Modifier.height(10.dp))
+            WifiDirectRow()
 
             Spacer(Modifier.height(28.dp))
 
@@ -181,14 +199,130 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
 }
 
 /**
- * Off (default): the app automatically favors responsiveness while you have it open and
- * battery-saving settings the rest of the time. On: pins the battery-saving tier permanently,
- * even while you're actively using the app — for when you know you're low and want to trade
- * responsiveness for runtime no matter what you're doing.
+ * Three quick toggles in one row, each a compact [ToggleTile] instead of the full-width descriptive
+ * rows this used to be (`PowerSaverRow`/`DisguiseRow`) — same underlying behavior, just less space:
+ * - **Power**: off (default) auto-favors responsiveness while the app is open, on pins the
+ *   battery-saving tier permanently, even in the foreground.
+ * - **Disguise**: switches which of the two launcher `<activity-alias>` entries is active (see
+ *   [AppIdentity]) — off shows "20.07," on shows "Notes" instead, so a glance at the home screen
+ *   doesn't reveal this app is installed. See README's Security model for exactly what this does
+ *   and does not protect (home screen/app switcher only — not the package name, permissions, or
+ *   its entry in Android Settings > Apps).
+ * - **Offline**: the mesh's actual on/off switch (see [MeshService.setMeshActive]) — off (default)
+ *   is normal operation, on stops both radios and both sensors and removes the persistent
+ *   notification entirely. Before this existed there was no way to stop any of that short of
+ *   force-stopping the app from Android Settings.
  */
+@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
+// (and every other screen) already uses for composables — see detekt-baseline.xml, which
+// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
-private fun PowerSaverRow(meshService: MeshService?) {
-    val forced by (meshService?.powerSaverForced?.collectAsState() ?: remember { mutableStateOf(false) })
+private fun QuickToggleTiles(meshService: MeshService?) {
+    val context = LocalContext.current
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        val powerSaverOn by (meshService?.powerSaverForced?.collectAsState() ?: remember { mutableStateOf(false) })
+        val powerDesc =
+            if (powerSaverOn) "Power saver, on, battery-saving settings always on" else "Power saver, off, auto"
+        ToggleTile(
+            spec = TileSpec(Icons.Filled.Bolt, "Power", AppColors.Warning),
+            active = powerSaverOn,
+            contentDescription = powerDesc,
+            modifier = Modifier.weight(1f),
+            onToggle = { meshService?.setPowerSaverForced(it) }
+        )
+
+        var decoyActive by remember { mutableStateOf(AppIdentity.isDecoyActive(context)) }
+        val decoyDesc =
+            if (decoyActive) "Disguise app icon, on, shows as Notes" else "Disguise app icon, off, shows as 20.07"
+        ToggleTile(
+            spec = TileSpec(Icons.Filled.VisibilityOff, "Disguise", AppColors.Warning),
+            active = decoyActive,
+            contentDescription = decoyDesc,
+            modifier = Modifier.weight(1f),
+            onToggle = { AppIdentity.setDecoyActive(context, it); decoyActive = it }
+        )
+
+        val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
+        val offlineDesc = if (!meshActive) "Mesh offline, radios and sensors stopped" else "Mesh active, off"
+        ToggleTile(
+            spec = TileSpec(Icons.Filled.BluetoothDisabled, "Offline", AppColors.Warning),
+            active = !meshActive,
+            contentDescription = offlineDesc,
+            modifier = Modifier.weight(1f),
+            onToggle = { goOffline -> meshService?.setMeshActive(!goOffline) }
+        )
+    }
+}
+
+/** A tile's static appearance (icon/label/glow color) — separated from its dynamic [ToggleTile]
+ *  state (active/description/callback) purely to keep that composable's parameter count small. */
+private data class TileSpec(val icon: ImageVector, val label: String, val activeColor: Color)
+
+/** A compact, square, icon+one-word toggle — the shared shape behind every tile in
+ *  [QuickToggleTiles]. Compact visually, but not for accessibility: [Modifier.toggleable]'s
+ *  `Role.Switch` gives a screen reader the same "this is a switch, here's its state" semantics a
+ *  full-size [Switch] would, and [contentDescription] carries the complete sentence the visible
+ *  one-word label doesn't have room for. Background/icon color cross-fades between a dim, muted
+ *  resting state and [TileSpec.activeColor] via [animateColorAsState] — the "glow when active,
+ *  fade when inactive" effect, done with Compose's built-in color animation, no new dependency. */
+@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
+@Composable
+private fun ToggleTile(
+    spec: TileSpec,
+    active: Boolean,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+    onToggle: (Boolean) -> Unit,
+) {
+    val dimBg = AppColors.SurfaceVariant
+    val dimFg = AppColors.OnSurfaceMuted
+    val bg by animateColorAsState(if (active) spec.activeColor.copy(alpha = 0.18f) else dimBg, label = "tileBg")
+    val fg by animateColorAsState(if (active) spec.activeColor else dimFg, label = "tileFg")
+    // modifier is caller-supplied (RowScope.weight(1f) at each QuickToggleTiles call site) rather
+    // than hardcoded here — `weight` is a RowScope/ColumnScope extension that only resolves inside
+    // the Row{}/Column{} lambda that actually has that scope receiver, which this function's own
+    // body does not.
+    Column(
+        modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(16.dp))
+            .background(bg)
+            .toggleable(value = active, onValueChange = onToggle, role = Role.Switch)
+            .semantics { this.contentDescription = contentDescription },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(spec.icon, contentDescription = null, tint = fg, modifier = Modifier.size(26.dp))
+        Spacer(Modifier.height(6.dp))
+        Text(spec.label, color = fg, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+    }
+}
+
+/**
+ * The WiFi Direct evidence accelerator's opt-in switch — off by default, kept as its own
+ * descriptive row (not folded into [QuickToggleTiles]'s compact tiles) because it carries a
+ * warning that doesn't fit a one-word tile: see [org.offlinemesh.app.ble.WifiDirectAccelerator]'s
+ * class doc for what "experimental" means here specifically — `WifiP2pManager.connect()` may show
+ * a system "Invitation to connect" dialog on the OTHER phone, which would visibly break both
+ * phones' disguise the moment it fires. This has not been confirmed on real hardware; the warning
+ * stays visible regardless of the switch's own state so it's read *before* turning this on, not
+ * only after. `NEARBY_WIFI_DEVICES` (Android 13+) is requested only from this row's own permission
+ * launcher, the moment the switch is turned on — never at app launch, matching the same
+ * on-first-use precedent [Manifest.permission.CAMERA] already follows on the Join screen.
+ */
+@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
+@Composable
+private fun WifiDirectRow() {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(WifiDirectSettings.isEnabled(context)) }
+    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) {
+            WifiDirectSettings.setEnabled(context, true)
+            enabled = true
+        }
+        // Denied: the switch simply doesn't turn on, no further nagging — matches this app's
+        // conservative permission philosophy (see AddGroupScreen's camera flow).
+    }
     Row(
         Modifier
             .fillMaxWidth()
@@ -197,28 +331,54 @@ private fun PowerSaverRow(meshService: MeshService?) {
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(Icons.Filled.Bolt, contentDescription = null, tint = if (forced) AppColors.Warning else AppColors.Safe)
+        val speedTint = if (enabled) AppColors.Warning else AppColors.OnSurfaceMuted
+        Icon(Icons.Filled.Speed, contentDescription = null, tint = speedTint)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text("Power saver", color = AppColors.OnSurface, style = MaterialTheme.typography.bodyMedium)
             Text(
-                if (forced) "Battery-saving settings always on" else "Auto — full power while app is open",
-                color = AppColors.OnSurfaceMuted, style = MaterialTheme.typography.labelSmall
+                "Speed up large file transfers",
+                color = AppColors.OnSurface,
+                style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                "Experimental — the other phone may show a connection prompt",
+                color = AppColors.Warning,
+                style = MaterialTheme.typography.labelSmall
             )
         }
         Switch(
-            checked = forced,
-            onCheckedChange = { meshService?.setPowerSaverForced(it) },
+            checked = enabled,
+            onCheckedChange = { turnOn ->
+                handleWifiDirectToggle(turnOn, context, permissionLauncher) { enabled = it }
+            },
             colors = SwitchDefaults.colors(
                 checkedTrackColor = AppColors.Warning, checkedThumbColor = Color.White,
-                // Explicit off-state colors — left to Material3's defaults these come out too close
-                // to AppColors.Surface (this row's own background) in a heavily-customized dark
-                // scheme, making the toggle hard to see when off. A lighter, purpose-picked gray for
-                // both track and thumb keeps it legible without touching the on-state warning color.
                 uncheckedThumbColor = AppColors.OnSurfaceMuted,
                 uncheckedTrackColor = Color(0xFF3A4149),
                 uncheckedBorderColor = Color(0xFF3A4149)
             )
         )
+    }
+}
+
+private fun handleWifiDirectToggle(
+    turnOn: Boolean,
+    context: android.content.Context,
+    permissionLauncher: androidx.activity.result.ActivityResultLauncher<String>,
+    setEnabled: (Boolean) -> Unit,
+) {
+    if (!turnOn) {
+        WifiDirectSettings.setEnabled(context, false)
+        setEnabled(false)
+        return
+    }
+    val grantState = ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES)
+    val notYetGranted = grantState != PackageManager.PERMISSION_GRANTED
+    val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && notYetGranted
+    if (needsPermission) {
+        permissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
+    } else {
+        WifiDirectSettings.setEnabled(context, true)
+        setEnabled(true)
     }
 }

@@ -1,5 +1,6 @@
 package org.offlinemesh.app.ble
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -134,5 +135,33 @@ class ConnectionAttemptTrackerTest {
         t.connectionEnded("AA:BB", synced = true)
         clock += 45_001
         assertTrue(t.canAttempt("AA:BB")) // no behavior change when syncedCooldownMs isn't specified
+    }
+
+    // ---- bounded cooldown map: BLE addresses rotate (RPA, ~15min), so a crowd session must not
+    // accumulate one cooldown entry per address ever seen, forever ----
+
+    @Test
+    fun `evicts the least recently touched address once over the tracked cap`() {
+        val t = ConnectionAttemptTracker(
+            maxConcurrent = 10, reconnectCooldownMs = 45_000L, maxTrackedAddresses = 2, now = { clock }
+        )
+        t.attemptStarted("A"); t.connectionEnded("A")
+        t.attemptStarted("B"); t.connectionEnded("B")
+        t.attemptStarted("C"); t.connectionEnded("C") // A hasn't been touched since, should be evicted
+        assertEquals(2, t.trackedAddressCount())
+        assertTrue(t.canAttempt("A")) // its cooldown entry is gone, so nothing blocks a fresh attempt
+    }
+
+    @Test
+    fun `checking an address's cooldown protects it from eviction`() {
+        val t = ConnectionAttemptTracker(
+            maxConcurrent = 10, reconnectCooldownMs = 45_000L, maxTrackedAddresses = 2, now = { clock }
+        )
+        t.attemptStarted("A"); t.connectionEnded("A")
+        t.attemptStarted("B"); t.connectionEnded("B")
+        t.canAttempt("A") // access refreshes recency for A
+        t.attemptStarted("C"); t.connectionEnded("C") // B is now least-recently-touched, not A
+        assertFalse(t.canAttempt("A")) // still cooling down — its entry survived
+        assertTrue(t.canAttempt("B")) // evicted, so cooldown is gone
     }
 }

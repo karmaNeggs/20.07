@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
@@ -86,6 +87,24 @@ class MeshFrameCodecTest {
     }
 
     @Test
+    fun `two position frames from the same sender in the same second use different nonces`() {
+        // Regression guard for the deterministic-nonce path: same senderId + same timestampSec is
+        // exactly the collision-prone case (sha256(senderId)-prefix and timestampSec bytes both
+        // identical) — only the in-process counter tells them apart. Comparing the raw sealed
+        // bytes (nonce is the first 12 bytes) is a proxy for "the nonce actually differed"; if it
+        // hadn't, GCM would also make the ciphertext identical for identical plaintext+key+nonce.
+        val key = randomKey()
+        val a = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val b = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val decodedA = MeshFrameCodec.decode(a) as MeshFrameCodec.Frame.PositionSealed
+        val decodedB = MeshFrameCodec.decode(b) as MeshFrameCodec.Frame.PositionSealed
+        assertTrue(!decodedA.sealed.contentEquals(decodedB.sealed))
+        // Both must still open correctly despite identical plaintext/key/second.
+        assertEquals(1.0, MeshFrameCodec.openPosition(decodedA.sealed, key)!!.lat, 1e-6)
+        assertEquals(1.0, MeshFrameCodec.openPosition(decodedB.sealed, key)!!.lat, 1e-6)
+    }
+
+    @Test
     fun `manifest frame round-trips a bitset including boundary indexes`() {
         val total = 17 // deliberately not a multiple of 8, to exercise the partial last byte
         val have = setOf(0, 1, 7, 8, 16)
@@ -113,6 +132,64 @@ class MeshFrameCodecTest {
         check(decoded is MeshFrameCodec.Frame.Presence)
         assertEquals("group-1", decoded.groupId)
         assertEquals("sender-1", decoded.senderId)
+    }
+
+    @Test
+    fun `catalog filter frame round-trips seed and bits, and preserves membership answers`() {
+        val filter = CatalogFilter.build(listOf("sos:a", "evid:b"), seed = 12345L)
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.toBits()))
+        check(decoded is MeshFrameCodec.Frame.CatalogFilter)
+        assertEquals(12345L, decoded.seed)
+        val reconstructed = CatalogFilter.fromBits(decoded.bits, decoded.seed)
+        assertTrue(reconstructed.mightContain("sos:a"))
+        assertTrue(reconstructed.mightContain("evid:b"))
+    }
+
+    @Test
+    fun `wifi direct capability frame round-trips its version byte`() {
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeWifiDirectCap(version = 3))
+        check(decoded is MeshFrameCodec.Frame.WifiDirectCap)
+        assertEquals(3, decoded.version)
+    }
+
+    @Test
+    fun `wifi direct handoff frame round-trips and carries a verifiable tag`() {
+        val key = randomKey()
+        val nonce = ByteArray(16) { it.toByte() }
+        val mac = CryptoUtils.authTag(key, MeshFrameCodec.wifiDirectHandoffMacInput("evid-1", "group-1", 42, nonce))
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeWifiDirectHandoff("evid-1", "group-1", 42, nonce, mac))
+        check(decoded is MeshFrameCodec.Frame.WifiDirectHandoff)
+        assertEquals("evid-1", decoded.evidenceId)
+        assertEquals("group-1", decoded.groupId)
+        assertEquals(42, decoded.deficitCount)
+        assertArrayEquals(nonce, decoded.senderNonce)
+        val recomputedInput = MeshFrameCodec.wifiDirectHandoffMacInput(
+            decoded.evidenceId, decoded.groupId, decoded.deficitCount, decoded.senderNonce
+        )
+        val recomputed = CryptoUtils.authTag(key, recomputedInput)
+        assertTrue(CryptoUtils.constantTimeEquals(recomputed, decoded.mac))
+    }
+
+    @Test
+    fun `wifi direct accept frame round-trips and carries a verifiable tag`() {
+        val key = randomKey()
+        val senderNonce = ByteArray(16) { it.toByte() }
+        val receiverNonce = ByteArray(16) { (it + 1).toByte() }
+        val readyAt = 1_700_000_000_000L
+        val macInput = MeshFrameCodec.wifiDirectAcceptMacInput("evid-1", "group-1", senderNonce, receiverNonce, readyAt)
+        val mac = CryptoUtils.authTag(key, macInput)
+        val encoded =
+            MeshFrameCodec.encodeWifiDirectAccept("evid-1", "group-1", senderNonce, receiverNonce, readyAt, mac)
+        val decoded = MeshFrameCodec.decode(encoded)
+        check(decoded is MeshFrameCodec.Frame.WifiDirectAccept)
+        assertEquals("evid-1", decoded.evidenceId)
+        assertEquals(readyAt, decoded.readyAtEpochMs)
+        assertArrayEquals(senderNonce, decoded.senderNonce)
+        assertArrayEquals(receiverNonce, decoded.receiverNonce)
+        val recomputedInput = MeshFrameCodec.wifiDirectAcceptMacInput(
+            decoded.evidenceId, decoded.groupId, decoded.senderNonce, decoded.receiverNonce, decoded.readyAtEpochMs
+        )
+        assertTrue(CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, recomputedInput), decoded.mac))
     }
 
     @Test

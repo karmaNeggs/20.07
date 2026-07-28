@@ -6,6 +6,9 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.le.AdvertiseCallback
 import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.AdvertisingSet
+import android.bluetooth.le.AdvertisingSetCallback
+import android.bluetooth.le.AdvertisingSetParameters
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
@@ -64,16 +67,64 @@ class BeaconRadio(
     // the radio is only stopped/restarted when something real changed, not on every loop tick.
     private var currentPayloadKey: String? = null
 
+    // Per-device jitter applied before an actual radio restart (never before the cheap
+    // has-anything-changed check above). The rotating id itself flips on a shared wall-clock
+    // minute boundary (CryptoUtils.ID_WINDOW_SECONDS) BY DESIGN — every phone has to agree on the
+    // same window to compute the same id — but that also means at crowd density every phone's
+    // *restart* lands in the same sub-second window every minute, all at once: a synchronized
+    // stop/start burst across hundreds of radios instead of one phone's. A stable per-device offset
+    // derived from deviceId spreads those restarts across [advertiseJitterRangeMs] instead — it
+    // changes only *when* within that second the restart happens, never *whether* it happens, so
+    // it can't reintroduce the "touch the radio on a timer" bug class this file already fought
+    // through three rounds of live testing to eliminate (see class doc above).
+    private val advertiseJitterRangeMs = JITTER_RANGE_MS
+    private val advertiseJitterMs: Long by lazy {
+        val h = CryptoUtils.sha256(repo.deviceId.toByteArray())
+        val unsignedFirstTwoBytes = (h[0].toInt() and BYTE_MASK shl BYTE_SHIFT) or (h[1].toInt() and BYTE_MASK)
+        unsignedFirstTwoBytes.toLong() % advertiseJitterRangeMs
+    }
+
     // Published once per slot by the advertise loop, read (never mutated) by the scan callback on
     // a binder thread. Replaced wholesale each refresh, so a plain @Volatile reference is safe.
     @Volatile private var matchTable: Map<String, String> = emptyMap()   // rotatingId(hex) -> groupId
     @Volatile private var cachedGroups: List<GroupEntity> = emptyList()
 
+    // ---- long-range supplementary channel state — see the section below for what this is ----
+    // @Volatile (unlike currentPayloadKey above): currentPayloadKey is single-writer, touched only
+    // from within the one advertiseJob coroutine, so a plain var is safe there. These two are
+    // written from THREE places — the advertiseJob coroutine (evaluateLongRangeAdvertising),
+    // MeshService.onDestroy's caller thread (stop()), and the raw BLE callback thread
+    // (longRangeAdvertisingSetCallback, an OS callback with no guaranteed relationship to the
+    // coroutine dispatcher) — matching why matchTable/cachedGroups above are @Volatile too: any
+    // state genuinely crossing threads in this class follows that same convention.
+    @Volatile private var longRangeAdvertisingActive = false
+    @Volatile private var longRangeCurrentPayloadKey: String? = null
+    private val longRangeTrickle = TrickleTimer(minIntervalMs = 5_000L, maxIntervalMs = 60_000L)
+    private var longRangeScanner: BluetoothLeScanner? = null
+    private var longRangeScanJob: Job? = null
+
+    /** Safe to call more than once, and safe to follow with a fresh [startAdvertising]/
+     *  [startScanning] later (see [MeshService.setMeshActive]'s "go offline"/"go active" cycle) —
+     *  resetting [currentPayloadKey]/[longRangeCurrentPayloadKey]/[longRangeAdvertisingActive] here
+     *  is what makes a restart actually re-assert the radio instead of [ensureAdvertising] /
+     *  [evaluateLongRangeAdvertising] wrongly believing the old payload is still being transmitted
+     *  (it isn't — the radio was just stopped below) and skipping the real re-start for up to a
+     *  full ~60s rotating-id window. */
     fun stop() {
         advertiseJob?.cancel()
         scanJob?.cancel()
+        longRangeScanJob?.cancel()
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
+        try { longRangeScanner?.stopScan(longRangeScanCallback) } catch (_: Exception) {}
+        try {
+            if (longRangeAdvertisingActive) {
+                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(longRangeAdvertisingSetCallback)
+            }
+        } catch (_: Exception) {}
+        currentPayloadKey = null
+        longRangeCurrentPayloadKey = null
+        longRangeAdvertisingActive = false
     }
 
     /** 3 HMACs per group, once per slot — not per scan result. Also refreshes the active-group
@@ -113,8 +164,19 @@ class BeaconRadio(
                 val profile = BleTuning.forTier(currentTier())
                 refreshCaches()
                 val groups = cachedGroups
+                // Same "we're not hearing anyone at all" signal the scan side escalates on — reset
+                // the long-range channel's backoff too, so it comes back to full strength exactly
+                // when extra range is most likely to actually help, not on its own independent clock.
+                if (isBlind()) longRangeTrickle.reset()
+                // Advances the trickle window on the same check cadence as everything else in this
+                // loop; the return value is unused here — evaluateLongRangeAdvertising below reads
+                // the resulting isSuppressed() state, not this call's edge-triggered pulse.
+                longRangeTrickle.shouldTransmit()
                 if (groups.isEmpty()) {
-                    ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GENERIC, ByteArray(MeshProtocol.ROTATING_ID_LEN), MeshProtocol.UNKNOWN_HOP, "generic")
+                    val genericRid = ByteArray(MeshProtocol.ROTATING_ID_LEN)
+                    ensureAdvertising(
+                        profile, MeshProtocol.ADV_TYPE_GENERIC, genericRid, MeshProtocol.UNKNOWN_HOP, "generic"
+                    )
                 } else {
                     val g = groups[roundRobin % groups.size]
                     roundRobin++
@@ -122,7 +184,9 @@ class BeaconRadio(
                     if (key != null) {
                         val rid = CryptoUtils.rotatingAdvertisementId(key)
                         val sHop = bestSosHopFor(g.id)
-                        ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, "${g.id}:${rid.toHex()}:$sHop")
+                        val payloadKey = "${g.id}:${rid.toHex()}:$sHop"
+                        ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
+                        evaluateLongRangeAdvertising(MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
                     }
                 }
                 // How often to re-check whether the payload needs to change (new rotating-id window,
@@ -142,10 +206,17 @@ class BeaconRadio(
     /** No-ops if [payloadKey] matches what's already being transmitted — a stable single-group
      *  beacon ends up calling startAdvertising once and then not again until its rotating id
      *  actually rotates (~60s), rather than stopping/restarting on a fixed timer regardless of
-     *  whether anything changed (see the class doc for why that was a real live-test bug). */
+     *  whether anything changed (see the class doc for why that was a real live-test bug). When a
+     *  restart genuinely is needed and this isn't the very first advertise since startup, waits
+     *  [advertiseJitterMs] first — see that property's doc for why (smears the shared rotating-id
+     *  boundary so a crowd doesn't restart every radio in the same instant). Skipped on the very
+     *  first call ([currentPayloadKey] still null) so initial discovery stays fast. */
     @SuppressLint("MissingPermission")
-    private fun ensureAdvertising(profile: BleTuning.Profile, type: Byte, rid: ByteArray, sHop: Int, payloadKey: String) {
+    private suspend fun ensureAdvertising(
+        profile: BleTuning.Profile, type: Byte, rid: ByteArray, sHop: Int, payloadKey: String
+    ) {
         if (payloadKey == currentPayloadKey) return
+        if (currentPayloadKey != null && advertiseJitterMs > 0) delay(advertiseJitterMs)
         val adv = advertiser ?: return
         val payload = MeshProtocol.encodeBeacon(type, rid, sHop)
         val settings = AdvertiseSettings.Builder()
@@ -171,6 +242,92 @@ class BeaconRadio(
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartFailure(errorCode: Int) { Log.w(TAG, "advertise start failure: $errorCode") }
+    }
+
+    // ---------------- long-range supplementary channel (BT5 Coded PHY) ----------------
+    // Additive only: reuses the exact same 8-byte beacon wire format (MeshProtocol.encodeBeacon/
+    // decodeBeacon) and the exact same discovery outcomes (hopTracker presence) as the legacy path
+    // above — nothing about it changes what a legacy-only peer sees, and nothing about it touches
+    // [currentPayloadKey]/[advertiser]/[scanner]/[matchTable] or any other legacy state. It exists
+    // purely to extend range and coverage in a crowd, on hardware that supports it:
+    //  - Coded PHY (LE Long Range, S=8) trades bitrate for forward-error-correction coding gain —
+    //    roughly 2-4x usable range at the same TX power (Bluetooth SIG figures), so fewer relay
+    //    hops are needed to cover the same physical area, and fewer GATT connection-slot attempts
+    //    get spent trying to bridge gaps a longer-range beacon would have closed directly.
+    //  - Extended advertising is what makes a non-legacy, Coded-PHY-carried advertising set
+    //    possible on this radio at all — the payload itself is unchanged (still MeshProtocol's
+    //    8-byte format), this isn't used to carry more data, only to reach further.
+    //  - Deliberately non-connectable (setConnectable(false)): GATT data transfer still rides only
+    //    the legacy connectable beacon, same as before this channel existed — this is a pure
+    //    coverage/presence extension, not a second data path.
+    //  - [longRangeTrickle] suppresses transmitting when enough neighbors are already covering a
+    //    group on this channel — see [TrickleTimer]'s doc for why this, not a fixed schedule, is
+    //    the actual crowd-scaling lever: redundant long-range traffic then scales with local
+    //    density, not with a per-device timer that gets worse as the crowd gets bigger.
+    //
+    // Gated behind [BleCapabilities.longRangeBeaconSupported] — unsupported hardware (or any
+    // exception probing the adapter) is always a silent no-op, never a crash, never a fallback
+    // that touches the legacy advertiser.
+    //
+    // NOT device-tested. Passes 1-21 of this file earned the "touch the radio only when something
+    // changed" principle through repeated live 2-phone testing on real hardware; BT5 Coded PHY
+    // hardware wasn't available to repeat that process here. Treat this exactly like this project's
+    // unverified iOS code: carefully reviewed by hand against the documented AdvertisingSet/
+    // ScanSettings API surface, but unverified on real hardware. Needs its own live-device pass —
+    // ideally two BT5 phones with confirmed Coded PHY support — before being trusted the way the
+    // legacy path now is.
+    @Suppress("ReturnCount") // guard clauses for missing adapter/unsupported hardware/redundant/
+    // unchanged, in that order — each one reads more clearly as an early return than nested ifs.
+    @SuppressLint("MissingPermission")
+    private fun evaluateLongRangeAdvertising(type: Byte, rid: ByteArray, sHop: Int, payloadKey: String) {
+        val adapter = bluetoothManager.adapter ?: return
+        if (!BleCapabilities.longRangeBeaconSupported(adapter)) return
+        val adv = adapter.bluetoothLeAdvertiser ?: return
+        if (longRangeTrickle.isSuppressed()) {
+            if (longRangeAdvertisingActive) {
+                try { adv.stopAdvertisingSet(longRangeAdvertisingSetCallback) } catch (e: Exception) {
+                    Log.w(TAG, "long-range advertise stop failed: ${e.message}")
+                }
+                longRangeAdvertisingActive = false
+                longRangeCurrentPayloadKey = null
+            }
+            return
+        }
+        if (payloadKey == longRangeCurrentPayloadKey && longRangeAdvertisingActive) return
+        val payload = MeshProtocol.encodeBeacon(type, rid, sHop)
+        val params = AdvertisingSetParameters.Builder()
+            .setLegacyMode(false)
+            .setConnectable(false)
+            .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
+            .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+            .setInterval(AdvertisingSetParameters.INTERVAL_HIGH) // lower baseline power; Trickle already governs on/off
+            .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH) // range is the point of this channel
+            .build()
+        val data = AdvertiseData.Builder()
+            .addServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID), payload)
+            .setIncludeDeviceName(false)
+            .build()
+        try {
+            if (longRangeAdvertisingActive) adv.stopAdvertisingSet(longRangeAdvertisingSetCallback)
+            adv.startAdvertisingSet(params, data, null, null, null, longRangeAdvertisingSetCallback)
+            longRangeAdvertisingActive = true
+            longRangeCurrentPayloadKey = payloadKey
+        } catch (e: Exception) {
+            Log.w(TAG, "long-range advertise start failed: ${e.message}")
+            longRangeAdvertisingActive = false
+        }
+    }
+
+    private val longRangeAdvertisingSetCallback = object : AdvertisingSetCallback() {
+        override fun onAdvertisingSetStarted(advertisingSet: AdvertisingSet?, txPower: Int, status: Int) {
+            if (status != ADVERTISE_SUCCESS) {
+                Log.w(TAG, "long-range advertising set failed to start: status=$status")
+                longRangeAdvertisingActive = false
+            }
+        }
+        override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+            longRangeAdvertisingActive = false
+        }
     }
 
     // ---------------- scanning ----------------
@@ -214,6 +371,38 @@ class BeaconRadio(
                 }
                 delay(3000)
             }
+        }
+        startLongRangeScanning()
+    }
+
+    /** A single, separate, always-LOW_POWER scan for the long-range channel above — kept entirely
+     *  apart from [restartScan]/[scanCallback] so the legacy scan path stays byte-for-byte
+     *  untouched regardless of whether this one works on a given chipset. LOW_POWER rather than
+     *  tier-driven: this channel is a coverage extender, not a latency-sensitive one — the
+     *  ordinary legacy scan above already carries the responsiveness requirement. A single
+     *  `startScan()` call left running, matching this file's established "leave it running, don't
+     *  touch it on a timer" principle — see the class doc. Silently does nothing if the adapter,
+     *  scanner, or hardware capability isn't there; never affects the legacy scan either way. */
+    @Suppress("ReturnCount") // guard clauses for missing adapter/unsupported hardware/missing
+    // scanner — each reads more clearly as an early return than nested ifs.
+    @SuppressLint("MissingPermission")
+    private fun startLongRangeScanning() {
+        val adapter = bluetoothManager.adapter ?: return
+        if (!BleCapabilities.longRangeBeaconSupported(adapter)) {
+            Log.i(TAG, "Coded PHY not supported — long-range channel off, legacy discovery unaffected")
+            return
+        }
+        val s = adapter.bluetoothLeScanner ?: return
+        longRangeScanner = s
+        try {
+            val settings = ScanSettings.Builder()
+                .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+                .setLegacy(false)
+                .setPhy(BluetoothDevice.PHY_LE_CODED)
+                .build()
+            s.startScan(emptyList(), settings, longRangeScanCallback)
+        } catch (e: Exception) {
+            Log.w(TAG, "long-range scan start failed: ${e.message}")
         }
     }
 
@@ -267,8 +456,35 @@ class BeaconRadio(
         }
     }
 
+    /** Presence-only counterpart to [scanCallback] for the long-range channel — deliberately does
+     *  NOT call [onDeviceSeen]/maybeConnect, since long-range beacons are advertised non-connectable
+     *  (see [evaluateLongRangeAdvertising]); attempting to connect to one would only churn a
+     *  connection-attempt slot on a guaranteed failure. Feeds [longRangeTrickle] so a device that
+     *  keeps hearing others covering a group on this channel backs off transmitting its own. */
+    @SuppressLint("MissingPermission")
+    private val longRangeScanCallback = object : ScanCallback() {
+        @Suppress("ReturnCount") // guard clauses for no service data/undecodable/non-group beacon/
+        // unmatched rotating id — each reads more clearly as an early return than nested ifs.
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
+            val beacon = MeshProtocol.decodeBeacon(serviceData) ?: return
+            if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
+            val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
+            hopTracker.considerNeighborReport(groupId, "PRESENCE", 0)
+            longRangeTrickle.onSighting()
+        }
+        override fun onScanFailed(errorCode: Int) {
+            Log.w(TAG, "long-range scan failed: errorCode=$errorCode")
+        }
+    }
+
     companion object {
         private const val TAG = "BeaconRadio"
+
+        // advertiseJitterMs's range and byte-mixing constants — see that property's doc above.
+        private const val JITTER_RANGE_MS = 2000L
+        private const val BYTE_MASK = 0xFF // isolates one byte from a signed Kotlin Byte-to-Int conversion
+        private const val BYTE_SHIFT = 8 // shifts the first byte into the high half of a 16-bit value
 
         private val HEX = "0123456789abcdef".toCharArray()
         private fun ByteArray.toHex(): String {

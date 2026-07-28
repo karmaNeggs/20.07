@@ -24,9 +24,24 @@
          QR *this* app displays all still work with zero camera access. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
+    <!-- Experimental, opt-in WiFi Direct evidence accelerator — see WifiDirectAccelerator's class
+         doc. ACCESS_WIFI_STATE/CHANGE_WIFI_STATE are install-time "normal" permissions (no runtime
+         prompt, no launcher entry needed anywhere); NEARBY_WIFI_DEVICES is requested only from the
+         Home screen toggle's own permission launcher when the user turns this feature on, never at
+         launch — MainActivity.requiredPermissions is untouched by this feature, matching the
+         existing CAMERA-on-first-use precedent above. neverForLocation matches the same flag
+         already used on BLUETOOTH_SCAN above — flagged in WifiDirectCapabilities as needing a
+         re-check against current Play policy specifically for WifiP2pManager peer discovery
+         (as opposed to plain WiFi scanning) before this is ever distributed. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" tools:targetApi="33" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
     <application
         android:name=".MeshApp"
@@ -88,6 +103,20 @@
             android:name=".ble.MeshService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <!-- Lets GroupChatScreen's "tap to view" hand a received evidence file to whatever app the
+             user has for viewing it (gallery, photo viewer), without exposing raw file:// paths or
+             any other part of internal storage — only the app-private evidence/ subdirectory is
+             shared, and only for as long as the OS-granted read permission on that one URI lasts. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>

@@ -51,8 +51,8 @@ class MeshGattServer(
     @Suppress("MagicNumber") // self-documented by the property name + the comment above
     private val maxConcurrentServerConnections = 4
     // Keyed by address, like every other per-peer structure in this class (writeQueue,
-    // subscribedDevices notwithstanding) and in MeshGattClient (lastActivity, ConnectionAttemptTracker,
-    // PeerDeliveryTracker) — NOT by the BluetoothDevice object itself. A first version of this used
+    // subscribedDevices notwithstanding) and in MeshGattClient (lastActivity, ConnectionAttemptTracker)
+    // — NOT by the BluetoothDevice object itself. A first version of this used
     // Set<BluetoothDevice>, which does not reliably dedupe the *same* physical peer across the
     // repeated reconnects this app does every ~45s (BluetoothDevice has no guaranteed stable
     // equals() across separate callback deliveries from the stack) — stale entries piled up, the
@@ -98,12 +98,8 @@ class MeshGattServer(
         val server = gattServer ?: return
         val service = server.getService(MeshProtocol.SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: return
-        val address = device.address
-        for (item in responder.framesToPushOnConnect(address)) {
-            val ok = notify(device, characteristic, item.bytes)
-            // Only mark delivered on a confirmed successful notify — see MeshGattClient's identical
-            // comment: an optimistic mark would let a failed send silently never retry.
-            if (ok && item.dedupKey != null) responder.markDelivered(address, item.dedupKey)
+        for (bytes in responder.framesToPushOnConnect()) {
+            notify(device, characteristic, bytes)
         }
     }
 

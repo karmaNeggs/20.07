@@ -8,12 +8,15 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.ble.PositionTracker
+import org.offlinemesh.app.data.AppDatabase
+import org.offlinemesh.app.data.SosEntity
 
 /**
  * "Forward-up" navigation radar: peers are placed at their real bearing/distance (GPS,
@@ -27,6 +30,12 @@ import org.offlinemesh.app.ble.PositionTracker
  * fix at all (no signal, indoors, still acquiring, permission denied). That fallback needs only
  * Bluetooth, no GPS and no compass.
  */
+@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming") // a screen-level composable's
+// branches are UI states (no Bluetooth / no GPS fix / low compass confidence / empty peer list /
+// active SOS), not tangled logic — matches MainActivity.onCreate's identical call on LongMethod
+// for the same reason: comment-dense, explanatory branching here is a deliberate choice, not
+// something to fragment across more functions just to satisfy a line-count-style metric.
+// FunctionNaming: PascalCase is the established Compose convention this whole app uses.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NavigateScreen(groupId: String, meshService: MeshService?) {
@@ -39,6 +48,23 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
 
     val groupColor = remember(groupId) { AppColors.colorForGroup(groupId) }
+
+    // Same nickname resolution GroupChatScreen's chat feed already uses for these same senderIds —
+    // this list used to always show the raw senderId prefix regardless of a set nickname, an
+    // inconsistency with how the same people are labeled one screen over.
+    val context = LocalContext.current
+    val db = remember { AppDatabase.get(context) }
+    val nicknames by db.nicknameDao().observeForGroup(groupId).collectAsState(initial = emptyList())
+    val nicknameMap = remember(nicknames) { nicknames.associate { it.senderId to it.username } }
+    fun peerLabel(senderId: String): String = nicknameMap[senderId]?.takeIf { it.isNotBlank() } ?: senderId.take(8)
+
+    // SOS itself carries no position — this is a best-effort *enhancement* over the hop-count
+    // distance below, not a replacement: if the active SOS's own sender also has a recent,
+    // reasonably-accurate position on file (the same PositionTracker data already powering the
+    // radar dots above), show real GPS meters instead of a hop count. Falls back to hops
+    // whenever that's not resolvable (no fix, no recent position, or the combined GPS accuracy is
+    // too rough — placePeerOnRadar's own honesty gate, reused here rather than duplicated).
+    val sosList by db.sosDao().observeForGroup(groupId).collectAsState(initial = emptyList())
 
     LaunchedEffect(groupId, meshService) {
         while (true) {
@@ -61,6 +87,12 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
             placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
                 ?.let { Triple(senderId, it.distanceMeters, it.screenAngleDegrees) }
         }
+    }
+
+    // Nearest GPS-resolvable active SOS sender, if any — see the doc above sosList for why this
+    // is an enhancement over sosHop, not a replacement.
+    val sosGpsDistanceMeters = remember(myLocation, positions, sosList, heading) {
+        nearestSosGpsDistance(myLocation, positions, sosList, heading)
     }
 
     Scaffold(
@@ -105,7 +137,7 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                     LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 160.dp)) {
                         items(placedPeers.sortedBy { it.second }) { (senderId, dist, _) ->
                             ListItem(
-                                headlineContent = { Text(senderId.take(8)) },
+                                headlineContent = { Text(peerLabel(senderId)) },
                                 supportingContent = { Text("${dist.toInt()}m away") }
                             )
                         }
@@ -113,11 +145,34 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                 }
                 if (sosHop != MeshProtocol.UNKNOWN_HOP) {
                     Spacer(Modifier.height(8.dp))
-                    Text("Active SOS: $sosHop hop(s) away", color = AppColors.Danger, style = MaterialTheme.typography.titleMedium)
+                    val sosLabel = sosGpsDistanceMeters?.let { "Active SOS: ${it.toInt()}m away" }
+                        ?: "Active SOS: $sosHop hop(s) away"
+                    Text(sosLabel, color = AppColors.Danger, style = MaterialTheme.typography.titleMedium)
                 }
             }
         }
     }
+}
+
+/** The nearest GPS distance among currently-relayable SOS whose sender also has a recent, on-file
+ *  position — or null if none resolve (no fix, no matching position, or GPS too rough per
+ *  [placePeerOnRadar]'s own accuracy gate), in which case the caller falls back to hop-count. */
+private fun nearestSosGpsDistance(
+    myLocation: Location?,
+    positions: Map<String, PositionTracker.Record>,
+    sosList: List<SosEntity>,
+    headingDegrees: Float,
+): Float? {
+    val me = myLocation ?: return null
+    return sosList.filter { it.ttl > 0 }
+        .mapNotNull { sos -> positions[sos.senderId] }
+        .mapNotNull { record ->
+            val placement = placePeerOnRadar(
+                me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, headingDegrees
+            )
+            placement?.distanceMeters
+        }
+        .minOrNull()
 }
 
 @Composable

@@ -30,6 +30,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // standing record of it.
         const val CONTENT_MAX_AGE_MILLIS = 48L * 60 * 60 * 1000
         private const val SEEN_ID_MAX_AGE_MILLIS = 6L * 60 * 60 * 1000
+
+        /** Where a reassembled evidence file lives on disk once [EvidenceEntity.complete] is true —
+         *  the single place this naming convention is defined, shared with the UI layer
+         *  (GroupChatScreen's "tap to view") so it can find the same file [maybeReassemble] wrote,
+         *  without either side hardcoding the other's path logic separately. */
+        fun outputFile(context: Context, evidenceId: String, mimeType: String): File {
+            val outDir = File(context.filesDir, "evidence")
+            val ext = if (mimeType.startsWith("video")) "mp4" else "jpg"
+            return File(outDir, "$evidenceId.$ext")
+        }
     }
 
     private val db = org.offlinemesh.app.data.AppDatabase.get(context)
@@ -153,9 +163,8 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         }
         val plaintext = CryptoUtils.decrypt(key, ciphertext) ?: return
 
-        val outDir = File(context.filesDir, "evidence").apply { mkdirs() }
-        val ext = if (meta.mimeType.startsWith("video")) "mp4" else "jpg"
-        val outFile = File(outDir, "$evidenceId.$ext")
+        val outFile = outputFile(context, evidenceId, meta.mimeType)
+        outFile.parentFile?.mkdirs()
         FileOutputStream(outFile).use { it.write(plaintext) }
 
         evidenceDao.update(meta.copy(complete = true))
@@ -166,6 +175,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable().filter { it.ttl > 0 }
 
     suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable().filter { it.ttl > 0 }
+
+    /** Looks up one evidence item's header by id — used by [WifiDirectHandoffCoordinator] to
+     *  re-derive a `groupId`/`mimeType` from just the `evidenceId` a Manifest frame carries. */
+    suspend fun evidenceMeta(id: String): EvidenceEntity? = evidenceDao.get(id)
 
     suspend fun haveIndexSet(evidenceId: String): Set<Int> = chunkDao.receivedIndexes(evidenceId).toSet()
 
