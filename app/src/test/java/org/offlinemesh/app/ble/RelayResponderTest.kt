@@ -144,4 +144,36 @@ class RelayResponderTest {
 
         assertTrue(rebuilt.mightContain("sos:sos-1"))
     }
+
+    // ---- catalogEpoch: the signal ConnectionAttemptTracker uses to skip a peer's synced cooldown
+    // once there's something new to offer them specifically (the passerby-relay fix) ----
+
+    @Test
+    fun `catalogEpoch advances when a new SOS is ingested`() = runTest {
+        val before = relay.catalogEpoch
+        relay.ingestSos(sosFixture())
+        assertTrue(relay.catalogEpoch > before)
+    }
+
+    @Test
+    fun `catalogEpoch does not advance for a duplicate, already-seen SOS`() = runTest {
+        relay.ingestSos(sosFixture())
+        val afterFirst = relay.catalogEpoch
+        val ingestedAgain = relay.ingestSos(sosFixture()) // same id — seenDao dedup should reject it
+        assertEquals(false, ingestedAgain)
+        assertEquals(afterFirst, relay.catalogEpoch)
+    }
+
+    @Test
+    fun `catalogEpoch advances when a new evidence header is ingested`() = runTest {
+        val before = relay.catalogEpoch
+        relay.ingestEvidenceMeta(evidenceFixture())
+        assertTrue(relay.catalogEpoch > before)
+    }
+
+    @Test
+    fun `RelayResponder catalogEpoch mirrors the underlying RelayEngine's`() = runTest {
+        relay.ingestSos(sosFixture())
+        assertEquals(relay.catalogEpoch, responder.catalogEpoch)
+    }
 }

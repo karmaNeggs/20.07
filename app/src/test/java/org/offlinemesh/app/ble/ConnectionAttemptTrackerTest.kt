@@ -13,8 +13,9 @@ import org.junit.Test
  */
 class ConnectionAttemptTrackerTest {
     private var clock = 0L
+    private var epoch = 0
     private fun tracker(maxConcurrent: Int = 3, cooldownMs: Long = 45_000L, syncedCooldownMs: Long = cooldownMs) =
-        ConnectionAttemptTracker(maxConcurrent, cooldownMs, syncedCooldownMs, now = { clock })
+        ConnectionAttemptTracker(maxConcurrent, cooldownMs, syncedCooldownMs, now = { clock }, currentEpoch = { epoch })
 
     @Test
     fun `a fresh address can attempt`() {
@@ -135,6 +136,49 @@ class ConnectionAttemptTrackerTest {
         t.connectionEnded("AA:BB", synced = true)
         clock += 45_001
         assertTrue(t.canAttempt("AA:BB")) // no behavior change when syncedCooldownMs isn't specified
+    }
+
+    // ---- passerby relay: skip the synced cooldown for a peer once we're carrying something new
+    // for them specifically, instead of waiting out a cooldown that predates that content ----
+
+    @Test
+    fun `still respects the synced cooldown when nothing new has arrived for this peer`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = true) // epoch 0 recorded for AA:BB
+        clock += 1_000
+        assertFalse(t.canAttempt("AA:BB")) // still cooling down, catalog hasn't changed since
+    }
+
+    @Test
+    fun `skips the synced cooldown once the catalog changes after syncing with this peer`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = true) // epoch 0 recorded for AA:BB
+        clock += 1_000
+        epoch++ // picked up something new from a different peer in between
+        assertTrue(t.canAttempt("AA:BB")) // worth trying again now, even mid-cooldown
+    }
+
+    @Test
+    fun `a peer never fully synced still respects its cooldown regardless of epoch`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = false) // failed/aborted — no syncedEpoch recorded
+        epoch++
+        assertFalse(t.canAttempt("AA:BB")) // no recorded sync to compare against — normal cooldown applies
+    }
+
+    @Test
+    fun `an epoch bump for one peer doesn't bypass another peer's independent cooldown`() {
+        val t = tracker(cooldownMs = 45_000L, syncedCooldownMs = 180_000L)
+        t.attemptStarted("AA:BB")
+        t.connectionEnded("AA:BB", synced = true) // epoch 0 recorded for AA:BB
+        epoch++
+        t.attemptStarted("CC:DD")
+        t.connectionEnded("CC:DD", synced = true) // epoch 1 recorded for CC:DD — already current
+        assertTrue(t.canAttempt("AA:BB")) // stale relative to AA:BB's own last sync
+        assertFalse(t.canAttempt("CC:DD")) // not stale relative to its own — still cooling down
     }
 
     // ---- bounded cooldown map: BLE addresses rotate (RPA, ~15min), so a crowd session must not

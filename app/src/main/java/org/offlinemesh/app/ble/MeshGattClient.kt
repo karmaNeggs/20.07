@@ -65,7 +65,10 @@ class MeshGattClient(
     // The connection-attempt state machine itself lives in ConnectionAttemptTracker (unit-tested in
     // isolation there) — this class only owns the real connectGatt() call, the real timeout delay,
     // and closing the gatt object.
-    private val attemptTracker = ConnectionAttemptTracker(maxConcurrentClientConnections, reconnectCooldownMs, syncedReconnectCooldownMs)
+    private val attemptTracker = ConnectionAttemptTracker(
+        maxConcurrentClientConnections, reconnectCooldownMs, syncedReconnectCooldownMs,
+        currentEpoch = { responder.catalogEpoch }
+    )
     // Last write/notify time per peer address — drives the idle-based disconnect below.
     private val lastActivity = ConcurrentHashMap<String, Long>()
     private fun touch(address: String) { lastActivity[address] = System.currentTimeMillis() }

@@ -1,6 +1,7 @@
 package org.offlinemesh.app.ui
 
 import android.location.Location
+import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -30,11 +31,22 @@ import org.offlinemesh.app.data.SosEntity
  * fix at all (no signal, indoors, still acquiring, permission denied). That fallback needs only
  * Bluetooth, no GPS and no compass.
  */
-@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming") // a screen-level composable's
-// branches are UI states (no Bluetooth / no GPS fix / low compass confidence / empty peer list /
-// active SOS), not tangled logic — matches MainActivity.onCreate's identical call on LongMethod
-// for the same reason: comment-dense, explanatory branching here is a deliberate choice, not
-// something to fragment across more functions just to satisfy a line-count-style metric.
+/** One placed peer on this screen's radar — [ageSeconds] is how old the [PositionTracker.Record]
+ *  it was placed from is, fed to [RadarDot] so [RadarCanvas] can fade a stale one. */
+private data class PlacedPeer(
+    val senderId: String,
+    val distanceMeters: Float,
+    val screenAngleDegrees: Float,
+    val ageSeconds: Float,
+)
+
+@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "TooGenericExceptionCaught")
+// a screen-level composable's branches are UI states (no Bluetooth / no GPS fix / low compass
+// confidence / empty peer list / active SOS), not tangled logic — matches MainActivity.onCreate's
+// identical call on LongMethod for the same reason: comment-dense, explanatory branching here is
+// a deliberate choice, not something to fragment across more functions just to satisfy a
+// line-count-style metric. TooGenericExceptionCaught: the refresh loop's catch is deliberately
+// broad — anything is better caught+logged than left to silently kill the loop.
 // FunctionNaming: PascalCase is the established Compose convention this whole app uses.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,6 +58,7 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
     var groupPresenceHop by remember { mutableStateOf(MeshProtocol.UNKNOWN_HOP) }
     var sosHop by remember { mutableStateOf(MeshProtocol.UNKNOWN_HOP) }
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
+    val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
     val groupColor = remember(groupId) { AppColors.colorForGroup(groupId) }
 
@@ -68,14 +81,20 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
 
     LaunchedEffect(groupId, meshService) {
         while (true) {
-            val svc = meshService
-            if (svc != null) {
-                myLocation = svc.locationTracker.location.value
-                positions = svc.positionTracker.forGroup(groupId)
-                heading = svc.compassTracker.headingDegrees.value
-                compassLowAccuracy = svc.compassTracker.lowAccuracy.value
-                groupPresenceHop = svc.hopToGroupPresence(groupId)
-                sosHop = svc.hopTracker.bestActiveSosHop(groupId)
+            // See HomeScreen's identical wrap — an uncaught exception here would silently kill
+            // this loop forever, not just skip one tick.
+            try {
+                val svc = meshService
+                if (svc != null) {
+                    myLocation = svc.locationTracker.location.value
+                    positions = svc.positionTracker.forGroup(groupId)
+                    heading = svc.compassTracker.headingDegrees.value
+                    compassLowAccuracy = svc.compassTracker.lowAccuracy.value
+                    groupPresenceHop = svc.hopToGroupPresence(groupId)
+                    sosHop = svc.hopTracker.bestActiveSosHop(groupId)
+                }
+            } catch (e: Exception) {
+                Log.w("NavigateScreen", "radar refresh tick failed: ${e.message}")
             }
             delay(1000)
         }
@@ -85,7 +104,10 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
         val me = myLocation ?: return@remember emptyList()
         positions.mapNotNull { (senderId, record) ->
             placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
-                ?.let { Triple(senderId, it.distanceMeters, it.screenAngleDegrees) }
+                ?.let {
+                    val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+                    PlacedPeer(senderId, it.distanceMeters, it.screenAngleDegrees, ageSeconds)
+                }
         }
     }
 
@@ -110,7 +132,13 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
         ) {
             if (!bluetoothEnabled) {
                 Spacer(Modifier.height(24.dp))
-                BluetoothOffNotice()
+                MeshPausedNotice()
+            } else if (!meshActive) {
+                Spacer(Modifier.height(24.dp))
+                MeshPausedNotice(
+                    title = "Mesh is offline",
+                    subtitle = "Turn off Offline mode on Home to resume"
+                )
             } else if (myLocation == null) {
                 Spacer(Modifier.height(24.dp))
                 Text("Waiting for GPS fix…", style = MaterialTheme.typography.titleMedium)
@@ -138,9 +166,9 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                 // "this is an SOS." With 2+ active SOS, each resolvable sender's own dot turns red
                 // at its own real bearing/distance, instead of collapsing to one number below.
                 RadarCanvas(
-                    dots = placedPeers.map { (senderId, dist, angle) ->
-                        val color = if (senderId in activeSosSenders) AppColors.Danger else groupColor
-                        RadarDot(color, dist, angle)
+                    dots = placedPeers.map { peer ->
+                        val color = if (peer.senderId in activeSosSenders) AppColors.Danger else groupColor
+                        RadarDot(color, peer.distanceMeters, peer.screenAngleDegrees, peer.ageSeconds)
                     },
                     headingDegrees = heading
                 )
@@ -149,10 +177,10 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                     Text("No group member's position heard yet", style = MaterialTheme.typography.bodyMedium)
                 } else {
                     LazyColumn(Modifier.weight(1f, fill = false).heightIn(max = 160.dp)) {
-                        items(placedPeers.sortedBy { it.second }) { (senderId, dist, _) ->
+                        items(placedPeers.sortedBy { it.distanceMeters }) { peer ->
                             ListItem(
-                                headlineContent = { Text(peerLabel(senderId)) },
-                                supportingContent = { Text("${dist.toInt()}m away") }
+                                headlineContent = { Text(peerLabel(peer.senderId)) },
+                                supportingContent = { Text("${peer.distanceMeters.toInt()}m away") }
                             )
                         }
                     }

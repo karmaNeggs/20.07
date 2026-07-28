@@ -30,3 +30,19 @@
 # minifying anything that pulls in Tink. Confirmed by R8's own missing_rules.txt output, not a guess.
 -dontwarn com.google.errorprone.annotations.**
 -dontwarn javax.annotation.**
+
+# Strip every android.util.Log call out of release builds entirely (R8 removes the call site, not
+# just silences output) — a security-scan finding: this app logs peer BLE addresses, connection
+# diagnostics, and warning messages (RelayResponder, MeshGattClient, the screens' defensive catch
+# blocks) purely for on-device debugging, none of it meant to survive into a release APK where
+# it's readable via `adb logcat` with USB debugging authorized. Debug builds are untouched (no
+# minification there), so on-device debugging via logcat still works exactly as before.
+-assumenosideeffects class android.util.Log {
+    public static boolean isLoggable(java.lang.String, int);
+    public static int v(...);
+    public static int i(...);
+    public static int w(...);
+    public static int d(...);
+    public static int e(...);
+    public static int wtf(...);
+}

@@ -3,6 +3,7 @@ package org.offlinemesh.app.ui
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import android.location.Location
+import android.util.Log
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -56,6 +57,12 @@ private sealed class FeedItem(val timestamp: Long) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
+@Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "LongMethod", "FunctionNaming")
+// TooGenericExceptionCaught: the refresh loop's catch is deliberately broad — anything is better
+// caught+logged than left to silently kill the loop forever; see HomeScreen/NavigateScreen's
+// identical suppress for the same reason. The other three: a screen-level composable's branches
+// are UI states, not tangled logic, and PascalCase is this app's established Compose convention
+// — same reasoning already applied to HomeScreen/NavigateScreen.
 @Composable
 fun GroupChatScreen(
     groupId: String,
@@ -83,20 +90,34 @@ fun GroupChatScreen(
     var heading by remember { mutableStateOf(0f) }
     var radarDots by remember { mutableStateOf<List<RadarDot>>(emptyList()) }
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
+    val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
     LaunchedEffect(groupId) { groupName = repo.groupDao.getGroup(groupId)?.name ?: groupId }
 
     LaunchedEffect(groupId, meshService) {
         while (true) {
-            val svc = meshService
-            if (svc != null) {
-                myLocation = svc.locationTracker.location.value
-                heading = svc.compassTracker.headingDegrees.value
-                val me = myLocation
-                radarDots = if (me == null) emptyList() else svc.positionTracker.forGroup(groupId).mapNotNull { (_, record) ->
-                    placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
-                        ?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees) }
+            // See HomeScreen's identical wrap — an uncaught exception here would silently kill
+            // this loop forever, not just skip one tick.
+            try {
+                val svc = meshService
+                if (svc != null) {
+                    myLocation = svc.locationTracker.location.value
+                    heading = svc.compassTracker.headingDegrees.value
+                    val me = myLocation
+                    radarDots = if (me == null) {
+                        emptyList()
+                    } else {
+                        svc.positionTracker.forGroup(groupId).mapNotNull { (_, record) ->
+                            val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+                            placePeerOnRadar(
+                                me.latitude, me.longitude, me.accuracy,
+                                record.lat, record.lon, record.accuracyM, heading
+                            )?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
+                        }
+                    }
                 }
+            } catch (e: Exception) {
+                Log.w("GroupChatScreen", "radar refresh tick failed: ${e.message}")
             }
             delay(1000)
         }
@@ -156,10 +177,16 @@ fun GroupChatScreen(
                 Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 4.dp).clickable(onClick = onExpandRadar),
                 contentAlignment = Alignment.Center
             ) {
-                if (bluetoothEnabled) {
-                    RadarCanvas(dots = radarDots, headingDegrees = heading, sizeDp = 150.dp)
+                if (!bluetoothEnabled) {
+                    MeshPausedNotice(sizeDp = 150.dp)
+                } else if (!meshActive) {
+                    MeshPausedNotice(
+                        sizeDp = 150.dp,
+                        title = "Mesh is offline",
+                        subtitle = "Turn off Offline mode on Home to resume"
+                    )
                 } else {
-                    BluetoothOffNotice(sizeDp = 150.dp)
+                    RadarCanvas(dots = radarDots, headingDegrees = heading, sizeDp = 150.dp)
                 }
             }
 

@@ -12,6 +12,7 @@ import org.offlinemesh.app.data.SosEntity
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Chunking, dedup, and reassembly logic — kept independent of the actual BLE plumbing so
@@ -49,6 +50,15 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     private val chunkDao = db.evidenceChunkDao()
     private val nicknameDao = db.nicknameDao()
 
+    // Bumped every time something is added to this device's relayable catalog (an authored item,
+    // or a newly-ingested one from a peer) — the same set currentCatalogKeys() draws its keys
+    // from. See ConnectionAttemptTracker's currentEpoch param: comparing this against the epoch
+    // recorded at a peer's last successful sync is what lets a device skip that peer's normal
+    // reconnect cooldown when it's now carrying something new for them (the "passerby relay"
+    // case), instead of only reconnecting on the old peer-agnostic timer.
+    private val epoch = AtomicInteger(0)
+    val catalogEpoch: Int get() = epoch.get()
+
     // ---------- creating local items ----------
 
     suspend fun createSos(groupId: String, text: String): SosEntity {
@@ -63,6 +73,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         )
         sosDao.insert(sos)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
+        epoch.incrementAndGet()
         return sos
     }
 
@@ -94,6 +105,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val outFile = outputFile(context, id, mimeType)
         outFile.parentFile?.mkdirs()
         FileOutputStream(outFile).use { it.write(plaintext) }
+        epoch.incrementAndGet()
         return evidence
     }
 
@@ -108,6 +120,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val mac = CryptoUtils.authTag(key, MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt))
         val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac)
         nicknameDao.upsert(n)
+        epoch.incrementAndGet()
         return n
     }
 
@@ -119,6 +132,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         if (seenDao.find(sos.id) != null) return false
         seenDao.insert(SeenMessageEntity(sos.id, System.currentTimeMillis()))
         sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1))
+        epoch.incrementAndGet()
         return true
     }
 
@@ -126,6 +140,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         if (seenDao.find(meta.id) != null) return false
         seenDao.insert(SeenMessageEntity(meta.id, System.currentTimeMillis()))
         evidenceDao.insert(meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null))
+        epoch.incrementAndGet()
         return true
     }
 
@@ -135,6 +150,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val existing = nicknameDao.get(n.groupId, n.senderId)
         if (existing != null && existing.updatedAt >= n.updatedAt) return false
         nicknameDao.upsert(n)
+        epoch.incrementAndGet()
         return true
     }
 

@@ -32,6 +32,9 @@ import androidx.navigation.navArgument
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.data.GroupRepository
 
+@Suppress("TooManyFunctions") // one more small, single-purpose private helper (applySystemBarColors)
+// pushed this over the default threshold — splitting Activity lifecycle/setup logic across
+// multiple classes here would add indirection this codebase doesn't otherwise use for one Activity.
 class MainActivity : ComponentActivity() {
 
     private var meshService by mutableStateOf<MeshService?>(null)
@@ -109,6 +112,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** Status/navigation bar color is a separate system-drawn layer the manifest's Activity theme
+     *  doesn't fully pin down on every OEM skin — set explicitly to the app's current background
+     *  so nothing ever shows the wrong-theme default (was surfacing as a stray white bar on some
+     *  devices before this existed). Called once synchronously in [onCreate] before the first
+     *  frame, and again from a `LaunchedEffect(AppColors.isDarkMode)` in [setContent] below
+     *  whenever the light/dark toggle flips at runtime — [AppColors.Background] alone wouldn't
+     *  update these bars on its own since they're plain `Window` properties, not Compose state. */
+    private fun applySystemBarColors() {
+        window.statusBarColor = AppColors.Background.toArgb()
+        window.navigationBarColor = AppColors.Background.toArgb()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = !AppColors.isDarkMode
+            isAppearanceLightNavigationBars = !AppColors.isDarkMode
+        }
+    }
+
     @Suppress("LongMethod") // one-time launch setup (permission launcher, service bind, compose
     // tree) — this project's own detekt config treats comment-dense, explanatory code as a
     // deliberate choice rather than something to break apart just to satisfy a line count.
@@ -127,15 +146,11 @@ class MainActivity : ComponentActivity() {
         // The manifest's system Activity theme only covers window background before Compose's
         // first frame — status/navigation bar color is a separate system-drawn layer that theme
         // doesn't fully pin down on every OEM skin, especially on large screens with a taller/
-        // different-shaped nav bar. Set explicitly to the app's own dark background so nothing
-        // ever shows the light default (was surfacing as a stray white bar on some devices), and
-        // mark both bars "not light" so their icons render light-on-dark instead of invisible.
-        window.statusBarColor = AppColors.Background.toArgb()
-        window.navigationBarColor = AppColors.Background.toArgb()
-        WindowCompat.getInsetsController(window, window.decorView).apply {
-            isAppearanceLightStatusBars = false
-            isAppearanceLightNavigationBars = false
-        }
+        // different-shaped nav bar. Loaded synchronously here (not just from AppTheme's own
+        // LaunchedEffect below) so the very first frame already matches the persisted light/dark
+        // choice instead of always flashing dark then correcting.
+        AppColors.loadPersisted(this)
+        applySystemBarColors()
         repo = GroupRepository(applicationContext)
         pendingJoinCode = extractJoinCode(intent)
         pendingOpenGroupId = intent.getStringExtra(EXTRA_OPEN_GROUP_ID)
@@ -152,6 +167,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             AppTheme {
+                LaunchedEffect(AppColors.isDarkMode) { applySystemBarColors() }
                 Surface(modifier = Modifier.fillMaxSize()) {
                     val allGranted = remember(resumeTick) { hasAllPermissions() }
                     val askedBefore = prefs.getBoolean("asked_once", false)

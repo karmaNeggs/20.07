@@ -39,6 +39,11 @@ class RelayResponder(
 ) {
     private val maxPositionRelayHops = 4
 
+    /** Forwarded from [RelayEngine.catalogEpoch] — see [ConnectionAttemptTracker]'s `currentEpoch`
+     *  param for what this is used for. Kept as a passthrough rather than handing `relay` itself
+     *  to [MeshGattClient]/[MeshGattServer], which only ever depend on [RelayResponder]. */
+    val catalogEpoch: Int get() = relay.catalogEpoch
+
     // Per-connection cap on *responses* to a manifest (i.e. novel chunks actually pushed).
     // Keeps one busy item from starving the rotation through other peers.
     private val maxChunksPerSession = 150

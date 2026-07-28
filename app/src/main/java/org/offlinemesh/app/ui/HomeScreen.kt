@@ -3,6 +3,7 @@ package org.offlinemesh.app.ui
 import android.Manifest
 import android.content.pm.PackageManager
 import android.location.Location
+import android.util.Log
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,6 +19,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.Warning
@@ -42,6 +45,12 @@ import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
 
+@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "TooGenericExceptionCaught")
+// a screen-level composable's branches are UI states (Bluetooth off / mesh offline / waiting for
+// GPS / live radar), not tangled logic — matches NavigateScreen's identical suppress combo on
+// these same rules for the same reason. FunctionNaming: PascalCase is the established Compose
+// convention this whole app uses. TooGenericExceptionCaught: the refresh loop's catch is
+// deliberately broad — anything is better caught+logged than left to silently kill the loop.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -51,19 +60,31 @@ fun HomeScreen(
     onOpenGroup: (String) -> Unit,
     onGeneralSos: () -> Unit,
 ) {
+    val context = LocalContext.current
     val groups by repo.groupDao.observeGroups().collectAsState(initial = emptyList())
     var myLocation by remember { mutableStateOf<Location?>(null) }
     var heading by remember { mutableStateOf(0f) }
     var hopByGroup by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
+    val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
     LaunchedEffect(meshService, groups) {
         while (true) {
-            val svc = meshService
-            if (svc != null) {
-                myLocation = svc.locationTracker.location.value
-                heading = svc.compassTracker.headingDegrees.value
-                hopByGroup = groups.associate { it.id to svc.hopToGroupPresence(it.id) }
+            // Caught, not left to propagate — an uncaught exception here would silently kill this
+            // whole polling loop forever (LaunchedEffect doesn't restart on its own), leaving the
+            // radar frozen until the composable re-keys (e.g. leaving and re-entering the screen).
+            try {
+                val svc = meshService
+                if (svc != null) {
+                    myLocation = svc.locationTracker.location.value
+                    heading = svc.compassTracker.headingDegrees.value
+                    hopByGroup = groups.associate { it.id to svc.hopToGroupPresence(it.id) }
+                }
+            } catch (e: Exception) {
+                // Deliberately broad — anything here is better caught and logged than left to
+                // propagate and silently kill this while(true) loop forever (LaunchedEffect
+                // doesn't restart itself), which was the whole reason this wrap exists.
+                Log.w("HomeScreen", "radar refresh tick failed: ${e.message}")
             }
             delay(1000)
         }
@@ -75,8 +96,9 @@ fun HomeScreen(
         if (me == null || svc == null) emptyList() else groups.flatMap { g ->
             val color = AppColors.colorForGroup(g.id)
             svc.positionTracker.forGroup(g.id).mapNotNull { (_, record) ->
+                val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
                 placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
-                    ?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees) }
+                    ?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
             }
         }
     }
@@ -92,6 +114,16 @@ fun HomeScreen(
                         fontSize = 34.sp,
                         letterSpacing = (-1).sp
                     )
+                },
+                actions = {
+                    val isDark = AppColors.isDarkMode
+                    IconButton(onClick = { AppColors.setDarkMode(context, !isDark) }) {
+                        Icon(
+                            if (isDark) Icons.Filled.LightMode else Icons.Filled.DarkMode,
+                            contentDescription = if (isDark) "Switch to light theme" else "Switch to dark theme",
+                            tint = AppColors.OnSurface
+                        )
+                    }
                 },
                 colors = flushTopAppBarColors()
             )
@@ -119,7 +151,12 @@ fun HomeScreen(
             ) {
                 item {
                     if (!bluetoothEnabled) {
-                        BluetoothOffNotice()
+                        MeshPausedNotice()
+                    } else if (!meshActive) {
+                        MeshPausedNotice(
+                            title = "Mesh is offline",
+                            subtitle = "Turn off Offline mode above to resume"
+                        )
                     } else if (myLocation == null) {
                         Box(
                             Modifier.size(260.dp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),

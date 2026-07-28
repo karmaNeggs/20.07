@@ -147,7 +147,7 @@ class MeshService : Service() {
         _bluetoothEnabled.value = bluetoothManager.adapter?.isEnabled ?: false
         registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
         locationTracker = LocationTracker(applicationContext).also { it.start() }
-        compassTracker = CompassTracker(applicationContext).also { it.start() }
+        compassTracker = CompassTracker(applicationContext, locationTracker).also { it.start() }
         createSosNotificationChannel()
         // Experimental, opt-in (default OFF), see WifiDirectAccelerator's class doc — constructed
         // unconditionally (cheap: WifiP2pManager.initialize just registers a callback channel, no

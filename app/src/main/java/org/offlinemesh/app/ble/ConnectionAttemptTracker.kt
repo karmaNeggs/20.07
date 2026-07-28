@@ -36,6 +36,17 @@ package org.offlinemesh.app.ble
  * that alone biases the limited concurrent-connection slots toward peers not yet caught up, using
  * the same cooldown mechanism already proven by the Pass 16 bug fix rather than a new data
  * structure. Defaults to [reconnectCooldownMs] (i.e. no behavior change) when not specified.
+ *
+ * [currentEpoch] closes a gap found live-testing a 3-phone "passerby relay" scenario: two phones
+ * out of range of each other, a third carrying content between them. The synced cooldown above is
+ * peer-agnostic — it has no memory of *what* we synced, only *that* we did — so a phone that syncs
+ * with peer B (nothing new to offer yet), then meets peer A and picks up something new, stays
+ * locked out of retrying B for the full cooldown even though it's now carrying content B needs. Each
+ * [connectionEnded] with `synced=true` records [RelayEngine.catalogEpoch] (via [currentEpoch]) at
+ * that moment in [syncedEpoch]; [canAttempt] then skips the cooldown, but only for that one address,
+ * if the epoch has moved since — i.e. only when there's actually something new to offer that specific
+ * peer, not as a general excuse to reconnect more often. Defaults to a constant so existing callers
+ * (and every pre-existing test) see no behavior change unless they opt in.
  */
 class ConnectionAttemptTracker(
     private val maxConcurrent: Int,
@@ -43,6 +54,7 @@ class ConnectionAttemptTracker(
     private val syncedCooldownMs: Long = reconnectCooldownMs,
     private val maxTrackedAddresses: Int = 500,
     private val now: () -> Long = System::currentTimeMillis,
+    private val currentEpoch: () -> Int = { 0 },
 ) {
     private val connecting = mutableSetOf<String>()
     private val callbackReceived = mutableSetOf<String>()
@@ -56,15 +68,29 @@ class ConnectionAttemptTracker(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>) = size > maxTrackedAddresses
     }
 
+    // Same LRU bounding and reasoning as cooldownUntil — one entry per address we've ever fully
+    // synced with, evicted the same way once over the cap.
+    private val syncedEpoch = object : LinkedHashMap<String, Int>(
+        DEFAULT_MAP_CAPACITY, DEFAULT_MAP_LOAD_FACTOR, true
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>) = size > maxTrackedAddresses
+    }
+
     /** True if a fresh attempt to [address] should proceed right now — not already attempting/
-     *  connected, not in post-disconnect cooldown, and under the concurrency limit. */
+     *  connected, under the concurrency limit, and either not in post-disconnect cooldown or
+     *  carrying something new for this specific peer since the last time we fully synced with it
+     *  (see [currentEpoch]'s doc above). */
     @Suppress("ReturnCount") // three independent guard clauses read more clearly early-return than
     // folded into one boolean expression — same style choice as other early-return guards in this file.
     @Synchronized
     fun canAttempt(address: String): Boolean {
         if (address in connecting) return false
         val cooldown = cooldownUntil[address]
-        if (cooldown != null && now() < cooldown) return false
+        if (cooldown != null && now() < cooldown) {
+            val lastSyncedEpoch = syncedEpoch[address]
+            val hasSomethingNewForThisPeer = lastSyncedEpoch != null && lastSyncedEpoch != currentEpoch()
+            if (!hasSomethingNewForThisPeer) return false
+        }
         return connecting.size < maxConcurrent
     }
 
@@ -98,6 +124,7 @@ class ConnectionAttemptTracker(
         connecting.remove(address)
         callbackReceived.remove(address)
         cooldownUntil[address] = now() + if (synced) syncedCooldownMs else reconnectCooldownMs
+        if (synced) syncedEpoch[address] = currentEpoch()
     }
 
     @Synchronized

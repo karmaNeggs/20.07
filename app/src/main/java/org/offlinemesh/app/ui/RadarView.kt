@@ -33,6 +33,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.text.TextStyle
@@ -45,21 +46,42 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** One plottable point: distance/bearing already forward-relative (0° = straight ahead). */
-data class RadarDot(val color: Color, val distanceMeters: Float, val screenAngleDegrees: Float)
+/** One plottable point: distance/bearing already forward-relative (0° = straight ahead).
+ *  [ageSeconds] defaults to 0 (a fresh, just-computed point, e.g. this device's own "you" marker
+ *  has no independent age concept) — peer dots pass the real age of the position record they were
+ *  placed from, so [RadarCanvas] can fade a dot that's gone stale (see [PositionTracker]'s own
+ *  ~90s expiry) instead of it looking exactly as live as one just received. */
+data class RadarDot(
+    val color: Color,
+    val distanceMeters: Float,
+    val screenAngleDegrees: Float,
+    val ageSeconds: Float = 0f,
+)
 
 /** Distance + forward-relative screen angle for one peer. */
 data class RadarPlacement(val distanceMeters: Float, val screenAngleDegrees: Float)
 
 /**
- * Shown instead of a radar — on Home, Group chat, and Navigate alike, all reading the same
- * `MeshService.bluetoothEnabled` flow — whenever Bluetooth is off. Without this, a radar would keep
- * showing whatever peer positions/hop counts were last cached, looking exactly as live as normal
- * even though nothing could possibly be arriving anymore; all three screens go in and out of this
- * state together since they share one source of truth instead of each polling independently.
+ * Shown instead of a radar — on Home, Group chat, and Navigate alike — whenever the mesh can't
+ * possibly be delivering anything right now, for either of two independent reasons: the OS's
+ * actual Bluetooth adapter is off (`MeshService.bluetoothEnabled`), or the app's own "Offline"
+ * toggle is on (`MeshService.meshActive` false) even though Bluetooth itself is fine. Without
+ * this, a radar would keep showing whatever peer positions/hop counts were last cached, looking
+ * exactly as live as normal even though nothing could possibly be arriving anymore; all three
+ * screens go in and out of this state together since they share the same two flows instead of
+ * each polling independently. [title]/[subtitle] default to the Bluetooth-off copy; callers pass
+ * different text for the offline-toggle case so the message stays accurate to the actual cause.
  */
+@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
+// (and every other screen) already uses for composables — see detekt-baseline.xml, which
+// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
-fun BluetoothOffNotice(modifier: Modifier = Modifier, sizeDp: Dp = 260.dp) {
+fun MeshPausedNotice(
+    modifier: Modifier = Modifier,
+    sizeDp: Dp = 260.dp,
+    title: String = "Bluetooth is off",
+    subtitle: String = "Turn it on to find your group",
+) {
     Box(
         modifier.size(sizeDp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),
         contentAlignment = Alignment.Center
@@ -67,12 +89,12 @@ fun BluetoothOffNotice(modifier: Modifier = Modifier, sizeDp: Dp = 260.dp) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(Icons.Filled.BluetoothDisabled, contentDescription = null, tint = AppColors.Warning)
             Text(
-                "Bluetooth is off", color = AppColors.OnSurface,
+                title, color = AppColors.OnSurface,
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(top = 8.dp)
             )
             Text(
-                "Turn it on to find your group", color = AppColors.OnSurfaceMuted,
+                subtitle, color = AppColors.OnSurfaceMuted,
                 style = MaterialTheme.typography.bodySmall,
                 modifier = Modifier.padding(top = 4.dp)
             )
@@ -110,8 +132,6 @@ fun placePeerOnRadar(
     return RadarPlacement(results[0], screenAngle)
 }
 
-private val GlowGreen = Color(0xFF34D399)
-
 /**
  * Sonar/scope aesthetic — glowing rings, cardinal ticks, a center crosshair, and a slow rotating
  * sweep — shared between the per-group Navigate screen (one color) and the home dashboard (many
@@ -128,6 +148,11 @@ private val GlowGreen = Color(0xFF34D399)
 // distance not distinguished past that point (see the `.coerceIn(0f, 1f)` below) — the radar zooms
 // in for a tight cluster nearby but never zooms back out past this ceiling for one far outlier.
 private val ringScaleLadder = listOf(20, 40, 80, 200)
+
+// See the stale-dot fade in RadarCanvas's draw loop below.
+private const val STALE_FADE_START_SECONDS = 30f
+private const val STALE_FADE_END_SECONDS = 90f
+private const val STALE_FADE_MIN_ALPHA = 0.35f
 
 private fun ringScaleFor(farthestMeters: Float): Int =
     ringScaleLadder.firstOrNull { it >= farthestMeters } ?: ringScaleLadder.last()
@@ -168,7 +193,7 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
             drawArc(
                 brush = Brush.sweepGradient(
                     0.5f to Color.Transparent,
-                    0.75f to GlowGreen.copy(alpha = 0.16f),
+                    0.75f to AppColors.Safe.copy(alpha = 0.16f),
                     1.0f to Color.Transparent,
                     center = center
                 ),
@@ -183,7 +208,7 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                     brush = Brush.sweepGradient(
                         0f to Color.Transparent,
                         0.85f to Color.Transparent,
-                        1f to GlowGreen.copy(alpha = 0.16f),
+                        1f to AppColors.Safe.copy(alpha = 0.16f),
                         center = center
                     ),
                     startAngle = 0f, sweepAngle = 360f, useCenter = true,
@@ -199,8 +224,15 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
             val labelAngleRad = Math.toRadians((45 - 90).toDouble())
             for (i in 1..4) {
                 val r = maxRadius * i / 4
-                drawCircle(color = GlowGreen.copy(alpha = 0.06f), radius = r, center = center, style = Stroke(width = 7f))
-                drawCircle(color = GlowGreen.copy(alpha = 0.35f), radius = r, center = center, style = Stroke(width = 1.4f))
+                // Alphas raised from an original 0.06/0.35 (fine in a dim room, close to invisible
+                // in direct sun or screen glare) — brighter still stays a background hint, not
+                // something that competes with dot colors, which sit well above these.
+                drawCircle(
+                    color = AppColors.Safe.copy(alpha = 0.14f), radius = r, center = center, style = Stroke(width = 7f)
+                )
+                drawCircle(
+                    color = AppColors.Safe.copy(alpha = 0.5f), radius = r, center = center, style = Stroke(width = 1.4f)
+                )
             }
             run {
                 val lx = center.x + maxRadius * cos(labelAngleRad).toFloat()
@@ -209,32 +241,71 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                     textMeasurer = textMeasurer,
                     text = "${maxDistance.toInt()}m",
                     topLeft = Offset(lx + 3f, ly - 12f),
-                    style = TextStyle(color = GlowGreen.copy(alpha = 0.6f), fontSize = 9.sp)
+                    style = TextStyle(color = AppColors.Safe.copy(alpha = 0.6f), fontSize = 9.sp)
                 )
             }
 
-            // Center crosshair
-            drawLine(GlowGreen.copy(alpha = 0.25f), Offset(center.x - maxRadius, center.y), Offset(center.x + maxRadius, center.y), strokeWidth = 1f)
-            drawLine(GlowGreen.copy(alpha = 0.25f), Offset(center.x, center.y - maxRadius), Offset(center.x, center.y + maxRadius), strokeWidth = 1f)
+            // Center crosshair — alpha raised from 0.25 for the same outdoor-legibility reason as
+            // the rings above.
+            drawLine(
+                AppColors.Safe.copy(alpha = 0.4f),
+                Offset(center.x - maxRadius, center.y), Offset(center.x + maxRadius, center.y), strokeWidth = 1f
+            )
+            drawLine(
+                AppColors.Safe.copy(alpha = 0.4f),
+                Offset(center.x, center.y - maxRadius), Offset(center.x, center.y + maxRadius), strokeWidth = 1f
+            )
 
             // Cardinal ticks (N/E/S/W relative to current facing, so "up" tick = straight ahead)
             for (deg in listOf(0, 90, 180, 270)) {
                 val rad = Math.toRadians((deg - 90).toDouble())
                 val inner = Offset(center.x + (maxRadius - 8f) * cos(rad).toFloat(), center.y + (maxRadius - 8f) * sin(rad).toFloat())
                 val outer = Offset(center.x + (maxRadius + 6f) * cos(rad).toFloat(), center.y + (maxRadius + 6f) * sin(rad).toFloat())
-                drawLine(GlowGreen.copy(alpha = 0.6f), inner, outer, strokeWidth = 2f)
+                drawLine(AppColors.Safe.copy(alpha = 0.6f), inner, outer, strokeWidth = 2f)
             }
 
-            // "you" marker — deliberately neutral white, not red or green, both reserved elsewhere
-            drawCircle(color = Color.White.copy(alpha = 0.9f), radius = 5f, center = center)
-            drawCircle(color = Color.White.copy(alpha = 0.25f), radius = 10f, center = center, style = Stroke(width = 1f))
+            // "you" marker — deliberately neutral (theme's own primary content color), not red or
+            // green, both reserved elsewhere. AppColors.OnSurface rather than a hardcoded white so
+            // this still reads correctly in light mode (a literal white dot would vanish against a
+            // white radar surface).
+            drawCircle(color = AppColors.OnSurface.copy(alpha = 0.9f), radius = 5f, center = center)
+            drawCircle(
+                color = AppColors.OnSurface.copy(alpha = 0.25f), radius = 10f,
+                center = center, style = Stroke(width = 1f)
+            )
 
-            // North reference (muted, small) — separate from the cardinal "ahead" tick above
+            // North reference — separate from the cardinal "ahead" tick above. An arrowhead
+            // (roughly double the previous plain dot's footprint) rather than a dot, pointing
+            // outward along the same radial line, so it reads at a glance as "this way is north"
+            // instead of just a marker to notice.
             val northScreenAngle = ((0f - headingDegrees) + 360) % 360
             val northRad = Math.toRadians((northScreenAngle - 90).toDouble())
-            val nx = center.x + (maxRadius + 14f) * cos(northRad).toFloat()
-            val ny = center.y + (maxRadius + 14f) * sin(northRad).toFloat()
-            drawCircle(color = Color(0xFF6B7580), radius = 4f, center = Offset(nx, ny))
+            val northAnchorDist = maxRadius + 14f
+            val northTipDist = northAnchorDist + 6f
+            val northBaseDist = northAnchorDist - 6f
+            val northArrowHalfWidth = 7f
+            val northTip = Offset(
+                center.x + northTipDist * cos(northRad).toFloat(), center.y + northTipDist * sin(northRad).toFloat()
+            )
+            val northBaseCenter = Offset(
+                center.x + northBaseDist * cos(northRad).toFloat(), center.y + northBaseDist * sin(northRad).toFloat()
+            )
+            val northPerpRad = northRad + PI / 2
+            val northBase1 = Offset(
+                northBaseCenter.x + northArrowHalfWidth * cos(northPerpRad).toFloat(),
+                northBaseCenter.y + northArrowHalfWidth * sin(northPerpRad).toFloat()
+            )
+            val northBase2 = Offset(
+                northBaseCenter.x - northArrowHalfWidth * cos(northPerpRad).toFloat(),
+                northBaseCenter.y - northArrowHalfWidth * sin(northPerpRad).toFloat()
+            )
+            val northArrow = Path().apply {
+                moveTo(northTip.x, northTip.y)
+                lineTo(northBase1.x, northBase1.y)
+                lineTo(northBase2.x, northBase2.y)
+                close()
+            }
+            drawPath(northArrow, color = AppColors.OnSurfaceMuted)
 
             for (dot in dots) {
                 val r = (dot.distanceMeters / maxDistance).coerceIn(0f, 1f) * maxRadius
@@ -247,9 +318,19 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                 val phase = (sin(2 * PI * freqHz * elapsedMs / 1000.0).toFloat() + 1f) / 2f
                 val alpha = 0.5f + 0.5f * phase
                 val radius = 7f + 5f * phase
+                // A position this stale isn't necessarily wrong, but it's not "live" either — fade
+                // it down rather than let it read exactly as fresh as one just received. Full
+                // opacity through STALE_FADE_START_SECONDS, linearly down to STALE_FADE_MIN_ALPHA
+                // by STALE_FADE_END_SECONDS (PositionTracker's own ~90s expiry window; past that
+                // the record is gone from the mesh entirely, not just faded).
+                val staleProgress = ((dot.ageSeconds - STALE_FADE_START_SECONDS) /
+                    (STALE_FADE_END_SECONDS - STALE_FADE_START_SECONDS)).coerceIn(0f, 1f)
+                val staleFade = 1f - staleProgress * (1f - STALE_FADE_MIN_ALPHA)
 
-                drawCircle(color = dot.color.copy(alpha = 0.25f), radius = radius + 6f, center = Offset(x, y))
-                drawCircle(color = dot.color.copy(alpha = alpha), radius = radius, center = Offset(x, y))
+                drawCircle(
+                    color = dot.color.copy(alpha = 0.25f * staleFade), radius = radius + 6f, center = Offset(x, y)
+                )
+                drawCircle(color = dot.color.copy(alpha = alpha * staleFade), radius = radius, center = Offset(x, y))
             }
         }
     }
