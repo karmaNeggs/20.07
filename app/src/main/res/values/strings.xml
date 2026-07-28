@@ -1,4 +1,11 @@
 <resources>
     <string name="app_name_real">20.07</string>
+    <!-- A small library of decoy identities, not just one — see AppIdentity.kt for why: one of
+         these is picked at random per install, same anti-fingerprinting reasoning already applied
+         to the notification icon (MeshService.decoyIcons) — different phones running this app show
+         different decoy identities, not one single greppable "the mesh app disguises as Notes" tell. -->
     <string name="app_name_decoy">Notes</string>
+    <string name="app_name_decoy2">Files</string>
+    <string name="app_name_decoy3">Weather</string>
+    <string name="app_name_decoy4">Calculator</string>
 </resources>

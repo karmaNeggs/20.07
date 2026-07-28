@@ -79,7 +79,11 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- Decoy launcher identity: disabled by default, enable to hide the app as a plain notes utility -->
+        <!-- Decoy launcher identity library: all disabled by default, AppIdentity.setDecoyActive
+             enables exactly one of these four (picked at random, once per install) plus disables
+             LauncherReal and every other decoy — see AppIdentity.kt and strings.xml's decoy-name
+             comment for why this is a small library, not one fixed identity. Each one is otherwise
+             identical (same target, same intent-filters) — only label/icon differ. -->
         <activity-alias
             android:name=".LauncherDecoy"
             android:targetActivity=".ui.MainActivity"
@@ -87,6 +91,63 @@
             android:exported="true"
             android:label="@string/app_name_decoy"
             android:icon="@mipmap/ic_launcher_decoy">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mesh2007" android:host="join" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherDecoy2"
+            android:targetActivity=".ui.MainActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/app_name_decoy2"
+            android:icon="@mipmap/ic_launcher_decoy2">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mesh2007" android:host="join" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherDecoy3"
+            android:targetActivity=".ui.MainActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/app_name_decoy3"
+            android:icon="@mipmap/ic_launcher_decoy3">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="mesh2007" android:host="join" />
+            </intent-filter>
+        </activity-alias>
+
+        <activity-alias
+            android:name=".LauncherDecoy4"
+            android:targetActivity=".ui.MainActivity"
+            android:enabled="false"
+            android:exported="true"
+            android:label="@string/app_name_decoy4"
+            android:icon="@mipmap/ic_launcher_decoy4">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

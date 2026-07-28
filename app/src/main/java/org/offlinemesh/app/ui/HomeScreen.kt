@@ -104,62 +104,84 @@ fun HomeScreen(
             ) { Icon(Icons.Filled.Add, contentDescription = "Add group") }
         }
     ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding).padding(horizontal = 20.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Spacer(Modifier.height(12.dp))
-
-            if (!bluetoothEnabled) {
-                BluetoothOffNotice()
-            } else if (myLocation == null) {
-                Box(
-                    Modifier.size(260.dp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("Waiting for GPS fix…", color = AppColors.OnSurfaceMuted)
-                }
-            } else {
-                RadarCanvas(dots = dots, headingDegrees = heading)
-            }
-
-            Spacer(Modifier.height(24.dp))
-
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            // Pinned — never scrolls away, no matter how far down the groups list below has been
+            // scrolled. SOS is the one action here that must never cost a scroll gesture to reach.
             Button(
                 onClick = onGeneralSos,
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger),
                 shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth().height(56.dp)
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 8.dp)
+                    .height(56.dp)
             ) { Text("SOS", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
 
-            Spacer(Modifier.height(14.dp))
-            QuickToggleTiles(meshService)
-            Spacer(Modifier.height(10.dp))
-            WifiDirectRow()
-
-            Spacer(Modifier.height(28.dp))
-
-            if (groups.isEmpty()) {
-                Spacer(Modifier.height(40.dp))
-                Text(
-                    "No groups yet. Tap + to create one or join with a code someone shared.",
-                    color = AppColors.OnSurfaceMuted,
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            } else {
-                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
-                    Text("Groups", style = MaterialTheme.typography.titleSmall, color = AppColors.OnSurfaceMuted)
+            // Radar, toggles, WiFi row, and the groups list all live in ONE LazyColumn — that's
+            // the whole trick: making the radar/toggles/WiFi-row plain *items* in the same
+            // scrollable list as the groups is what makes them scroll away as you scroll down and
+            // reappear when you scroll back to top, using ordinary LazyColumn scroll physics, no
+            // custom nested-scroll-connection code. Previously this was a fixed Column (full-size
+            // radar + standalone SOS button + 3 tiles + WiFi row, all always on screen) wrapping a
+            // separate nested LazyColumn for just the groups — leaving only ~1.5 groups visible
+            // before running out of screen. The radar itself also shrinks to 150dp here (was the
+            // default 260dp) — matching the same compact size GroupChatScreen's own inline radar
+            // already proves works, not a new size to validate.
+            LazyColumn(
+                Modifier.fillMaxSize().padding(horizontal = 20.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                item {
+                    if (!bluetoothEnabled) {
+                        BluetoothOffNotice()
+                    } else if (myLocation == null) {
+                        Box(
+                            Modifier.size(150.dp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("Waiting for GPS fix…", color = AppColors.OnSurfaceMuted)
+                        }
+                    } else {
+                        RadarCanvas(dots = dots, headingDegrees = heading, sizeDp = 150.dp)
+                    }
                 }
-                LazyColumn(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                item {
+                    Column(Modifier.fillMaxWidth()) {
+                        Spacer(Modifier.height(16.dp))
+                        QuickToggleTiles(meshService)
+                        Spacer(Modifier.height(10.dp))
+                        WifiDirectRow()
+                        Spacer(Modifier.height(20.dp))
+                    }
+                }
+                if (groups.isEmpty()) {
+                    item {
+                        Text(
+                            "No groups yet. Tap + to create one or join with a code someone shared.",
+                            color = AppColors.OnSurfaceMuted,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                } else {
+                    item {
+                        Row(Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                            Text(
+                                "Groups",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = AppColors.OnSurfaceMuted
+                            )
+                        }
+                    }
                     items(groups) { group: GroupEntity ->
                         GroupRow(
                             group = group,
                             hop = hopByGroup[group.id] ?: MeshProtocol.UNKNOWN_HOP,
                             onClick = { onOpenGroup(group.id) }
                         )
+                        Spacer(Modifier.height(10.dp))
                     }
-                    item { Spacer(Modifier.height(12.dp)) }
                 }
+                item { Spacer(Modifier.height(12.dp)) }
             }
         }
     }
@@ -203,8 +225,9 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
  * rows this used to be (`PowerSaverRow`/`DisguiseRow`) — same underlying behavior, just less space:
  * - **Power**: off (default) auto-favors responsiveness while the app is open, on pins the
  *   battery-saving tier permanently, even in the foreground.
- * - **Disguise**: switches which of the two launcher `<activity-alias>` entries is active (see
- *   [AppIdentity]) — off shows "20.07," on shows "Notes" instead, so a glance at the home screen
+ * - **Disguise**: switches which launcher `<activity-alias>` entry is active (see [AppIdentity])
+ *   — off shows "20.07," on shows one of a small library of plausible decoy identities instead
+ *   (picked at random per install, held stable after that), so a glance at the home screen
  *   doesn't reveal this app is installed. See README's Security model for exactly what this does
  *   and does not protect (home screen/app switcher only — not the package name, permissions, or
  *   its entry in Android Settings > Apps).
@@ -233,7 +256,7 @@ private fun QuickToggleTiles(meshService: MeshService?) {
 
         var decoyActive by remember { mutableStateOf(AppIdentity.isDecoyActive(context)) }
         val decoyDesc =
-            if (decoyActive) "Disguise app icon, on, shows as Notes" else "Disguise app icon, off, shows as 20.07"
+            if (decoyActive) "Disguise app icon, on, shows as a decoy app" else "Disguise app icon, off, shows as 20.07"
         ToggleTile(
             spec = TileSpec(Icons.Filled.VisibilityOff, "Disguise", AppColors.Warning),
             active = decoyActive,

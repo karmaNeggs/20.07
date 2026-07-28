@@ -6,40 +6,27 @@
 <title>20.07 — offline mesh coordination</title>
 <meta name="description" content="A phone-to-phone Bluetooth mesh app for staying in contact, navigating to your group, and sharing evidence when cellular networks are jammed, shut down, or not trusted. No servers, no accounts.">
 <style>
-  /* Palette pulled directly from the app's own Theme.kt (AppColors) — dark is the primary,
-     canonical experience (the app itself is deliberately dark-only, "mostly monochrome, color
-     spent on meaning not decoration"); light is a clean, minimal inverse for anyone who has that
-     preference set, not a separately-designed brand. */
+  /* Palette pulled directly from the app's own Theme.kt (AppColors) — and, on purpose, the ONLY
+     palette this page has. The app itself is deliberately dark-only (Theme.kt's own doc: "Dark,
+     low-glare, and deliberately mostly monochrome"); it has no light mode to be an "inverse" of,
+     so this page doesn't invent one either — a `prefers-color-scheme: light` visitor got a
+     browser-dependent, unrelated palette here before, which is exactly the inconsistency this
+     removes. `color-scheme: dark` tells the browser chrome itself (scrollbars, form controls) to
+     render dark too, regardless of OS preference. */
   :root {
-    color-scheme: light dark;
-    --bg: #ffffff;
-    --surface: #f4f5f7;
-    --surface-2: #eceef1;
-    --border: #e2e4e8;
-    --text: #14181c;
-    --text-muted: #5b6470;
-    --accent: #4338ca;
-    --accent-contrast: #ffffff;
-    --danger: #b91c1c;
-    --safe: #15803d;
-    --safe-a: rgba(21, 128, 61, .28);
-    --code-bg: #eef0f3;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #0a0d10;
-      --surface: #14181c;
-      --surface-2: #1c2126;
-      --border: #262b31;
-      --text: #edeff1;
-      --text-muted: #8b95a1;
-      --accent: #818cf8;
-      --accent-contrast: #0a0d10;
-      --danger: #ef4444;
-      --safe: #34d399;
-      --safe-a: rgba(52, 211, 153, .32);
-      --code-bg: #1c2126;
-    }
+    color-scheme: dark;
+    --bg: #0a0d10;
+    --surface: #14181c;
+    --surface-2: #1c2126;
+    --border: #262b31;
+    --text: #edeff1;
+    --text-muted: #8b95a1;
+    --accent: #818cf8;
+    --accent-contrast: #0a0d10;
+    --danger: #ef4444;
+    --safe: #34d399;
+    --safe-a: rgba(52, 211, 153, .32);
+    --code-bg: #1c2126;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -268,13 +255,13 @@
   <p class="cta-note">Sideloaded APK — allow installs from this source once in Android settings. Min SDK 26 (8.0+).</p>
 
   <p>
-    When cell towers are jammed, throttled, or surveilled, people lose the ability to find each
+    When cell towers are jammed, throttled, or unavailable, people lose the ability to find each
     other, call for help, or share proof of what's happening. 20.07 fixes that with zero
     infrastructure: phones relay for each other directly over Bluetooth. No SIM, no servers, no
     accounts — everything's encrypted under a key only your group holds.
   </p>
 
-  <h2>Three things</h2>
+  <h2>Three solutions</h2>
   <div class="features">
     <div class="feature">
       <h3>Navigate</h3>
@@ -292,14 +279,14 @@
 
   <h2>Why this exists</h2>
   <p>
-    Mesh messaging for exactly this moment has been tried, adopted at real scale, and found
-    broken. <strong>Bridgefy</strong> — the app people were told to install in Hong Kong,
-    Belarus, and BLM protests — was independently broken by security researchers <em>twice</em>:
-    once in 2021, again in 2022 at USENIX Security, <em>after</em> it patched in Signal's own
-    encryption library. The need is proven. Getting it right isn't automatic.
+    Cellular networks assume normal conditions. That breaks down in a specific, recurring set of
+    situations: natural disasters and blackouts, stampedes and crowd crush, crowd-control and
+    unrest situations where networks are jammed, throttled, or not trusted. In every case the
+    same three needs recur — find your group, call for help, get evidence out — and 20.07 does
+    exactly that, phone-to-phone, with no infrastructure required.
   </p>
 
-  <h2>What's genuinely different</h2>
+  <h2>Design choices</h2>
   <ul class="compare">
     <li>
       <strong>No accounts, ever</strong>
@@ -311,7 +298,7 @@
     </li>
     <li>
       <strong>The radio ID itself rotates</strong>
-      <span class="detail">Your Bluetooth advertising ID changes every 60 seconds. Even <a href="https://github.com/permissionlesstech/bitchat">bitchat</a>, the most serious open-source comparison, names its own never-rotating peer ID as its biggest privacy gap.</span>
+      <span class="detail">Your Bluetooth advertising ID changes every 60 seconds, so passive scanning sees a changing, meaningless value instead of a stable fingerprint.</span>
     </li>
     <li>
       <strong>GPS never touches disk</strong>
@@ -323,7 +310,7 @@
     </li>
     <li>
       <strong>The app can disguise itself</strong>
-      <span class="detail">One switch shows the home-screen icon and notification as a plain "Notes" utility instead.</span>
+      <span class="detail">One switch shows the home-screen icon and notification as a plain utility app instead.</span>
     </li>
   </ul>
 

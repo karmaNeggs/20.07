@@ -87,6 +87,13 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
             chunkDao.insert(chunkEntity)
             seenDao.insert(SeenMessageEntity("$id:$idx", System.currentTimeMillis()))
         }
+        // The sender's own "tap to view" reads from the exact same outputFile() location
+        // maybeReassemble() writes to on the RECEIVING end — without this, only receivers ever get
+        // a viewable file; the sender's own copy of what they just sent shows "file not found."
+        // complete=true above already claims this file exists, so this makes that claim true.
+        val outFile = outputFile(context, id, mimeType)
+        outFile.parentFile?.mkdirs()
+        FileOutputStream(outFile).use { it.write(plaintext) }
         return evidence
     }
 

@@ -95,6 +95,11 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
         nearestSosGpsDistance(myLocation, positions, sosList, heading)
     }
 
+    // Which currently-plotted dots belong to an active SOS sender — see below for how this is
+    // used. Set-membership only, no new data: SosEntity already carries senderId, and a sender
+    // only shows up here at all if they're already one of the dots on placedPeers.
+    val activeSosSenders = remember(sosList) { sosList.filter { it.ttl > 0 }.map { it.senderId }.toSet() }
+
     Scaffold(
         topBar = { TopAppBar(title = { Text("Navigate") }, colors = flushTopAppBarColors()) },
         containerColor = AppColors.Background
@@ -126,8 +131,17 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                     )
                 }
                 Spacer(Modifier.height(12.dp))
+                // A dot belonging to a sender with an active SOS is colored Danger instead of the
+                // group color — this is the actual answer to "which one is the person who sent
+                // it": the group palette (see Theme.kt) deliberately excludes red for exactly this,
+                // so there's never ambiguity between "this group's color happens to be red" and
+                // "this is an SOS." With 2+ active SOS, each resolvable sender's own dot turns red
+                // at its own real bearing/distance, instead of collapsing to one number below.
                 RadarCanvas(
-                    dots = placedPeers.map { (_, dist, angle) -> RadarDot(groupColor, dist, angle) },
+                    dots = placedPeers.map { (senderId, dist, angle) ->
+                        val color = if (senderId in activeSosSenders) AppColors.Danger else groupColor
+                        RadarDot(color, dist, angle)
+                    },
                     headingDegrees = heading
                 )
                 Spacer(Modifier.height(16.dp))

@@ -1,46 +1,46 @@
 # 20.07
 
-A phone-to-phone Bluetooth mesh app for staying in contact with your group, navigating toward
-them, and sharing evidence — when cellular networks are jammed, shut down, or not trusted.
-No servers, no cellular/Wi-Fi internet dependency, no account.
+A phone-to-phone Bluetooth mesh app for finding your group, navigating toward them, calling for
+help, and sharing evidence — when cellular networks are jammed, shut down, overloaded, or not
+trusted. No servers, no cellular/Wi-Fi internet dependency, no account.
 
-Built for peaceful protesters, human rights defenders, and civil society groups who need to
-coordinate and document safely during unrest, riots, or emergencies.
+Built for a specific, recurring shape of problem: a group that needs to stay together, and a
+network that can't help them do it.
 
 ## Why this exists
 
-Mesh messaging for exactly this situation isn't a new idea — it's been tried, adopted at real
-scale, and found broken. Bridgefy, the mesh app people were told to install during the Hong Kong
-protests, Belarus, and BLM protests in the US, was independently broken by security researchers
-twice: once in 2021 ("Mesh Messaging in Large-Scale Protests: Breaking Bridgefy," CT-RSA 2021 —
-no real encryption, users trackable, messages forgeable), and again in 2022 at USENIX Security
-("Breaking Bridgefy, again: Adopting libsignal is not enough") — *after* Bridgefy patched itself
-with Signal's own encryption library and was still broken. That's not a hypothetical risk; that's
-the exact tool real people trusted with their safety, failing at the one thing it promised, twice.
-FireChat, the other app from the same era (Hong Kong's 2014 Umbrella protests), is effectively
-discontinued. The demand for this is proven. Getting it right clearly isn't automatic.
+Cellular networks assume normal conditions — towers up, signal available, infrastructure standing
+between you and the people you're trying to reach. That assumption breaks down in a specific,
+recurring set of situations:
 
-Against the current field:
-- **No accounts, ever.** One QR code creates a group. No creator, no owner, no phone number tied
-  to anyone — removing one person doesn't expose or kill the group. Briar (the most
-  security-reviewed open alternative) is contact-based instead — you add people individually, in
-  person — a different, heavier trust model built for one-to-one activist/journalist contact, not
-  fast ad-hoc group coordination in a crowd.
-- **Every phone that isn't in your group still carries your traffic — but can't read it.** Not
-  "encrypted so please don't," architecturally opaque to a non-member relay.
-- **The BLE identifier itself rotates every 60 seconds.** Even
-  [bitchat](https://github.com/permissionlesstech/bitchat) — the most technically serious
-  open-source mesh chat app as of this writing — documents in its own protocol whitepaper that its
-  on-air peer ID *never* rotates, and names that its own biggest unresolved privacy weakness.
+- **Natural disasters and blackouts** — towers down or overloaded, power out, a group that was
+  together suddenly isn't.
+- **Stampedes and crowd crush** — coordination matters most at the exact moment a crowded cell
+  sector is most saturated.
+- **Crowd-control and unrest situations** — networks jammed, throttled, or not trusted by the
+  people who need them.
+
+In every case the same three needs recur: find your group, call for help, and get evidence of
+what happened onto more than one device before anything can happen to it. 20.07 is built
+specifically for that recurring shape of problem, phone-to-phone, with no infrastructure
+required — see "What it does" below for the three pieces that solve it.
+
+## Design choices
+
+A few decisions worth calling out, because they're deliberate rather than default:
+
+- **No accounts, ever.** One QR code creates a group — no creator, no owner, no phone number tied
+  to it. Removing one person doesn't expose or kill the group.
+- **Every phone relays for every group, whether or not it's a member.** Content is opaque
+  ciphertext to anyone without the key — a phone carrying your traffic can pass it along but can't
+  read it.
+- **The BLE identifier itself rotates every 60 seconds**, so passive scanning sees a changing,
+  meaningless value rather than a stable device fingerprint.
 - **GPS lives in memory only**, never touches disk, gone the instant the app is force-quit.
-- **Evidence photos are relayed across the mesh as they're captured** — copies exist on other
-  members' phones before any single device stops being available.
-- Meshtastic and goTenna solve a related but different problem (long-range off-grid comms) with
-  *dedicated hardware radios* — not something everyone in a crowd already has in their pocket.
+- **Evidence photos relay across the mesh as they're captured** — copies exist on other members'
+  phones before any single device stops being available.
 
-Nobody else currently bundles all of this into one purpose-built kit. See Security model below for
-exactly what this app's own design does *not* protect against — the same plain-spoken standard
-applied to everyone above.
+See Security model below for exactly what this app's own design does *not* protect against.
 
 ## What it does (3 features, on purpose — nothing else)
 
@@ -101,7 +101,7 @@ Permissions below). Every other phone computes true bearing and distance to each
 then rotates that by its own compass heading so "up" on screen always means "in front of you
 right now," not true north. The compass reading is smoothed and the app surfaces a
 low-confidence warning when the sensor itself reports poor accuracy, since magnetometers drift
-and get thrown off by exactly the kind of things common at a protest (metal barricades,
+and get thrown off by exactly the kind of things common in dense crowds (metal barricades,
 vehicles, structures) — that's a real, known weak point, shown rather than hidden. When GPS
 isn't available it falls back to a hop-count "hot/cold" indicator: no direction, just whether
 the number of relay-hops to your nearest group member is rising or falling as you move. That
