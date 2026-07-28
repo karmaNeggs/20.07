@@ -20,8 +20,10 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -122,6 +124,18 @@ class MainActivity : ComponentActivity() {
             android.view.WindowManager.LayoutParams.FLAG_SECURE,
             android.view.WindowManager.LayoutParams.FLAG_SECURE
         )
+        // The manifest's system Activity theme only covers window background before Compose's
+        // first frame — status/navigation bar color is a separate system-drawn layer that theme
+        // doesn't fully pin down on every OEM skin, especially on large screens with a taller/
+        // different-shaped nav bar. Set explicitly to the app's own dark background so nothing
+        // ever shows the light default (was surfacing as a stray white bar on some devices), and
+        // mark both bars "not light" so their icons render light-on-dark instead of invisible.
+        window.statusBarColor = AppColors.Background.toArgb()
+        window.navigationBarColor = AppColors.Background.toArgb()
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         repo = GroupRepository(applicationContext)
         pendingJoinCode = extractJoinCode(intent)
         pendingOpenGroupId = intent.getStringExtra(EXTRA_OPEN_GROUP_ID)

@@ -48,7 +48,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher_real"
         android:label="@string/app_name_real"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:theme="@android:style/Theme.Material.NoActionBar"
         android:supportsRtl="true">
 
         <activity

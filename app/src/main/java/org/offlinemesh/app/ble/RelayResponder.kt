@@ -123,8 +123,13 @@ class RelayResponder(
      */
     suspend fun framesToPushOnConnect(): List<ByteArray> {
         val frames = mutableListOf<ByteArray>()
-        val filter = CatalogFilter.build(currentCatalogKeys())
+        val keys = currentCatalogKeys()
+        val filter = CatalogFilter.build(keys)
         frames += MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.toBits())
+        // Cheap, low-volume (once per connection, not per frame) — lets a live logcat pull during
+        // a "message isn't arriving" report confirm whether the item was even in this device's own
+        // outgoing catalog at connect time, without needing to reproduce anything.
+        Log.d("RelayResponder", "advertising catalog filter: ${keys.size} item(s) held")
         // Experimental, opt-in WiFi Direct accelerator — see WifiDirectAccelerator's class doc.
         // Announced fresh every connection (never cached), matching authOk's own "check live, not
         // once" style, so flipping the opt-in toggle mid-session takes effect immediately.
@@ -294,18 +299,44 @@ class RelayResponder(
                     // our own relayable set and gets offered again, against a freshly-salted filter,
                     // on the very next reconnect.
                     val peerFilter = CatalogFilter.fromBits(frame.bits, frame.seed)
+                    var pushed = 0
+                    var skipped = 0
                     for (sos in relay.relayableSos()) {
-                        if (!peerFilter.mightContain("sos:${sos.id}")) respond(MeshFrameCodec.encodeSos(sos))
+                        if (peerFilter.mightContain("sos:${sos.id}")) {
+                            skipped++
+                        } else {
+                            respond(MeshFrameCodec.encodeSos(sos))
+                            pushed++
+                        }
                     }
                     for (meta in relay.relayableEvidenceMeta()) {
-                        if (!peerFilter.mightContain("evid:${meta.id}")) respond(MeshFrameCodec.encodeEvidMeta(meta))
+                        if (peerFilter.mightContain("evid:${meta.id}")) {
+                            skipped++
+                        } else {
+                            respond(MeshFrameCodec.encodeEvidMeta(meta))
+                            pushed++
+                        }
                     }
                     for (g in repo.groupDao.getActiveGroups()) {
                         for (n in relay.nicknamesForGroup(g.id)) {
                             val key = "nick:${n.groupId}:${n.senderId}:${n.updatedAt}"
-                            if (!peerFilter.mightContain(key)) respond(MeshFrameCodec.encodeNickname(n))
+                            if (peerFilter.mightContain(key)) {
+                                skipped++
+                            } else {
+                                respond(MeshFrameCodec.encodeNickname(n))
+                                pushed++
+                            }
                         }
                     }
+                    // The single most useful line for diagnosing "messaging isn't arriving" from a
+                    // live logcat pull: confirms the round trip actually ran on this connection and
+                    // exactly how it resolved, without needing to reproduce anything or add a
+                    // debugger. peerAddress included since a device can hold several connections in
+                    // quick succession and this is the only place that ties a decision to which one.
+                    Log.d(
+                        "RelayResponder",
+                        "catalog filter from $peerAddress: pushed $pushed, skipped $skipped (peer already had them)"
+                    )
                 }
                 is MeshFrameCodec.Frame.Manifest -> {
                     val myHave = relay.haveIndexSet(frame.evidenceId)

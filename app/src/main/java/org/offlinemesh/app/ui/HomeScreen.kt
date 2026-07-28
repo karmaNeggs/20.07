@@ -20,6 +20,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BluetoothDisabled
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -105,28 +106,13 @@ fun HomeScreen(
         }
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
-            // Pinned — never scrolls away, no matter how far down the groups list below has been
-            // scrolled. SOS is the one action here that must never cost a scroll gesture to reach.
-            Button(
-                onClick = onGeneralSos,
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger),
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 8.dp)
-                    .height(56.dp)
-            ) { Text("SOS", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-
-            // Radar, toggles, WiFi row, and the groups list all live in ONE LazyColumn — that's
-            // the whole trick: making the radar/toggles/WiFi-row plain *items* in the same
-            // scrollable list as the groups is what makes them scroll away as you scroll down and
-            // reappear when you scroll back to top, using ordinary LazyColumn scroll physics, no
-            // custom nested-scroll-connection code. Previously this was a fixed Column (full-size
-            // radar + standalone SOS button + 3 tiles + WiFi row, all always on screen) wrapping a
-            // separate nested LazyColumn for just the groups — leaving only ~1.5 groups visible
-            // before running out of screen. The radar itself also shrinks to 150dp here (was the
-            // default 260dp) — matching the same compact size GroupChatScreen's own inline radar
-            // already proves works, not a new size to validate.
+            // Radar (full size — the compact 150dp version tried here previously didn't work
+            // out), toggle tiles (SOS included as a 4th, red one — no longer a separate
+            // full-width pinned button, which is what actually frees up room for the groups
+            // list below), WiFi row, and the groups list all live in ONE LazyColumn: making
+            // them plain *items* in the same scrollable list as the groups is what makes them
+            // scroll away as you scroll down and reappear when you scroll back to top, using
+            // ordinary LazyColumn scroll physics, no custom nested-scroll-connection code.
             LazyColumn(
                 Modifier.fillMaxSize().padding(horizontal = 20.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -136,19 +122,19 @@ fun HomeScreen(
                         BluetoothOffNotice()
                     } else if (myLocation == null) {
                         Box(
-                            Modifier.size(150.dp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),
+                            Modifier.size(260.dp).clip(RoundedCornerShape(20.dp)).background(AppColors.Surface),
                             contentAlignment = Alignment.Center
                         ) {
                             Text("Waiting for GPS fix…", color = AppColors.OnSurfaceMuted)
                         }
                     } else {
-                        RadarCanvas(dots = dots, headingDegrees = heading, sizeDp = 150.dp)
+                        RadarCanvas(dots = dots, headingDegrees = heading)
                     }
                 }
                 item {
                     Column(Modifier.fillMaxWidth()) {
                         Spacer(Modifier.height(16.dp))
-                        QuickToggleTiles(meshService)
+                        QuickToggleTiles(meshService, onGeneralSos)
                         Spacer(Modifier.height(10.dp))
                         WifiDirectRow()
                         Spacer(Modifier.height(20.dp))
@@ -221,8 +207,13 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
 }
 
 /**
- * Three quick toggles in one row, each a compact [ToggleTile] instead of the full-width descriptive
- * rows this used to be (`PowerSaverRow`/`DisguiseRow`) — same underlying behavior, just less space:
+ * SOS plus three quick toggles in one row, each a compact tile instead of the full-width
+ * descriptive rows this used to be (`PowerSaverRow`/`DisguiseRow`) — same underlying behavior,
+ * just less space:
+ * - **SOS**: not a toggle — a momentary action tile, always shown in [AppColors.Danger] red,
+ *   that fires [onGeneralSos]. Was previously a separate full-width pinned button above this
+ *   row; folding it in here instead is what actually frees up screen space for the groups list
+ *   below, without giving up "reachable in one tap from anywhere on this screen."
  * - **Power**: off (default) auto-favors responsiveness while the app is open, on pins the
  *   battery-saving tier permanently, even in the foreground.
  * - **Disguise**: switches which launcher `<activity-alias>` entry is active (see [AppIdentity])
@@ -240,9 +231,11 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
 // (and every other screen) already uses for composables — see detekt-baseline.xml, which
 // grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
-private fun QuickToggleTiles(meshService: MeshService?) {
+private fun QuickToggleTiles(meshService: MeshService?, onGeneralSos: () -> Unit) {
     val context = LocalContext.current
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        SosTile(onClick = onGeneralSos, modifier = Modifier.weight(1f))
+
         val powerSaverOn by (meshService?.powerSaverForced?.collectAsState() ?: remember { mutableStateOf(false) })
         val powerDesc =
             if (powerSaverOn) "Power saver, on, battery-saving settings always on" else "Power saver, off, auto"
@@ -318,6 +311,29 @@ private fun ToggleTile(
         Icon(spec.icon, contentDescription = null, tint = fg, modifier = Modifier.size(26.dp))
         Spacer(Modifier.height(6.dp))
         Text(spec.label, color = fg, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
+    }
+}
+
+/** SOS as a compact action tile, not a toggle — always solid [AppColors.Danger] red (no dim/glow
+ *  state to animate, unlike [ToggleTile]) since this fires an action rather than persisting an
+ *  on/off state. Kept as its own composable rather than reusing [ToggleTile] because the toggle
+ *  semantics (`Role.Switch`, active/inactive color animation) don't fit a momentary action. */
+@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
+@Composable
+private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    Column(
+        modifier
+            .aspectRatio(1f)
+            .clip(RoundedCornerShape(16.dp))
+            .background(AppColors.Danger)
+            .clickable(onClickLabel = "Send SOS", role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Send SOS to all your groups" },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        Icon(Icons.Filled.Warning, contentDescription = null, tint = Color.White, modifier = Modifier.size(26.dp))
+        Spacer(Modifier.height(6.dp))
+        Text("SOS", color = Color.White, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
     }
 }
 
