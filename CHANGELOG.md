@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.1] — loosened the radar's GPS-accuracy gate
+
+Live-confirmed trigger for the "peer shows a hop count but never gets a radar dot" gap from
+0.2.0: many phones deliberately widen their reported GPS accuracy while stationary (to save
+battery), then tighten it back up the instant motion is detected — so a dot could disappear
+while genuinely standing still, even right next to the other phone, and reappear on the next
+step. `ROUGH_FIX_METERS` raised from 150m to 250m combined, comfortably clearing the radar's
+own 200m display ceiling instead of sitting just under it, so this triggers less often while
+still rejecting genuinely rough (network-location-grade) fixes. The underlying silent-failure
+UX gap (no on-screen explanation when this does trigger) is unchanged, still tracked in Known
+Limitations.
+
 ## [0.2.0] — radar overhaul, relay reliability, theming, and a round of live-testing fixes
 
 The biggest pass since 0.1.0, driven directly by live 2-3-phone testing rather than review alone.
