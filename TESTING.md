@@ -14,13 +14,14 @@ Covers: crypto round-trips and tamper detection, every wire frame type's encode�
 (including malformed/truncated input), the hop-count state machine (with a fake clock, so the
 90-second staleness window is tested in milliseconds), the radar bearing/distance math against known
 coordinate pairs (Robolectric-backed — the one thing here that needs a real
-`android.location.Location.distanceBetween`, not a stub), the join-code round-trip, and the two
-state machines that had real, live-tested bugs: `ConnectionAttemptTracker` (Pass 16 — a connection
-attempt that never gets a callback must eventually become retryable again, not stay stuck forever)
-and `PeerDeliveryTracker` (Pass 17 — per-peer dedup, including that it never leaks between peers or
-between different versions of the same nickname).
+`android.location.Location.distanceBetween`, not a stub), the join-code round-trip, the
+Bloom-filter catalog-sync round trip (`RelayResponderTest.kt` — given a peer's filter, correctly
+push what they're missing and skip what they already have), and the state machines that had real,
+live-tested bugs: `ConnectionAttemptTracker` (Pass 16 — a connection attempt that never gets a
+callback must eventually become retryable again, not stay stuck forever; later extended for the
+epoch-aware cooldown-skip behind the passerby-relay fix).
 
-69 tests as of Pass 18, all passing. This is what should catch a broken build *before* you spend
+112 tests as of [0.2.0], all passing. This is what should catch a broken build *before* you spend
 twenty minutes manually testing it — a crypto or wire-format regression shows up here in seconds,
 not after a confusing live session.
 
@@ -45,7 +46,7 @@ your actual manual testing sessions and reports real leaked Activities/Views/obj
 Not yet built out. The plan (join-code validation, "app stays usable with camera permission denied,"
 nickname dialog save/cancel) is sound, but Compose+Robolectric UI testing has real version-specific
 fragility that's better worked through with a full Android Studio setup and a connected device/
-emulator than blind in a headless environment. Tier 1's 69 tests were the higher-value, lower-risk
+emulator than blind in a headless environment. Tier 1's 112 tests were the higher-value, lower-risk
 investment for this pass.
 
 ## Tier 3 — what genuinely can't be automated, and stays manual

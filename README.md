@@ -58,8 +58,11 @@ See Security model below for exactly what this app's own design does *not* prote
 ## Screens
 
 - **Home** — a combined radar showing every group member across all your groups at once, each
-  group in its own color, dots pulsing faster the closer they are. Below it, your group list
-  (tap to open), a general SOS button, and a `+` to add a group.
+  group in its own color, dots pulsing faster the closer they are, fading as a position ages past
+  ~30 seconds so a stale fix doesn't look as live as a fresh one. Below it, a row of four square
+  toggles (SOS, Power saver, Disguise, Offline), then your group list (tap to open), and a `+` to
+  add a group. A light/dark theme toggle sits top-right (defaults to dark; the choice persists
+  per install).
 - **Add group** — join with a code/link someone shared, or create a new group (just a name —
   generates a random key and a shareable code/link, nothing to type on the other end that could
   get mistyped).
@@ -94,6 +97,15 @@ keeps a "here's the diff" bitset in memory before pushing any large item to a pe
 data has spread through an area, later contacts exchange a few hundred bytes of bookkeeping
 instead of resending anything already delivered — this is what keeps bigger files (evidence
 photos) viable instead of collapsing into redundant retransmission.
+
+**A passing phone can carry content between two members who've drifted apart.** Reconnecting to a
+peer you've already fully synced with normally waits out a cooldown (~45s), to avoid wasting
+limited concurrent-connection slots re-visiting someone with nothing new to say. That cooldown is
+skipped for one specific peer the moment your device's own holdings change since you last synced
+with *them* — so a phone that syncs with member A (nothing new yet), then meets member B and
+picks up something new, doesn't sit out the full cooldown before getting back to A with it. This
+is what makes "someone walks between two separated group members" actually work as a relay path,
+not just a lucky timing coincidence.
 
 **The radar is forward-up: GPS for bearing/distance, compass for rotation.** Each phone shares
 its current GPS fix over the mesh (short hop range, latest-fix-wins, kept in memory only — see
@@ -197,9 +209,14 @@ where it matters:
   changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, see below),
   not the installed package name, requested permissions, or its presence in Android
   Settings → Apps — anyone who knows to check there will find it regardless of which launcher
-  identity is active. A "Disguise app icon" switch on the Home screen flips it (`AppIdentity.kt`);
-  the notification icon shown while the mesh service runs is independently randomized per install
-  from a small library of plain, generic-looking icons, so it isn't the same on every phone either.
+  identity is active. A "Disguise app icon" toggle on the Home screen flips it (`AppIdentity.kt`),
+  picking one of a small library of plausible identities (Notes, Files, Weather, Calculator) at
+  random *every time it's turned on* — a single fixed "shows as Notes" identity would itself be a
+  greppable signature, same reasoning as the notification icon below. The notification icon shown
+  while the mesh service runs is independently randomized per install (not per toggle, since it's
+  passive background state rather than a deliberate user action each time) from its own small
+  library of plain, generic-looking icons, so it isn't the same across every phone running this
+  app either.
 - **Clipboard copies of a join code/link are marked sensitive (`EXTRA_IS_SENSITIVE`, Android 13+)**
   so the OS should skip clipboard history and cross-device sync for them — but that flag is
   advisory, ignored entirely on older Android, and not guaranteed to be honored by every keyboard
@@ -243,14 +260,25 @@ where it matters:
   only to wrap local key storage (see Security model above), not for any cryptographic operation
   itself. This reflects the state of that library upstream (no stable release exists), not a
   chosen risk.
-- **BT5 Coded PHY long-range beacon channel and Bloom-filter catalog sync are new, compile-verified
-  only, not device-tested.** The long-range channel (`BleCapabilities.kt`/`TrickleTimer.kt`,
-  extends beacon range on hardware that supports it) is capability-gated and purely additive — on
-  unsupported hardware, or if anything about it misbehaves, it's a silent no-op that can't affect
-  the proven legacy discovery path. The catalog sync (`CatalogFilter.kt`, replaced the old
-  per-peer `PeerDeliveryTracker`) changes the actual SOS/evidence-header/nickname connect-time
-  delivery mechanism and is the higher-stakes of the two — it needs its own live 2-phone pass
-  before being trusted the way the rest of the mesh core is.
+- **BT5 Coded PHY long-range beacon channel is new, compile-verified only, not device-tested.**
+  (`BleCapabilities.kt`/`TrickleTimer.kt`, extends beacon range on hardware that supports it) is
+  capability-gated and purely additive — on unsupported hardware, or if anything about it
+  misbehaves, it's a silent no-op that can't affect the proven legacy discovery path.
+- **The Bloom-filter catalog sync (`CatalogFilter.kt`, replaced the old per-peer
+  `PeerDeliveryTracker`) is now live-2-phone-tested for direct delivery** (message/SOS content
+  confirmed arriving correctly between two directly-connected phones), including a real,
+  since-fixed gap where a third phone passing between two separated members wasn't reliably
+  relaying content between them (see "How it works" above). **Still not validated at crowd
+  scale** — only ever run with a handful of physical phones at once.
+- **A peer with only a low-accuracy GPS fix (commonly true indoors — combined error easily
+  50-100m+ per phone) doesn't show up on the radar at all, with no on-screen explanation why.**
+  `placePeerOnRadar` deliberately refuses to plot a dot when your accuracy plus theirs exceeds
+  ~150m combined, rather than show a confidently-wrong position — correct behavior for trusting
+  the dot, but the failure mode is silent: a group member can show "N hop(s) away" in the group
+  list (hop-count only needs a heard beacon, not GPS) while their radar dot never appears, and
+  nothing on screen says why. Confirmed live: this is expected behavior given indoor GPS
+  conditions, not a bug, but it reads exactly like one. A real fix (surface *something* for a
+  hop-away-but-imprecise peer instead of silence) is scoped but not yet built.
 - **`GattOperationQueue`'s per-peer write lock isn't guaranteed to release if a connection hangs
   between `CONNECTED` and `DISCONNECTED`.** Once a connection gets past the initial `CONNECTED`
   callback, `MeshGattClient`'s stuck-attempt timeout (the Pass 16 fix) no longer watches it — if
@@ -260,9 +288,10 @@ where it matters:
   later connection-lifecycle timeout — deliberately not attempted blind here given how much live
   2-phone testing this exact GATT lifecycle code has already needed to get right (see CHANGELOG
   Pass 16).
-- **Automated test coverage is logic-only.** 99 pure-JVM/Robolectric unit tests cover crypto,
-  wire-format encode/decode, and connection/dedup state machines (`./gradlew test`). There are no
-  automated UI tests and no CI pipeline — both are manual/planned, not built.
+- **Automated test coverage is logic-only.** 112 pure-JVM/Robolectric unit tests cover crypto,
+  wire-format encode/decode, connection/dedup state machines, and the catalog-sync round trip
+  (`./gradlew test`). There are no automated UI tests and no CI pipeline — both are manual/planned,
+  not built.
 - **The WiFi Direct evidence accelerator is experimental, opt-in (default OFF), and
   compile-verified only — the least-trusted thing in this codebase.** Turned on from the Home
   screen (own toggle, separate from the disguise/power-saver tiles, with its own permission
@@ -284,7 +313,7 @@ compiler or an emulator).
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.1.0-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.2.0-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain

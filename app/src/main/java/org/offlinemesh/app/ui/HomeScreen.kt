@@ -93,12 +93,33 @@ fun HomeScreen(
     val dots = remember(myLocation, heading, groups) {
         val me = myLocation
         val svc = meshService
-        if (me == null || svc == null) emptyList() else groups.flatMap { g ->
-            val color = AppColors.colorForGroup(g.id)
-            svc.positionTracker.forGroup(g.id).mapNotNull { (_, record) ->
-                val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
-                placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
-                    ?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
+        if (me == null || svc == null) {
+            Log.d("HomeScreen", "dots: no dots — myLocation=${me != null}, meshService=${svc != null}")
+            emptyList()
+        } else {
+            groups.flatMap { g ->
+                val color = AppColors.colorForGroup(g.id)
+                val records = svc.positionTracker.forGroup(g.id)
+                // Temporary diagnostic (Log.d, stripped from release builds by ProGuard) — pins
+                // down exactly where a peer we know is present (has a hop count) drops out of the
+                // radar: no position record stored at all vs. a record present but rejected by
+                // placePeerOnRadar's combined-accuracy gate, with the real numbers either way
+                // instead of guessing between the two from a screenshot alone.
+                Log.d("HomeScreen", "dots: group=${g.name} peerRecords=${records.size} myAccuracyM=${me.accuracy}")
+                records.mapNotNull { (senderId, record) ->
+                    val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+                    val placed = placePeerOnRadar(
+                        me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading
+                    )
+                    if (placed == null) {
+                        Log.d(
+                            "HomeScreen",
+                            "dots: rejected peer=$senderId myAccuracyM=${me.accuracy} " +
+                                "peerAccuracyM=${record.accuracyM} combined=${me.accuracy + record.accuracyM}"
+                        )
+                    }
+                    placed?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
+                }
             }
         }
     }

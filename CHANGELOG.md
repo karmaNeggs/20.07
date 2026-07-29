@@ -1,6 +1,71 @@
 # Changelog
 
-## Since [0.1.0] — scaling/security hardening + disguise completion (unreleased, no version bump yet)
+## [0.2.0] — radar overhaul, relay reliability, theming, and a round of live-testing fixes
+
+The biggest pass since 0.1.0, driven directly by live 2-3-phone testing rather than review alone.
+112 tests, up from 99, still detekt-clean.
+
+**Radar:**
+- SOS senders now render as a red dot on the radar (both Home and per-group) instead of only a
+  text distance line — the actual answer to "how do I find who sent it."
+- Peer dots fade with age past ~30s (positions can be up to ~90s old by design) instead of
+  looking exactly as live as a fresh one.
+- North indicator is a 2x arrowhead instead of a plain dot.
+- **Fixed a real, live-confirmed bug: compass heading was raw magnetic-north with no declination
+  correction**, while peer bearings are computed relative to true north — a steady directional
+  bias (can be many degrees depending on location), not sensor noise. Now corrected via
+  `GeomagneticField` using the phone's own GPS fix.
+- **Fixed: the "Offline" toggle didn't actually stop the radar UI.** It only ever checked the OS's
+  Bluetooth state, never the app's own mesh-active flag, so toggling Offline left a frozen,
+  stale-but-plausible-looking radar on screen indefinitely. All three radar screens now gate on
+  both.
+- **Known, not yet fixed**: a group member with only a low-accuracy GPS fix (common indoors) can
+  show "N hop(s) away" while never getting a radar dot, with no on-screen explanation — the
+  accuracy gate that prevents plotting an untrustworthy position is working as designed, but the
+  silent failure mode reads exactly like a bug. Documented in Known Limitations; a real fix
+  (surface *something* instead of silence) is scoped, not built.
+
+**Relay reliability:**
+- **Fixed a real gap found live-testing a 3-phone "passerby relay" scenario**: two phones out of
+  range of each other, a third phone meant to carry content between them, didn't reliably work —
+  the reconnect cooldown was peer-agnostic (remembered *that* you synced with someone, not *what*
+  you picked up since). `ConnectionAttemptTracker` now skips a peer's cooldown once your own
+  holdings have changed since you last synced with that specific peer.
+- New `RelayResponderTest.kt` — first test coverage for the Bloom-filter catalog-sync round trip
+  itself (previously only the filter math was tested in isolation), confirming the reconciliation
+  decision logic is correct. Extended `ConnectionAttemptTrackerTest.kt` for the cooldown-skip
+  behavior above.
+- Added diagnostic logging to `RelayResponder` (item counts, push/skip decisions) so a future
+  "message/position didn't arrive" report can be read from logcat directly instead of guessed at.
+
+**Theming:**
+- Full light/dark theme toggle, top-right on Home, persisted per install — on top of a brightened
+  default dark palette (radar rings/crosshair and muted text were losing contrast in bright/
+  outdoor light).
+- Fixed a stray white system status/navigation bar on some large-screen devices — the manifest's
+  system Activity theme was light behind an all-dark app UI; now dark, and re-synced live when the
+  new theme toggle flips.
+
+**Disguise:**
+- Decoy launcher icon library expanded from one fixed identity ("Notes") to four (Notes, Files,
+  Weather, Calculator) — **re-picked at random every time the Disguise toggle is turned on**, not
+  held stable per install, since this is a deliberate user action each time rather than passive
+  background state (unlike the notification icon, which stays stable per install for exactly that
+  reason).
+
+**Reliability hardening:**
+- All three radar screens' refresh loops now catch and log instead of silently dying forever on
+  any thrown exception.
+- Release builds now strip every `Log.*` call via a new ProGuard rule — debug-only diagnostics
+  (including the new RelayResponder logging above) no longer ship in the release APK. Verified
+  directly against the built dex, not just assumed from the rule compiling.
+
+**Copy:** README and the GitHub Pages site reframed away from protest-first framing and
+competitor comparisons (Bridgefy, Briar, bitchat, Meshtastic) toward leading with the actual use
+cases in ranked order — natural disasters and blackouts, stampedes, crowd-control situations —
+and describing this app's own design choices directly rather than against anyone else's.
+
+## [0.1.1]–[0.1.3] — scaling/security hardening + disguise completion
 
 A senior-engineer-style review targeting crowd scale (10,000+ concurrent users), plus a full
 security/UX/readability pass across the codebase. All changes compile-verified, unit-tested

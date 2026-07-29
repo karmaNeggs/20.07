@@ -55,6 +55,7 @@ fails, re-check this before assuming it's a bug.
 | 2.4 | Out-of-range drop | Two connected phones, walk one out of BLE range (~30m+ / through walls) | Hop status degrades to "no one nearby" within roughly a minute (45s hop staleness window), not stuck showing stale "in range" state |
 | 2.5 | Range re-entry | Bring the phone back in range after 2.4 | Rediscovery happens without restarting the app |
 | 2.6 | Non-member blind relay | A phone with zero groups joined, sitting near two phones that share a group | Still scans/advertises (generic beacon) and, per section 5, should relay opaque data for the other two without being able to read it |
+| 2.7 | Passerby relay (3 phones, same group) | A and B in the same group, moved out of direct range of each other; C (same group) walks near A, then near B, within a couple minutes | A message/SOS sent on A should reach B via C carrying it — this was a real, fixed gap (a peer-agnostic reconnect cooldown could block C from getting back to B in time even after picking up something new from A) |
 
 ---
 
@@ -67,7 +68,9 @@ fails, re-check this before assuming it's a bug.
 | 3.3 | Multi-group color coding | Phone in 2+ groups, members nearby in more than one | Dots render in each group's own distinct color; group list rows show a small colored dot matching, not a full-color-filled row |
 | 3.4 | Group row hop text | Compare a group row's "N hop(s) away" / "no one nearby" text against actual physical proximity | Should track reality — this is the exact text from the bug report in this session, worth extra scrutiny |
 | 3.5 | Power saver toggle | Toggle "Power saver" on Home | Icon/switch changes state (amber when on); combined with section 8, advertise/scan should visibly become less frequent — best checked via battery stats or discovery latency, not visually |
-| 3.6 | General SOS button | Tap the red SOS button on Home | Navigates to the SOS composer (section 6), does not send anything yet |
+| 3.6 | General SOS button | Tap the red SOS tile on Home | Navigates to the SOS composer (section 6), does not send anything yet |
+| 3.7 | Light/dark theme toggle | Tap the icon top-right on Home | Whole app switches theme immediately (radar, tiles, group rows, system status/nav bars all follow); toggle again, choice persists across an app restart |
+| 3.8 | Offline toggle actually stops the radar | Turn "Offline" on (Bluetooth stays on) | Radar is replaced by a "Mesh is offline" message on Home, Navigate, and Group chat alike — not a frozen/stale radar still showing old positions (this was a fixed bug) |
 
 ---
 
@@ -157,8 +160,8 @@ fails, re-check this before assuming it's a bug.
 
 | # | Case | Expected (per README) |
 |---|------|------------------------|
-| 11.1 | Decoy launcher icon | Both a real and neutral launcher identity exist in the manifest, but there's no in-app toggle yet — app always launches under its real identity |
+| 11.1 | Decoy launcher icon | Home screen has a "Disguise" toggle; turning it on picks one of four identities (Notes, Files, Weather, Calculator) at random *every time it's toggled on*, not held stable — expect the icon/label to potentially change between one toggle-on and the next, that's correct, not a bug |
 | 11.2 | Presence hop-count ceiling | Hop-count-to-presence (not SOS) is capped at "in direct range or not," not a true extending multi-hop gradient — SOS doesn't have this limitation |
-| 11.3 | GPS accuracy in dense urban areas | Expect 10-30m error near tall buildings — a physical limitation, not an app bug |
+| 11.3 | GPS accuracy in dense urban areas / indoors | Expect 10-30m+ error near tall buildings, considerably worse indoors — a physical limitation, not an app bug. **Confirmed live**: a peer can show "N hop(s) away" (needs only a heard beacon) while never getting a radar dot at all, with no on-screen explanation, if combined GPS accuracy exceeds ~150m — don't mistake this for broken relay; check 2.x/6.x (hop count) still updating correctly before concluding anything is actually wrong |
 | 11.4 | Large evidence propagation time | A multi-MB item can realistically take hours across a sparse or discontinuous crowd — check chunk progress is moving at all before concluding it's stuck |
 | 11.5 | Radar animation battery cost | Continuous sweep/pulse animation only runs while the radar is actually visible on screen; Android stops delivering animation frame callbacks once the app is backgrounded, so this shouldn't add to background battery drain — worth confirming empirically if profiling tools are available |

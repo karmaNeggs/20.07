@@ -14,10 +14,12 @@ import android.content.pm.PackageManager
  * The decoy is a library, not one fixed identity — same anti-fingerprinting reasoning already
  * applied to the notification icon ([org.offlinemesh.app.ble.MeshService.decoyIcons]/`decoyLabel`):
  * a single fixed "shows as Notes" identity is itself a greppable signature independent of anything
- * else. Which decoy an install gets is picked at random the first time the disguise is ever turned
- * on, then held stable after that (same `"mesh_device"` prefs file, same reasoning as the
- * notification's own stable-per-install pick — an identity that kept changing on the SAME phone
- * would itself be a tell).
+ * else. Unlike the notification icon (stable per install, since that one is meant to sit
+ * unattended in the background for the app's lifetime), which decoy identity shows here is
+ * re-picked at random every single time the disguise is turned on — an explicit choice: this
+ * toggle is a deliberate user action each time, not passive background state, so there's no
+ * "identity changed on its own" tell to worry about the way there would be for something always
+ * running silently.
  */
 object AppIdentity {
     private const val REAL_ALIAS = "org.offlinemesh.app.LauncherReal"
@@ -44,7 +46,7 @@ object AppIdentity {
         val pm = context.packageManager
         val enabled = PackageManager.COMPONENT_ENABLED_STATE_ENABLED
         val disabled = PackageManager.COMPONENT_ENABLED_STATE_DISABLED
-        val chosenAlias = if (active) pickDecoyAlias(context) else null
+        val chosenAlias = if (active) pickDecoyAlias() else null
         pm.setComponentEnabledSetting(
             ComponentName(context.packageName, REAL_ALIAS),
             if (active) disabled else enabled,
@@ -59,15 +61,8 @@ object AppIdentity {
         }
     }
 
-    /** Picks one decoy alias at random the first time this is called, then reuses that same
-     *  choice forever after — see the class doc for why a stable-per-install pick, not a fresh
-     *  random one on every toggle, is what actually matters for the anti-fingerprinting goal. */
-    private fun pickDecoyAlias(context: Context): String {
-        val prefs = context.getSharedPreferences("mesh_device", Context.MODE_PRIVATE)
-        val stored = prefs.getInt("decoy_launcher_index", -1)
-        val index = if (stored in DECOY_ALIASES.indices) stored else {
-            DECOY_ALIASES.indices.random().also { prefs.edit().putInt("decoy_launcher_index", it).apply() }
-        }
-        return DECOY_ALIASES[index]
-    }
+    /** A fresh random pick every call — see the class doc for why this one, unlike the
+     *  notification icon, re-randomizes on every toggle rather than holding a stable per-install
+     *  choice. */
+    private fun pickDecoyAlias(): String = DECOY_ALIASES.random()
 }
