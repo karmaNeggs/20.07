@@ -57,13 +57,17 @@ class RadarMathTest {
 
     @Test
     fun `combined GPS uncertainty at the rough-fix threshold is rejected`() {
-        val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 100f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 50, headingDegrees = 0f)
-        assertNull(p) // 100 + 50 = ROUGH_FIX_METERS exactly — >= is a reject, not a boundary pass
+        val p = placePeerOnRadar(
+            0.0, 0.0, meAccuracyM = 150f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 100, headingDegrees = 0f
+        )
+        assertNull(p) // 150 + 100 = ROUGH_FIX_METERS exactly — >= is a reject, not a boundary pass
     }
 
     @Test
     fun `combined GPS uncertainty just under the threshold is accepted`() {
-        val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 100f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 49, headingDegrees = 0f)
+        val p = placePeerOnRadar(
+            0.0, 0.0, meAccuracyM = 150f, peerLat = 0.001, peerLon = 0.0, peerAccuracyM = 99, headingDegrees = 0f
+        )
         assertNotNull(p)
     }
 
@@ -71,7 +75,9 @@ class RadarMathTest {
     fun `a very rough network-location-grade fix is rejected even at zero distance`() {
         // The exact "distances that don't make sense" case: a rough indoor/network fix shouldn't be
         // plotted as a confident dot just because the two points happen to be close together.
-        val p = placePeerOnRadar(0.0, 0.0, meAccuracyM = 200f, peerLat = 0.0, peerLon = 0.0, peerAccuracyM = 200, headingDegrees = 0f)
+        val p = placePeerOnRadar(
+            0.0, 0.0, meAccuracyM = 300f, peerLat = 0.0, peerLon = 0.0, peerAccuracyM = 300, headingDegrees = 0f
+        )
         assertNull(p)
     }
 }

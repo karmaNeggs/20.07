@@ -270,15 +270,19 @@ where it matters:
   since-fixed gap where a third phone passing between two separated members wasn't reliably
   relaying content between them (see "How it works" above). **Still not validated at crowd
   scale** — only ever run with a handful of physical phones at once.
-- **A peer with only a low-accuracy GPS fix (commonly true indoors — combined error easily
-  50-100m+ per phone) doesn't show up on the radar at all, with no on-screen explanation why.**
-  `placePeerOnRadar` deliberately refuses to plot a dot when your accuracy plus theirs exceeds
-  ~150m combined, rather than show a confidently-wrong position — correct behavior for trusting
-  the dot, but the failure mode is silent: a group member can show "N hop(s) away" in the group
-  list (hop-count only needs a heard beacon, not GPS) while their radar dot never appears, and
-  nothing on screen says why. Confirmed live: this is expected behavior given indoor GPS
-  conditions, not a bug, but it reads exactly like one. A real fix (surface *something* for a
-  hop-away-but-imprecise peer instead of silence) is scoped but not yet built.
+- **A peer with only a low-accuracy GPS fix doesn't show up on the radar at all, with no
+  on-screen explanation why.** `placePeerOnRadar` deliberately refuses to plot a dot when your
+  accuracy plus theirs exceeds ~250m combined, rather than show a confidently-wrong position —
+  correct behavior for trusting the dot, but the failure mode is silent: a group member can show
+  "N hop(s) away" in the group list (hop-count only needs a heard beacon, not GPS) while their
+  radar dot never appears, and nothing on screen says why. Confirmed live to trigger more often
+  than just "indoors": many phones deliberately widen their reported GPS accuracy while
+  stationary (less continuous satellite tracking to save battery when not moving), then tighten
+  it back up the instant motion is detected — so a dot can disappear while genuinely standing
+  still, even right next to the other phone, and reappear on the next step. The threshold was
+  raised (from an original 150m) specifically to make this less common, but the underlying
+  silent-failure mode is unchanged: a real fix (surface *something* for a hop-away-but-imprecise
+  peer instead of silence) is scoped but not yet built.
 - **`GattOperationQueue`'s per-peer write lock isn't guaranteed to release if a connection hangs
   between `CONNECTED` and `DISCONNECTED`.** Once a connection gets past the initial `CONNECTED`
   callback, `MeshGattClient`'s stuck-attempt timeout (the Pass 16 fix) no longer watches it — if

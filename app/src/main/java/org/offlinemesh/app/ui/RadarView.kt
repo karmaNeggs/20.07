@@ -104,12 +104,21 @@ fun MeshPausedNotice(
 
 /**
  * Combined GPS uncertainty (my accuracy + the peer's, in metres) beyond which a relative
- * bearing/distance isn't trustworthy enough to draw. Outdoor GPS is a few metres, so this never
- * touches normal use; it only rejects network-location / very-rough indoor fixes, which would
+ * bearing/distance isn't trustworthy enough to draw. Outdoor GPS is a few metres, so this rarely
+ * touches normal use; it mainly rejects network-location / very-rough indoor fixes, which would
  * otherwise plot a confident-looking dot that's actually tens-to-hundreds of metres wrong — the
- * "the distances don't make sense" case when two phones can't see much sky. Tunable in one place.
+ * "the distances don't make sense" case when two phones can't see much sky.
+ *
+ * Set to comfortably clear the radar's own [ringScaleLadder] display ceiling (200m) — not just
+ * "reject obviously nonsense" — after a live-confirmed pattern: many phones deliberately *widen*
+ * their reported GPS accuracy while stationary (less continuous satellite tracking to save
+ * battery when you're not moving), then tighten it back up the moment motion is detected. At the
+ * previous, tighter threshold (150m) this made a peer's dot disappear while genuinely standing
+ * still — even side by side with zero real position change — and reappear on the next step, which
+ * reads as broken far more often than it protects against an actually-wrong dot. Tunable in one
+ * place.
  */
-const val ROUGH_FIX_METERS = 150f
+const val ROUGH_FIX_METERS = 250f
 
 /**
  * The single place peer distance/bearing + forward-up rotation is computed — previously copy-pasted
