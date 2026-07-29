@@ -19,6 +19,14 @@ object MeshProtocol {
     const val UNKNOWN_HOP: Int = 255
     const val ROTATING_ID_LEN: Int = 6
 
+    /** BLE's ATT MTU before any negotiation ever succeeds — the floor every connection starts at
+     *  and the value to assume if `requestMtu`/`onMtuChanged` never resolved for some reason. */
+    const val DEFAULT_ATT_MTU = 23
+
+    /** Every `writeCharacteristic`/notify consumes 3 bytes of the negotiated MTU for the ATT
+     *  opcode + attribute handle — the actual usable payload per write is `mtu - ATT_WRITE_OVERHEAD_BYTES`. */
+    const val ATT_WRITE_OVERHEAD_BYTES = 3
+
     /**
      * 8-byte advertisement service-data payload: type(1) + rotatingId(6) + sosHop(1).
      * Kept deliberately tiny — legacy BLE advertising has a hard 31-byte total limit and
@@ -49,19 +57,29 @@ object MeshProtocol {
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —
     // deliberately not duplicated here, where they used to drift out of sync.
 
-    /** 1 bit per chunk index, 1 = have it. Compact even for thousands of chunks (~650B for 5000). */
+    /** 1 bit per chunk index, 1 = have it. Compact even for thousands of chunks (~650B for 5000).
+     *  Coerced against [MeshFrameCodec.MAX_EVIDENCE_CHUNKS] as defence in depth — the primary guard
+     *  is at [MeshFrameCodec.decode], which every wire-sourced totalChunks value must pass through,
+     *  but this is also reachable directly from RelayEngine using a locally-persisted value, so the
+     *  allocation itself stays bounded regardless of caller. */
     fun encodeBitset(haveIndexes: Set<Int>, totalChunks: Int): ByteArray {
-        val bytes = ByteArray((totalChunks + 7) / 8)
+        val bounded = totalChunks.coerceIn(0, MeshFrameCodec.MAX_EVIDENCE_CHUNKS)
+        val bytes = ByteArray((bounded + 7) / 8)
         for (i in haveIndexes) {
-            if (i < 0 || i >= totalChunks) continue
+            if (i < 0 || i >= bounded) continue
             bytes[i / 8] = (bytes[i / 8].toInt() or (1 shl (i % 8))).toByte()
         }
         return bytes
     }
 
+    /** Same bound as [encodeBitset] — a negative [totalChunks] would otherwise silently "succeed"
+     *  with an empty result (`0 until totalChunks` is an empty range for negative values) instead
+     *  of being treated as malformed. */
     fun decodeBitset(bytes: ByteArray, totalChunks: Int): Set<Int> {
+        val bounded = totalChunks.coerceIn(0, MeshFrameCodec.MAX_EVIDENCE_CHUNKS)
         val result = mutableSetOf<Int>()
-        for (i in 0 until totalChunks) {
+        for (i in 0 until bounded) {
+            if (i / 8 >= bytes.size) break
             if ((bytes[i / 8].toInt() shr (i % 8)) and 1 == 1) result.add(i)
         }
         return result
@@ -76,6 +94,12 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     data class Key(val groupId: String, val target: String) // target = "PRESENCE" or an sosId
     private val table = ConcurrentHashMap<Key, Int>()
     private val lastUpdated = ConcurrentHashMap<Key, Long>()
+    // Which reporter's report currently "owns" table[key] — see updateHop's doc for why this
+    // exists: without it, a value only ever got BETTER, forever, even after the route that
+    // produced it was long gone, as long as something (anything) kept refreshing recency. A
+    // peer/connection address is a fine source identity here even though BLE addresses rotate
+    // every ~15min — see updateHop's doc for why that rotation doesn't reopen the bug this fixes.
+    private val lastSource = ConcurrentHashMap<Key, String>()
     private val _snapshot = MutableStateFlow<Map<Key, Int>>(emptyMap())
     val snapshot: StateFlow<Map<Key, Int>> = _snapshot
 
@@ -94,33 +118,45 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
         return table[key] ?: MeshProtocol.UNKNOWN_HOP
     }
 
-    /** A direct BLE neighbor is by definition 1 hop away for whatever they're broadcasting as 0/near. */
-    fun considerNeighborReport(groupId: String, target: String, neighborHop: Int) {
+    /** A direct BLE neighbor is by definition 1 hop away for whatever they're broadcasting as 0/near.
+     *  [sourceId] is whoever's actually reporting this (a peer/connection address) — see
+     *  [updateHop]'s doc for what it's used for. */
+    fun considerNeighborReport(groupId: String, target: String, neighborHop: Int, sourceId: String) {
         if (neighborHop >= MeshProtocol.UNKNOWN_HOP) return
         val candidate = (neighborHop + 1).coerceAtMost(MeshProtocol.UNKNOWN_HOP - 1)
-        val key = Key(groupId, target)
-        val current = myHop(groupId, target)
-        if (candidate < current) {
-            table[key] = candidate
-            lastUpdated[key] = now()
-            _snapshot.update { it + (key to candidate) }
-        } else {
-            // refresh recency even if not an improvement, so a stable route doesn't go stale
-            lastUpdated[key] = now()
-        }
+        updateHop(groupId, target, candidate, sourceId)
     }
 
     /** Set my own hop value directly (not "neighbor + 1") — used when I can derive my true
      *  distance from something other than a live neighbor report, e.g. TTL consumed by a
-     *  relayed SOS packet. Only updates if it's an improvement, same as considerNeighborReport. */
-    fun considerDirectHop(groupId: String, target: String, hopValue: Int) {
+     *  relayed SOS packet. See [updateHop] for the acceptance rule. */
+    fun considerDirectHop(groupId: String, target: String, hopValue: Int, sourceId: String) {
         if (hopValue < 0 || hopValue >= MeshProtocol.UNKNOWN_HOP) return
+        updateHop(groupId, target, hopValue, sourceId)
+    }
+
+    /** Shared acceptance rule for both public update methods above.
+     *
+     *  A report that IMPROVES the currently tracked hop is always accepted, from any source —
+     *  ordinary distance-vector relaxation. A report that does NOT improve it is only accepted
+     *  (replacing the value, possibly upward — i.e. genuinely worse) when it comes from the SAME
+     *  source that established the current value: that source is re-asserting its own route got
+     *  worse or vanished, which a strictly-better-only rule would otherwise ignore forever — once
+     *  a key was recorded at hop 1, it stayed "1 hop away" no matter how stale or wrong, as long as
+     *  *anything* kept refreshing recency (which every call here already did, on every report). A
+     *  worse report from a DIFFERENT, non-owning source is never allowed to downgrade an existing
+     *  better-known route — it has no basis to override what the owning source itself last said.
+     *  Recency always refreshes regardless of acceptance, so a stable, unchanged route doesn't go
+     *  stale purely from a lack of new reports. */
+    private fun updateHop(groupId: String, target: String, candidate: Int, sourceId: String) {
         val key = Key(groupId, target)
         val current = myHop(groupId, target)
-        if (hopValue < current) {
-            table[key] = hopValue
+        val ownedBySameSource = lastSource[key] == sourceId
+        if (candidate < current || (ownedBySameSource && candidate != current)) {
+            table[key] = candidate
+            lastSource[key] = sourceId
             lastUpdated[key] = now()
-            _snapshot.update { it + (key to hopValue) }
+            _snapshot.update { it + (key to candidate) }
         } else {
             lastUpdated[key] = now()
         }
@@ -129,6 +165,7 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     fun markSosOrigin(groupId: String, sosId: String) {
         val key = Key(groupId, sosId)
         table[key] = 0
+        lastSource[key] = "self"
         lastUpdated[key] = now()
         _snapshot.update { it + (key to 0) }
     }

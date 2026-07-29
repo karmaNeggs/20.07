@@ -77,7 +77,7 @@ class RelayResponderTest {
     fun `pushes a held SOS when the peer's filter says they don't have it`() = runTest {
         relay.ingestSos(sosFixture())
         val peerFilter = CatalogFilter.build(emptyList()) // peer holds nothing
-        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.toBits())
+        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
 
         val responded = mutableListOf<ByteArray>()
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
@@ -94,7 +94,7 @@ class RelayResponderTest {
     fun `does not re-push an SOS the peer's filter already says they have`() = runTest {
         relay.ingestSos(sosFixture())
         val peerFilter = CatalogFilter.build(listOf("sos:sos-1")) // peer already holds it
-        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.toBits())
+        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
 
         val responded = mutableListOf<ByteArray>()
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
@@ -106,7 +106,7 @@ class RelayResponderTest {
     fun `an evidence header not in the peer's filter is pushed the same way as SOS`() = runTest {
         relay.ingestEvidenceMeta(evidenceFixture())
         val peerFilter = CatalogFilter.build(emptyList())
-        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.toBits())
+        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
 
         val responded = mutableListOf<ByteArray>()
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
@@ -122,7 +122,7 @@ class RelayResponderTest {
         relay.ingestSos(sosFixture("sos-1"))
         relay.ingestSos(sosFixture("sos-2"))
         val peerFilter = CatalogFilter.build(listOf("sos:sos-1")) // peer has sos-1 only
-        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.toBits())
+        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
 
         val responded = mutableListOf<ByteArray>()
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
@@ -133,6 +133,66 @@ class RelayResponderTest {
         assertEquals(listOf("sos-2"), ids)
     }
 
+    // ---- per-connection catalog-item push budget (mirrors consumeBudget for chunks) ----
+
+    @Test
+    fun `a catalog deficit larger than the per-connection budget is capped, not pushed in full`() = runTest {
+        // maxCatalogItemsPerSession is 200 — 210 held items forces the budget path for real,
+        // rather than relying on a test-only override this class doesn't expose (deliberately: the
+        // budget is an internal fairness knob, not something callers should be able to bypass).
+        for (i in 0 until 210) relay.ingestSos(sosFixture("sos-$i"))
+        val peerFilter = CatalogFilter.build(emptyList()) // peer holds nothing
+        val filterFrame = MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+
+        val responded = mutableListOf<ByteArray>()
+        responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
+
+        val pushedIds = responded.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Sos>()
+            .map { it.sos.id }
+        assertEquals("expected exactly the per-connection budget's worth pushed, not all 210", 200, pushedIds.size)
+    }
+
+    @Test
+    fun `the catalog-item budget is per connection, reset by resetSessionBudget`() = runTest {
+        for (i in 0 until 210) relay.ingestSos(sosFixture("sos-$i"))
+        val emptyPeerFilter = CatalogFilter.build(emptyList()) // peer starts holding nothing
+        val firstFilterFrame =
+            MeshFrameCodec.encodeCatalogFilter(emptyPeerFilter.seed, emptyPeerFilter.sizeBits, emptyPeerFilter.toBits())
+
+        val firstConnection = mutableListOf<ByteArray>()
+        responder.handleIncoming(firstFilterFrame, "peer1") { firstConnection.add(it) }
+        val firstPushedIds = firstConnection.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Sos>().map { it.sos.id }
+        assertEquals(200, firstPushedIds.size)
+
+        // A fresh connection to the SAME peer resets the budget (MeshGattClient/MeshGattServer
+        // already call this on every new connection) — simulating the peer's own filter now
+        // reflecting what it just received (as it genuinely would, having ingested those 200
+        // items), the remaining 10 must be reachable on this next connection, not permanently
+        // stuck behind the first connection's now-exhausted budget.
+        responder.resetSessionBudget("peer1")
+        val updatedPeerFilter = CatalogFilter.build(firstPushedIds.map { "sos:$it" })
+        val secondFilterFrame = MeshFrameCodec.encodeCatalogFilter(
+            updatedPeerFilter.seed, updatedPeerFilter.sizeBits, updatedPeerFilter.toBits()
+        )
+        val secondConnection = mutableListOf<ByteArray>()
+        responder.handleIncoming(secondFilterFrame, "peer1") { secondConnection.add(it) }
+        val secondPushedIds = secondConnection.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Sos>().map { it.sos.id }
+        // Exactly 10 items remain undelivered, but CatalogFilter is a probabilistic Bloom filter
+        // (see its class doc): at a 200-item fill it has a real, non-negligible false-positive
+        // rate, so an occasional one of the 10 can look "already held" and get skipped this round
+        // (harmlessly — it gets a fresh chance next reconnect, per that same doc). Assert a range
+        // rather than pin an exact count against a structure that's allowed to do this by design.
+        assertTrue(
+            "expected most of the 10 remaining items, got ${secondPushedIds.size}",
+            secondPushedIds.size in 8..10
+        )
+        // Confirms the reset budget is what mattered here, not a fallback resend of everything.
+        assertTrue(secondPushedIds.size < firstPushedIds.size)
+    }
+
     @Test
     fun `framesToPushOnConnect advertises a filter that correctly contains our own held items`() = runTest {
         relay.ingestSos(sosFixture())
@@ -140,9 +200,78 @@ class RelayResponderTest {
         val filterFrame = frames.mapNotNull { MeshFrameCodec.decode(it) }
             .filterIsInstance<MeshFrameCodec.Frame.CatalogFilter>()
             .single()
-        val rebuilt = CatalogFilter.fromBits(filterFrame.bits, filterFrame.seed)
+        val rebuilt = CatalogFilter.fromBits(filterFrame.bits, filterFrame.seed, filterFrame.sizeBits)
 
         assertTrue(rebuilt.mightContain("sos:sos-1"))
+    }
+
+    // ---- advertise what we HOLD (any ttl), not just what's still RELAYABLE (ttl > 0) ----
+
+    @Test
+    fun `an item at ttl 0 is advertised in our own catalog filter but is not pushed to a peer`() = runTest {
+        // ingestSos decrements ttl by 1 on ingest (one hop consumed) — starting at 1 means it's
+        // stored at ttl 0: held, but no longer relayable.
+        relay.ingestSos(sosFixture().copy(ttl = 1))
+
+        val frames = responder.framesToPushOnConnect()
+        val filterFrame = frames.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.CatalogFilter>()
+            .single()
+        val rebuilt = CatalogFilter.fromBits(filterFrame.bits, filterFrame.seed, filterFrame.sizeBits)
+        assertTrue(
+            "a held item at ttl 0 must still appear in our advertised catalog (so peers stop " +
+                "re-pushing it to us for the rest of its retention window)",
+            rebuilt.mightContain("sos:sos-1")
+        )
+
+        // But relayableSos (ttl > 0 only) still gates what's actually SENT — a peer whose filter
+        // says they don't have it must not receive it, since we no longer relay it ourselves.
+        val peerFilter = CatalogFilter.build(emptyList()) // peer holds nothing
+        val peerFilterFrame =
+            MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+        val responded = mutableListOf<ByteArray>()
+        responder.handleIncoming(peerFilterFrame, "peer1") { responded.add(it) }
+        val pushedSosIds = responded.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Sos>()
+            .map { it.sos.id }
+        assertTrue("a ttl-0 item must never be pushed, even to a peer that doesn't have it", pushedSosIds.isEmpty())
+    }
+
+    // ---- MTU fallback — a catalog filter that doesn't fit this connection's negotiated MTU
+    // must never silently drop delivery (see framesToPushOnConnect's "MTU fallback" class doc) ----
+
+    @Test
+    fun `a generous frame budget still gets a catalog filter, not eager push`() = runTest {
+        relay.ingestSos(sosFixture())
+        val frames = responder.framesToPushOnConnect(maxFrameBytes = 512)
+        val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
+        assertTrue(decoded.any { it is MeshFrameCodec.Frame.CatalogFilter })
+        assertTrue("a filter fit — the SOS itself must not also be eagerly pushed",
+            decoded.none { it is MeshFrameCodec.Frame.Sos })
+    }
+
+    @Test
+    fun `a too-small frame budget falls back to eagerly pushing the SOS instead of a filter`() = runTest {
+        relay.ingestSos(sosFixture())
+        // 1 byte: no encoded catalog filter can ever fit this — forces the fallback branch
+        // regardless of how small CatalogFilter's own dynamic sizing makes the filter.
+        val frames = responder.framesToPushOnConnect(maxFrameBytes = 1)
+        val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
+        assertTrue("expected no catalog filter frame when it can't possibly fit",
+            decoded.none { it is MeshFrameCodec.Frame.CatalogFilter })
+        val pushedSos = decoded.filterIsInstance<MeshFrameCodec.Frame.Sos>().singleOrNull()
+        assertTrue("expected the SOS to be pushed eagerly instead", pushedSos != null)
+        assertEquals("sos-1", pushedSos?.sos?.id)
+    }
+
+    @Test
+    fun `the eager-push fallback also carries evidence headers and nicknames`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture())
+        val frames = responder.framesToPushOnConnect(maxFrameBytes = 1)
+        val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
+        val pushedMeta = decoded.filterIsInstance<MeshFrameCodec.Frame.EvidMeta>().singleOrNull()
+        assertTrue(pushedMeta != null)
+        assertEquals("evid-1", pushedMeta?.meta?.id)
     }
 
     // ---- catalogEpoch: the signal ConnectionAttemptTracker uses to skip a peer's synced cooldown

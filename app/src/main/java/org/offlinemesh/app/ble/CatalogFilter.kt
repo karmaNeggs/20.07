@@ -36,19 +36,43 @@ import java.util.BitSet
  * against a freshly-salted filter. [seed] is re-randomized on every [build] call specifically so a
  * false positive doesn't deterministically recur connection after connection against the same
  * (holdings, item) pair — see [build]'s doc.
+ *
+ * [sizeBits] is per-instance, not a shared constant — see [sizeBitsFor]'s doc for why a group's
+ * actual catalog size, not a fixed worst-case, drives it. It travels on the wire alongside [seed]
+ * ([MeshFrameCodec.Frame.CatalogFilter]/`encodeCatalogFilter`) since a receiver's [hashIndexes]
+ * must use the exact same bit-space the sender built against, or membership answers silently
+ * disagree.
  */
 class CatalogFilter private constructor(
     private val bits: BitSet,
     val seed: Long,
+    val sizeBits: Int,
 ) {
     companion object {
-        // Tuned for a few hundred items at a low-single-digit-percent false-positive rate — generous
-        // headroom over this app's actual per-connection item counts (SOS/evidence-headers/
-        // nicknames relayable at once, bounded by the 48h content-retention window) — while keeping
-        // the encoded filter (SIZE_BITS/8 = 256 bytes + 8-byte seed) comfortably under a single
-        // unfragmented BLE write, matching every other frame type here except evidence chunks.
-        const val SIZE_BITS = 2048
         const val HASH_COUNT = 5
+
+        // A 20.07 group is short-lived by design (days, not months — groups are deleted when the
+        // task they were created for is done) and small (this app's real target is roughly a
+        // dozen people), so a typical catalog (SOS + evidence-headers + nicknames combined, all
+        // relayable items across every active group) is tens of items, not hundreds — the old
+        // fixed 2048-bit/256-byte filter was generous headroom over that, most of it wasted on
+        // every connection. Sizing to the actual catalog instead means a typical filter is small
+        // enough to fit comfortably under even a conservative negotiated MTU, which is the real
+        // point: RelayResponder.framesToPushOnConnect's MTU-fallback path exists for when it still
+        // doesn't fit, but the common case should just fit rather than routinely triggering it.
+        private const val BITS_PER_ITEM = 10
+        private const val MIN_SIZE_BITS = 64
+        private const val MAX_SIZE_BITS = 4096
+
+        private const val BITS_PER_BYTE = 8
+
+        /** Rounds up to a full byte so [toBits]/[BitSet.valueOf] round-trip on clean boundaries —
+         *  not load-bearing for correctness ([hashIndexes] only ever produces indexes `< sizeBits`
+         *  regardless), just keeps the encoded size predictable from [sizeBits] alone. */
+        private fun sizeBitsFor(itemCount: Int): Int {
+            val raw = (itemCount * BITS_PER_ITEM).coerceIn(MIN_SIZE_BITS, MAX_SIZE_BITS)
+            return ((raw + BITS_PER_BYTE - 1) / BITS_PER_BYTE) * BITS_PER_BYTE
+        }
 
         // Mixing constants for hashIndexes' double-hashing scheme — see that function's doc.
         private const val SEED_FOLD_SHIFT = 32 // half of Long.SIZE_BITS (64)
@@ -66,16 +90,18 @@ class CatalogFilter private constructor(
          *  collision this round is (with overwhelming probability) simply not a collision next
          *  round, when a fresh filter gets built and sent again on the next reconnect. */
         fun build(items: Collection<String>, seed: Long = SecureRandom().nextLong()): CatalogFilter {
-            val bits = BitSet(SIZE_BITS)
-            val filter = CatalogFilter(bits, seed)
+            val sizeBits = sizeBitsFor(items.size)
+            val bits = BitSet(sizeBits)
+            val filter = CatalogFilter(bits, seed, sizeBits)
             for (item in items) filter.add(item)
             return filter
         }
 
-        /** Reconstructs a filter received over the wire — [seed] and [bits] must be exactly what
-         *  the sender's [build]/[toBits] produced, since [seed] alone determines which bit
-         *  positions an item hashes to. */
-        fun fromBits(bits: ByteArray, seed: Long): CatalogFilter = CatalogFilter(BitSet.valueOf(bits), seed)
+        /** Reconstructs a filter received over the wire — [seed], [sizeBits], and [bits] must be
+         *  exactly what the sender's [build]/[toBits] produced, since [seed] and [sizeBits]
+         *  together determine which bit positions an item hashes to. */
+        fun fromBits(bits: ByteArray, seed: Long, sizeBits: Int): CatalogFilter =
+            CatalogFilter(BitSet.valueOf(bits), seed, sizeBits)
     }
 
     private fun add(item: String) {
@@ -87,7 +113,7 @@ class CatalogFilter private constructor(
     fun mightContain(item: String): Boolean = hashIndexes(item).all { bits.get(it) }
 
     /** [BitSet.toByteArray] truncates trailing all-zero bytes, so this can be shorter than
-     *  `SIZE_BITS / 8` — that's fine on the receiving end too: [BitSet.get] on an index beyond a
+     *  `sizeBits / 8` — that's fine on the receiving end too: [BitSet.get] on an index beyond a
      *  reconstructed BitSet's current length returns false, exactly the correct "not set" answer. */
     fun toBits(): ByteArray = bits.toByteArray()
 
@@ -108,6 +134,6 @@ class CatalogFilter private constructor(
         for (i in item.length - 1 downTo 0) h2 = h2 * H2_MULTIPLIER + item[i].code
         h2 = h2 xor (h2 ushr H2_MIX_SHIFT)
         if (h2 == 0) h2 = 1 // an all-zero step would collapse every derived index onto h1 alone
-        return IntArray(HASH_COUNT) { i -> Math.floorMod(h1 + i * h2, SIZE_BITS) }
+        return IntArray(HASH_COUNT) { i -> Math.floorMod(h1 + i * h2, sizeBits) }
     }
 }

@@ -12,9 +12,12 @@ import androidx.room.RoomDatabase
         SosEntity::class,
         EvidenceEntity::class,
         EvidenceChunkEntity::class,
-        NicknameEntity::class
+        NicknameEntity::class,
+        PeerKeyEntity::class
     ],
-    version = 4, // v4: added NicknameEntity (per-group display name)
+    // v6: added PeerKeyEntity (pinned per-sender Ed25519 public keys) and SosEntity/EvidenceEntity/
+    // NicknameEntity.signature (Ed25519 sender identity).
+    version = 6,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -24,6 +27,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun evidenceDao(): EvidenceDao
     abstract fun evidenceChunkDao(): EvidenceChunkDao
     abstract fun nicknameDao(): NicknameDao
+    abstract fun peerKeyDao(): PeerKeyDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null

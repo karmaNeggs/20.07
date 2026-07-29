@@ -32,8 +32,7 @@ class PositionTracker {
     fun forGroup(groupId: String): Map<String, Record> {
         // Staleness must be enforced here, at read time, not only via prune()'s side effect of
         // a new offer() arriving — if a peer goes quiet and nothing else comes in for anyone,
-        // prune() never re-runs and their last-known dot would otherwise sit on the radar
-        // forever (found during rubric trace, case 6.7/6.9).
+        // prune() never re-runs and their last-known dot would otherwise sit on the radar forever.
         val cutoff = System.currentTimeMillis() / 1000 - maxAgeSeconds
         return table.filterKeys { it.groupId == groupId }
             .filterValues { it.timestampSec >= cutoff }

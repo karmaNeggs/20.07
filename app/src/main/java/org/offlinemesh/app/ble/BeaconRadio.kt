@@ -31,19 +31,13 @@ import org.offlinemesh.app.data.GroupRepository
  * separate concern owned by MeshGattClient/MeshGattServer; this class only decides "who's nearby"
  * and hands discovered devices off via [onDeviceSeen].
  *
- * Both loops favor discovery reliability over cleverness (see [BleTuning] for what got tried and
- * walked back). Scanning runs continuously once started — one `startScan()` per power tier, left
- * running, with [BleTuning.Profile.scanMode] as the only duty-cycle lever. Advertising follows the
- * same principle: the radio is only touched (stop+restart) when the *payload itself* needs to
- * change — a new rotating id window, a different group in the round-robin, a changed SOS hop — not
- * on any fixed timer. A version in between touched the radio on every loop tick regardless of
- * whether anything had changed (roughly every 700-900ms, continuously, for as long as the service
- * ran); a live 2-phone test went from "unreliable" to total, symmetric discovery failure on *both*
- * phones under that churn — consistent with the BLE stack itself getting into a bad state under
- * rapid stop/start cycling, a known category of chipset issue (see CHANGELOG Pass 7 for an earlier,
- * different instance of exactly this class of bug). With one stable group, the fix below now calls
- * `startAdvertising` roughly once every ~60 seconds (only when the rotating id actually rotates) and
- * otherwise leaves the same advertising session running untouched — the minimum possible churn.
+ * **Invariant: the radio is only ever touched (stop+restart) when the payload itself needs to
+ * change** — a new rotating-id window, a different group in the round-robin, a changed SOS hop —
+ * never on a fixed timer. Scanning runs continuously once started — one `startScan()` per power
+ * tier, left running, with [BleTuning.Profile.scanMode] as the only duty-cycle lever, left to the
+ * OS. See `docs/DECISIONS.md`, decision 1, for why this is an invariant, not a preference — live
+ * 2-phone testing hit total, symmetric discovery failure under a version that touched the radio on
+ * a fixed schedule instead.
  *
  * All frequency/power/timing numbers live in [BleTuning], not here — this class only sequences
  * them. Scan matching is a per-slot cache lookup: candidate rotating ids for every group are
@@ -276,8 +270,6 @@ class BeaconRadio(
     // ScanSettings API surface, but unverified on real hardware. Needs its own live-device pass —
     // ideally two BT5 phones with confirmed Coded PHY support — before being trusted the way the
     // legacy path now is.
-    @Suppress("ReturnCount") // guard clauses for missing adapter/unsupported hardware/redundant/
-    // unchanged, in that order — each one reads more clearly as an early return than nested ifs.
     @SuppressLint("MissingPermission")
     private fun evaluateLongRangeAdvertising(type: Byte, rid: ByteArray, sHop: Int, payloadKey: String) {
         val adapter = bluetoothManager.adapter ?: return
@@ -383,8 +375,6 @@ class BeaconRadio(
      *  `startScan()` call left running, matching this file's established "leave it running, don't
      *  touch it on a timer" principle — see the class doc. Silently does nothing if the adapter,
      *  scanner, or hardware capability isn't there; never affects the legacy scan either way. */
-    @Suppress("ReturnCount") // guard clauses for missing adapter/unsupported hardware/missing
-    // scanner — each reads more clearly as an early return than nested ifs.
     @SuppressLint("MissingPermission")
     private fun startLongRangeScanning() {
         val adapter = bluetoothManager.adapter ?: return
@@ -412,16 +402,10 @@ class BeaconRadio(
         try { s.stopScan(scanCallback) } catch (_: Exception) {}
         val settings = ScanSettings.Builder().setScanMode(scanMode).build()
         try {
-            // No ScanFilter, deliberately — a hardware Service-Data-with-mask filter (used here in
-            // an earlier version, pitched at the time as the biggest available battery lever) turned
-            // out to be unreliable in live 2-phone testing: some BLE chipsets silently fail to honor
-            // it and just return nothing, with no error surfaced anywhere. That produced a
-            // deterministic (not intermittent) "this phone never sees anyone" on one specific test
-            // device — a correctness bug, not a tuning tradeoff, so it's not worth keeping even for
-            // the battery win. Scanning unfiltered and matching in onScanResult below (already how
-            // the code was structured — the hardware filter only controlled whether the callback
-            // fired at all, not the matching logic itself) is slower to wake the CPU on advertisements
-            // from unrelated nearby Bluetooth devices, but works the same on every chipset.
+            // No ScanFilter, deliberately — a hardware filter silently fails to fire on some BLE
+            // chipsets (see docs/DECISIONS.md, decision 3); matching in onScanResult below instead
+            // is slower to wake the CPU on unrelated nearby Bluetooth traffic, but works the same
+            // on every chipset.
             s.startScan(emptyList(), settings, scanCallback)
         } catch (e: Exception) {
             Log.w(TAG, "scan start failed: ${e.message}")
@@ -438,8 +422,11 @@ class BeaconRadio(
                 val groupId = matchTable[beacon.rotatingGroupId.toHex()]
                 if (groupId != null) {
                     // Hearing the beacon at all means a real member is 1 hop away; considerNeighborReport
-                    // adds its own +1, so we feed it 0.
-                    hopTracker.considerNeighborReport(groupId, "PRESENCE", 0)
+                    // adds its own +1, so we feed it 0. The scanned device's address is this
+                    // report's source — see HopTracker.updateHop's doc for what that's used for
+                    // (a worse reading from a genuinely different peer can't downgrade a better
+                    // one already established by someone else).
+                    hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
                     // Deliberately NOT feeding beacon.sosHop into hop tracking (an earlier version did,
                     // via a "SOS_PENDING" key) — that was a second, rough, sosId-agnostic hop estimate
                     // sitting alongside the exact, TTL-derived per-SOS tracking, and the display took
@@ -463,14 +450,12 @@ class BeaconRadio(
      *  keeps hearing others covering a group on this channel backs off transmitting its own. */
     @SuppressLint("MissingPermission")
     private val longRangeScanCallback = object : ScanCallback() {
-        @Suppress("ReturnCount") // guard clauses for no service data/undecodable/non-group beacon/
-        // unmatched rotating id — each reads more clearly as an early return than nested ifs.
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
             val beacon = MeshProtocol.decodeBeacon(serviceData) ?: return
             if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
             val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
-            hopTracker.considerNeighborReport(groupId, "PRESENCE", 0)
+            hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
             longRangeTrickle.onSighting()
         }
         override fun onScanFailed(errorCode: Int) {

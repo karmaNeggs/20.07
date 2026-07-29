@@ -3,6 +3,7 @@ package org.offlinemesh.app.ble
 import android.content.Context
 import android.util.Log
 import org.offlinemesh.app.crypto.CryptoUtils
+import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -30,7 +31,46 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // other people's traffic alone. 48h covers a multi-day event without becoming a
         // standing record of it.
         const val CONTENT_MAX_AGE_MILLIS = 48L * 60 * 60 * 1000
-        private const val SEEN_ID_MAX_AGE_MILLIS = 6L * 60 * 60 * 1000
+        // Matches CONTENT_MAX_AGE_MILLIS rather than a shorter window — this cache existing purely
+        // as a flood-dedup short-circuit (see ingestSos/ingestEvidenceMeta's doc) doesn't mean it's
+        // safe to expire sooner than the content it's deduping against: while a SOS/evidence row
+        // is still alive, seeing that same id again should never be treated as "new" again either.
+        // "Is new" is now derived from the DAO insert's own return value regardless (see
+        // ingestSos/ingestEvidenceMeta), so this equal window is defence in depth, not the primary
+        // fix — but keeping it shorter than content age would still let a later relay skip straight
+        // past the seenDao short-circuit into Room on every reconnect, needless DB traffic for
+        // something already known to be a duplicate.
+        private const val SEEN_ID_MAX_AGE_MILLIS = CONTENT_MAX_AGE_MILLIS
+
+        /** Truncates [text] to at most [maxBytes] UTF-8 bytes — used instead of [String.take] since
+         *  the caps this guards ([MeshFrameCodec.MAX_SOS_MESSAGE_BYTES]) are wire byte-length limits,
+         *  not character-count limits, and non-ASCII text can be several bytes per character. A cut
+         *  landing mid multi-byte sequence decodes its trailing partial character as U+FFFD — never
+         *  a crash, and the boundary itself only matters for messages already past the cap. */
+        private fun truncateToUtf8Bytes(text: String, maxBytes: Int): String {
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            return if (bytes.size <= maxBytes) text else String(bytes, 0, maxBytes, Charsets.UTF_8)
+        }
+
+        /** Splits [data] into chunks of at most [size] bytes via [ByteArray.copyOfRange] — NOT
+         *  `data.toList().chunked(size)`, which boxes every single byte into a `java.lang.Byte`. A
+         *  300KB image meant ~300,000 boxed objects plus ~750 throwaway `List<Byte>` sublists plus a
+         *  final copy back to `ByteArray`, on exactly the low-RAM phones this app targets — the same
+         *  class of unnecessary allocation `maybeReassemble` already avoided on the reassembly side
+         *  via pre-sized-array-plus-arraycopy, just not previously applied here on the way out.
+         *  `internal`, in the companion (not an instance method) — constructing a real [RelayEngine]
+         *  needs a [Context] (for its Room database), which a plain JVM test can't provide; this has
+         *  no such dependency, so it's kept directly, deterministically testable on its own. */
+        internal fun chunkBytes(data: ByteArray, size: Int): List<ByteArray> {
+            val chunks = ArrayList<ByteArray>((data.size + size - 1) / size)
+            var offset = 0
+            while (offset < data.size) {
+                val end = minOf(offset + size, data.size)
+                chunks.add(data.copyOfRange(offset, end))
+                offset = end
+            }
+            return chunks
+        }
 
         /** Where a reassembled evidence file lives on disk once [EvidenceEntity.complete] is true —
          *  the single place this naming convention is defined, shared with the UI layer
@@ -65,11 +105,20 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val id = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
         val senderId = repo.deviceId
+        // Caps to the same bound MeshFrameCodec.decode enforces on the receiving end — truncating
+        // by UTF-8 byte length (what the wire format and MAC actually measure), not by String
+        // length, so this can never author a message the codec's own guard would then reject.
+        val truncated = truncateToUtf8Bytes(text, MeshFrameCodec.MAX_SOS_MESSAGE_BYTES)
         val key = repo.getGroupKey(groupId)
-        val mac = key?.let { CryptoUtils.authTag(it, MeshFrameCodec.sosMacInput(id, groupId, senderId, text, timestamp)) }
+        val macInput = MeshFrameCodec.sosMacInput(id, groupId, senderId, truncated, timestamp)
+        val mac = key?.let { CryptoUtils.authTag(it, macInput) }
+        // Additive on top of the group-key mac above, never a replacement — see SosEntity.
+        // signature's doc. Null exactly when mac is (no group key => no sender identity either;
+        // see GroupRepository.ensureSenderIdentity, established alongside the key on join/create).
+        val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
-            message = text, timestamp = timestamp, ttl = DEFAULT_TTL, mac = mac
+            message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, mac = mac, signature = signature
         )
         sosDao.insert(sos)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
@@ -82,19 +131,22 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val ciphertext = CryptoUtils.encrypt(key, plaintext)
         val id = UUID.randomUUID().toString()
         val hash = CryptoUtils.sha256Hex(ciphertext)
-        val chunks = ciphertext.toList().chunked(CHUNK_SIZE)
+        val chunks = chunkBytes(ciphertext, CHUNK_SIZE)
         val timestamp = System.currentTimeMillis()
         val senderId = repo.deviceId
-        val mac = CryptoUtils.authTag(key, MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType))
+        val macInput = MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType)
+        val mac = CryptoUtils.authTag(key, macInput)
+        val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         val evidence = EvidenceEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
-            mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true, mac = mac
+            mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true,
+            mac = mac, signature = signature
         )
         evidenceDao.insert(evidence)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
         chunks.forEachIndexed { idx, bytes ->
-            val chunkEntity = EvidenceChunkEntity(id, idx, bytes.toByteArray())
+            val chunkEntity = EvidenceChunkEntity(id, idx, bytes)
             chunkDao.insert(chunkEntity)
             seenDao.insert(SeenMessageEntity("$id:$idx", System.currentTimeMillis()))
         }
@@ -117,8 +169,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val updatedAt = System.currentTimeMillis()
         val senderId = repo.deviceId
         val key = repo.getGroupKey(groupId) ?: error("no key for group")
-        val mac = CryptoUtils.authTag(key, MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt))
-        val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac)
+        val macInput = MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt)
+        val mac = CryptoUtils.authTag(key, macInput)
+        val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
+        val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac, signature)
         nicknameDao.upsert(n)
         epoch.incrementAndGet()
         return n
@@ -128,20 +182,35 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
 
     // ---------- ingesting items heard over the mesh ----------
 
+    // "Is this new" is derived from the DAO insert's own return value (the rowid, or -1 when
+    // OnConflictStrategy.IGNORE dropped it as a duplicate), not from the seenDao check above —
+    // seenDao is a short-lived flood-dedup cache (SEEN_ID_MAX_AGE_MILLIS), while the SOS/evidence
+    // rows themselves live for the full CONTENT_MAX_AGE_MILLIS. Deriving newness from seenDao alone
+    // meant that once its entry expired but the content row hadn't, the next relay of the exact
+    // same item made this return true again — ingestSos feeding straight into
+    // RelayResponder.onSosReceived, which fires an IMPORTANCE_HIGH/CATEGORY_ALARM notification for
+    // what could be a many-hours-old emergency. The seenDao check above is still worth keeping as a
+    // cheap short-circuit before ever touching Room for the common case (a flood-relayed duplicate
+    // arriving seconds after the first copy).
+
     suspend fun ingestSos(sos: SosEntity): Boolean {
         if (seenDao.find(sos.id) != null) return false
         seenDao.insert(SeenMessageEntity(sos.id, System.currentTimeMillis()))
-        sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1))
-        epoch.incrementAndGet()
-        return true
+        val rowId = sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1))
+        val isNew = rowId != -1L
+        if (isNew) epoch.incrementAndGet()
+        return isNew
     }
 
     suspend fun ingestEvidenceMeta(meta: EvidenceEntity): Boolean {
         if (seenDao.find(meta.id) != null) return false
         seenDao.insert(SeenMessageEntity(meta.id, System.currentTimeMillis()))
-        evidenceDao.insert(meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null))
-        epoch.incrementAndGet()
-        return true
+        val rowId = evidenceDao.insert(
+            meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null)
+        )
+        val isNew = rowId != -1L
+        if (isNew) epoch.incrementAndGet()
+        return isNew
     }
 
     /** Latest-[NicknameEntity.updatedAt]-wins, not flood-dedup — this is mutable per-member state,
@@ -156,7 +225,14 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
 
     suspend fun ingestChunk(chunk: EvidenceChunkEntity): Boolean {
         val seenId = "${chunk.evidenceId}:${chunk.chunkIndex}"
-        if (seenDao.find(seenId) != null) return false
+        // FRAME_EVID_CHUNK carries no totalChunks field to validate chunkIndex against (chunks can
+        // legitimately arrive before the header), so this absolute cap — the same one
+        // MeshFrameCodec.decode enforces on evidence-meta/manifest totalChunks — is the only bound
+        // on this path. Without it, a flood of otherwise-valid ~400-byte chunk frames with huge,
+        // sparse chunkIndex values grows this table without limit. Combined with the seenDao check
+        // via `||` (rather than two separate early returns) to keep this at 2 return statements.
+        val outOfBounds = chunk.chunkIndex !in 0 until MeshFrameCodec.MAX_EVIDENCE_CHUNKS
+        if (outOfBounds || seenDao.find(seenId) != null) return false
         seenDao.insert(SeenMessageEntity(seenId, System.currentTimeMillis()))
         chunkDao.insert(chunk)
         maybeReassemble(chunk.evidenceId)
@@ -198,6 +274,17 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable().filter { it.ttl > 0 }
 
     suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable().filter { it.ttl > 0 }
+
+    // "What do we hold" (any ttl, including 0) is a different question from "what do we still
+    // forward" (relayableSos/relayableEvidenceMeta above, ttl > 0 only) — used to build the
+    // outgoing CatalogFilter (see RelayResponder.currentCatalogKeys). An item at ttl 0 has stopped
+    // propagating but is still held until the 48h prune; advertising it in the catalog filter
+    // stops peers from re-pushing it to us on every connection for the rest of its retention
+    // window, without relaying it any further ourselves — relayableSos/relayableEvidenceMeta are
+    // still what gates actual sends, completely unaffected by this pair.
+    suspend fun heldSosIds(): List<String> = sosDao.allIds()
+
+    suspend fun heldEvidenceIds(): List<String> = evidenceDao.allIds()
 
     /** Looks up one evidence item's header by id — used by [WifiDirectHandoffCoordinator] to
      *  re-derive a `groupId`/`mimeType` from just the `evidenceId` a Manifest frame carries. */

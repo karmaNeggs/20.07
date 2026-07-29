@@ -2,8 +2,6 @@ package org.offlinemesh.app.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.location.Location
-import android.util.Log
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -39,18 +37,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.delay
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
 
-@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "TooGenericExceptionCaught")
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 // a screen-level composable's branches are UI states (Bluetooth off / mesh offline / waiting for
 // GPS / live radar), not tangled logic — matches NavigateScreen's identical suppress combo on
-// these same rules for the same reason. FunctionNaming: PascalCase is the established Compose
-// convention this whole app uses. TooGenericExceptionCaught: the refresh loop's catch is
-// deliberately broad — anything is better caught+logged than left to silently kill the loop.
+// these same rules for the same reason.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
@@ -62,62 +57,36 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     val groups by repo.groupDao.observeGroups().collectAsState(initial = emptyList())
-    var myLocation by remember { mutableStateOf<Location?>(null) }
-    var heading by remember { mutableStateOf(0f) }
-    var hopByGroup by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
+    // Single shared tick (see MeshService.RadarTick's doc) replaces this screen's own polling
+    // loop — location/heading/hop/position derivations below now recompute on every real change
+    // AND on the underlying 1s tick, so a quiet peer's staleness is always re-evaluated instead of
+    // depending on incidental compass jitter to trigger recomposition (that dependency was itself
+    // a latent bug: this file's dots computation didn't key on positionTracker at all before).
+    val radarTick = rememberRadarTick(meshService)
+    val myLocation = radarTick.location
+    val heading = radarTick.headingDegrees
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
     val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
-    LaunchedEffect(meshService, groups) {
-        while (true) {
-            // Caught, not left to propagate — an uncaught exception here would silently kill this
-            // whole polling loop forever (LaunchedEffect doesn't restart on its own), leaving the
-            // radar frozen until the composable re-keys (e.g. leaving and re-entering the screen).
-            try {
-                val svc = meshService
-                if (svc != null) {
-                    myLocation = svc.locationTracker.location.value
-                    heading = svc.compassTracker.headingDegrees.value
-                    hopByGroup = groups.associate { it.id to svc.hopToGroupPresence(it.id) }
-                }
-            } catch (e: Exception) {
-                // Deliberately broad — anything here is better caught and logged than left to
-                // propagate and silently kill this while(true) loop forever (LaunchedEffect
-                // doesn't restart itself), which was the whole reason this wrap exists.
-                Log.w("HomeScreen", "radar refresh tick failed: ${e.message}")
-            }
-            delay(1000)
-        }
+    val hopByGroup = remember(radarTick, groups, meshService) {
+        val svc = meshService ?: return@remember emptyMap()
+        groups.associate { it.id to svc.hopToGroupPresence(it.id) }
     }
 
-    val dots = remember(myLocation, heading, groups) {
+    val dots = remember(radarTick, groups, meshService) {
         val me = myLocation
         val svc = meshService
         if (me == null || svc == null) {
-            Log.d("HomeScreen", "dots: no dots — myLocation=${me != null}, meshService=${svc != null}")
             emptyList()
         } else {
             groups.flatMap { g ->
                 val color = AppColors.colorForGroup(g.id)
                 val records = svc.positionTracker.forGroup(g.id)
-                // Temporary diagnostic (Log.d, stripped from release builds by ProGuard) — pins
-                // down exactly where a peer we know is present (has a hop count) drops out of the
-                // radar: no position record stored at all vs. a record present but rejected by
-                // placePeerOnRadar's combined-accuracy gate, with the real numbers either way
-                // instead of guessing between the two from a screenshot alone.
-                Log.d("HomeScreen", "dots: group=${g.name} peerRecords=${records.size} myAccuracyM=${me.accuracy}")
-                records.mapNotNull { (senderId, record) ->
+                records.mapNotNull { (_, record) ->
                     val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
                     val placed = placePeerOnRadar(
                         me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading
                     )
-                    if (placed == null) {
-                        Log.d(
-                            "HomeScreen",
-                            "dots: rejected peer=$senderId myAccuracyM=${me.accuracy} " +
-                                "peerAccuracyM=${record.accuracyM} combined=${me.accuracy + record.accuracyM}"
-                        )
-                    }
                     placed?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
                 }
             }
@@ -234,6 +203,12 @@ fun HomeScreen(
 @Composable
 private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
     val color = AppColors.colorForGroup(group.id)
+    // Only re-evaluated when this row recomposes (a DB change, navigation, etc.), not on a live
+    // per-second tick — unlike the radar's staleness, an hours-to-days expiry doesn't need that,
+    // and adding a timer just for this would be a real periodic cost for a value nobody needs
+    // updated mid-glance.
+    val remainingMs = group.expiresAt - System.currentTimeMillis()
+    val expiringSoon = remainingMs in 0..EXPIRING_SOON_THRESHOLD_MS
     Row(
         Modifier
             .fillMaxWidth()
@@ -256,13 +231,22 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
             style = MaterialTheme.typography.titleMedium,
             modifier = Modifier.weight(1f)
         )
-        Text(
-            if (hop == MeshProtocol.UNKNOWN_HOP) "no one nearby" else "$hop hop(s) away",
-            color = AppColors.OnSurfaceMuted,
-            style = MaterialTheme.typography.bodySmall
-        )
+        Column(horizontalAlignment = Alignment.End) {
+            Text(
+                if (hop == MeshProtocol.UNKNOWN_HOP) "no one nearby" else "$hop hop(s) away",
+                color = AppColors.OnSurfaceMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+            Text(
+                "expires in ${formatTimeRemaining(remainingMs)}",
+                color = if (expiringSoon) AppColors.Warning else AppColors.OnSurfaceMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
     }
 }
+
+private const val EXPIRING_SOON_THRESHOLD_MS = 2 * 60 * 60 * 1000L // 2 hours
 
 /**
  * SOS plus three quick toggles in one row, each a compact tile instead of the full-width
@@ -285,9 +269,6 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
  *   notification entirely. Before this existed there was no way to stop any of that short of
  *   force-stopping the app from Android Settings.
  */
-@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
-// (and every other screen) already uses for composables — see detekt-baseline.xml, which
-// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
 private fun QuickToggleTiles(meshService: MeshService?, onGeneralSos: () -> Unit) {
     val context = LocalContext.current
@@ -339,7 +320,6 @@ private data class TileSpec(val icon: ImageVector, val label: String, val active
  *  one-word label doesn't have room for. Background/icon color cross-fades between a dim, muted
  *  resting state and [TileSpec.activeColor] via [animateColorAsState] — the "glow when active,
  *  fade when inactive" effect, done with Compose's built-in color animation, no new dependency. */
-@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
 @Composable
 private fun ToggleTile(
     spec: TileSpec,
@@ -376,7 +356,6 @@ private fun ToggleTile(
  *  state to animate, unlike [ToggleTile]) since this fires an action rather than persisting an
  *  on/off state. Kept as its own composable rather than reusing [ToggleTile] because the toggle
  *  semantics (`Role.Switch`, active/inactive color animation) don't fit a momentary action. */
-@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
 @Composable
 private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
     Column(
@@ -398,7 +377,7 @@ private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
 /**
  * The WiFi Direct evidence accelerator's opt-in switch — off by default, kept as its own
  * descriptive row (not folded into [QuickToggleTiles]'s compact tiles) because it carries a
- * warning that doesn't fit a one-word tile: see [org.offlinemesh.app.ble.WifiDirectAccelerator]'s
+ * warning that doesn't fit a one-word tile: see [org.offlinemesh.app.transport.wifidirect.WifiDirectAccelerator]'s
  * class doc for what "experimental" means here specifically — `WifiP2pManager.connect()` may show
  * a system "Invitation to connect" dialog on the OTHER phone, which would visibly break both
  * phones' disguise the moment it fires. This has not been confirmed on real hardware; the warning
@@ -407,7 +386,6 @@ private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
  * launcher, the moment the switch is turned on — never at app launch, matching the same
  * on-first-use precedent [Manifest.permission.CAMERA] already follows on the Join screen.
  */
-@Suppress("FunctionNaming") // see QuickToggleTiles' identical suppress above for why
 @Composable
 private fun WifiDirectRow() {
     val context = LocalContext.current

@@ -2,8 +2,6 @@ package org.offlinemesh.app.ui
 
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
-import android.location.Location
-import android.util.Log
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -57,12 +55,9 @@ private sealed class FeedItem(val timestamp: Long) {
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
-@Suppress("TooGenericExceptionCaught", "CyclomaticComplexMethod", "LongMethod", "FunctionNaming")
-// TooGenericExceptionCaught: the refresh loop's catch is deliberately broad — anything is better
-// caught+logged than left to silently kill the loop forever; see HomeScreen/NavigateScreen's
-// identical suppress for the same reason. The other three: a screen-level composable's branches
-// are UI states, not tangled logic, and PascalCase is this app's established Compose convention
-// — same reasoning already applied to HomeScreen/NavigateScreen.
+@Suppress("CyclomaticComplexMethod", "LongMethod")
+// a screen-level composable's branches are UI states, not tangled logic — same reasoning already
+// applied to HomeScreen/NavigateScreen.
 @Composable
 fun GroupChatScreen(
     groupId: String,
@@ -86,40 +81,24 @@ fun GroupChatScreen(
 
     LaunchedEffect(groupId, meshService) { myNickname = meshService?.myNickname(groupId)?.username }
 
-    var myLocation by remember { mutableStateOf<Location?>(null) }
-    var heading by remember { mutableStateOf(0f) }
-    var radarDots by remember { mutableStateOf<List<RadarDot>>(emptyList()) }
+    // Single shared tick (see MeshService.RadarTick's doc) replaces this screen's own polling loop.
+    val radarTick = rememberRadarTick(meshService)
+    val myLocation = radarTick.location
+    val heading = radarTick.headingDegrees
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
     val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
     LaunchedEffect(groupId) { groupName = repo.groupDao.getGroup(groupId)?.name ?: groupId }
 
-    LaunchedEffect(groupId, meshService) {
-        while (true) {
-            // See HomeScreen's identical wrap — an uncaught exception here would silently kill
-            // this loop forever, not just skip one tick.
-            try {
-                val svc = meshService
-                if (svc != null) {
-                    myLocation = svc.locationTracker.location.value
-                    heading = svc.compassTracker.headingDegrees.value
-                    val me = myLocation
-                    radarDots = if (me == null) {
-                        emptyList()
-                    } else {
-                        svc.positionTracker.forGroup(groupId).mapNotNull { (_, record) ->
-                            val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
-                            placePeerOnRadar(
-                                me.latitude, me.longitude, me.accuracy,
-                                record.lat, record.lon, record.accuracyM, heading
-                            )?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w("GroupChatScreen", "radar refresh tick failed: ${e.message}")
-            }
-            delay(1000)
+    val radarDots = remember(radarTick, groupId, meshService, groupColor) {
+        val svc = meshService ?: return@remember emptyList()
+        val me = myLocation ?: return@remember emptyList()
+        svc.positionTracker.forGroup(groupId).mapNotNull { (_, record) ->
+            val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+            placePeerOnRadar(
+                me.latitude, me.longitude, me.accuracy,
+                record.lat, record.lon, record.accuracyM, heading
+            )?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
         }
     }
 
@@ -337,9 +316,6 @@ fun GroupChatScreen(
  *  needs to show. Sender identity is carried by text color ([groupColor] for others, muted for
  *  "you") instead of a background tint, since there's no card left to tint. Keeps exactly the same
  *  information and the same tap-to-view behavior as before — this is a density/style change only. */
-@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
-// (and every other screen) already uses for composables — see detekt-baseline.xml, which
-// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
 private fun FeedRow(
     item: FeedItem,

@@ -1,4 +1,6 @@
-package org.offlinemesh.app.ble
+package org.offlinemesh.app.transport.wifidirect
+
+import org.offlinemesh.app.ble.RelayEngine
 
 /**
  * Every WiFi Direct timing/size constant, in one place — mirrors [BleTuning]'s own role for the
@@ -34,4 +36,19 @@ object WifiDirectTuning {
      *  both sides a shared target instant to start near-simultaneously rather than racing each
      *  other into `connect()`. */
     const val NEGOTIATION_LEAD_MS = 1_500L
+
+    /** Ceiling on the length-prefixed token tag [WifiDirectAccelerator.handshakeToken] reads off
+     *  the raw socket, BEFORE anything on that socket is authenticated — that length prefix is
+     *  itself untrusted input from whoever won the `accept()`/`connect()` race, and the previous
+     *  code allocated `ByteArray(peerLen)` straight from it with no bound at all (any device that
+     *  wins the race can crash the phone with a 4-byte hostile length prefix). The real value is
+     *  always exactly [org.offlinemesh.app.crypto.CryptoUtils.authTag]'s fixed 16-byte output;
+     *  this is generous headroom above that, not a tight fit. */
+    const val MAX_TOKEN_TAG_BYTES = 64
+
+    /** Same reasoning as [MAX_TOKEN_TAG_BYTES], applied to
+     *  [WifiDirectAccelerator.receiveChunks]'s per-frame length prefix — bounded to comfortably
+     *  cover one encoded [MeshFrameCodec.FRAME_EVID_CHUNK] frame ([RelayEngine.CHUNK_SIZE] data
+     *  bytes plus its small envelope) with headroom, not sized to fit exactly. */
+    const val MAX_CHUNK_FRAME_BYTES = RelayEngine.CHUNK_SIZE + 512
 }

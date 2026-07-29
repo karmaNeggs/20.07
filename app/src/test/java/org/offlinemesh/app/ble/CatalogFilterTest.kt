@@ -35,7 +35,7 @@ class CatalogFilterTest {
     @Test
     fun `toBits then fromBits with the same seed reproduces identical membership answers`() {
         val original = CatalogFilter.build(listOf("sos:a", "evid:b", "nick:g:s:123"), seed = 42L)
-        val reconstructed = CatalogFilter.fromBits(original.toBits(), seed = 42L)
+        val reconstructed = CatalogFilter.fromBits(original.toBits(), seed = 42L, sizeBits = original.sizeBits)
         for (item in listOf("sos:a", "evid:b", "nick:g:s:123", "sos:not-present")) {
             assertEquals(original.mightContain(item), reconstructed.mightContain(item))
         }
@@ -60,11 +60,56 @@ class CatalogFilterTest {
     fun `false-positive rate stays low at a realistic catalog size`() {
         // ~150 items is a generous stand-in for this app's actual per-connection relayable catalog
         // (SOS + evidence-headers + nicknames, bounded by the 48h retention window). Confirms the
-        // tuning constants (SIZE_BITS=2048, HASH_COUNT=5) documented in the class doc actually hold
-        // in practice, not just in the back-of-envelope math in the comment.
+        // tuning constants (BITS_PER_ITEM=10, HASH_COUNT=5) documented in the class doc actually
+        // hold in practice, not just in the back-of-envelope math in the comment.
         val holdings = (0 until 150).map { "sos:item-$it" }
         val f = CatalogFilter.build(holdings, seed = 7L)
         val falsePositives = (0 until 1000).count { f.mightContain("evid:probe-$it") }
         assertTrue("false positive rate too high: $falsePositives/1000", falsePositives < 100) // well under 10%
+    }
+
+    // ---------- sizeBits scales with the actual catalog, not a fixed worst-case ----------
+    // This is the whole point of the dynamic-sizing change: a typical short-lived group's small
+    // catalog should produce a small, wire-cheap filter, not always pay for a worst-case size.
+
+    @Test
+    fun `an empty or tiny catalog produces a small filter, not a fixed large one`() {
+        val f = CatalogFilter.build(emptyList())
+        assertTrue("expected a small filter for an empty catalog, got ${f.sizeBits} bits", f.sizeBits <= 64)
+    }
+
+    @Test
+    fun `sizeBits grows with a larger catalog`() {
+        val small = CatalogFilter.build((0 until 5).map { "sos:$it" })
+        val large = CatalogFilter.build((0 until 300).map { "sos:$it" })
+        assertTrue(
+            "expected a larger catalog to produce a larger (or equal, once capped) filter",
+            large.sizeBits >= small.sizeBits
+        )
+    }
+
+    @Test
+    fun `sizeBits is capped for a very large catalog rather than growing unbounded`() {
+        val huge = CatalogFilter.build((0 until 10_000).map { "sos:$it" })
+        assertTrue("expected sizeBits to be capped, got ${huge.sizeBits}", huge.sizeBits <= 4096)
+    }
+
+    @Test
+    fun `reconstructing with the wrong sizeBits produces wrong membership answers`() {
+        // Direct demonstration of why sizeBits has to travel on the wire alongside seed/bits (see
+        // MeshFrameCodec.Frame.CatalogFilter's doc) — hashIndexes derives bit positions modulo
+        // sizeBits, so using a different sizeBits than the sender actually built against computes
+        // different positions entirely, not a merely-degraded false-positive rate.
+        val original = CatalogFilter.build((0 until 50).map { "sos:$it" }, seed = 99L)
+        val wrongSize = CatalogFilter.fromBits(original.toBits(), seed = 99L, sizeBits = 4096)
+        val correctSize = CatalogFilter.fromBits(original.toBits(), seed = 99L, sizeBits = original.sizeBits)
+        assertTrue(correctSize.mightContain("sos:0"))
+        // Not asserting wrongSize is false for every item (Bloom filters can coincidentally agree),
+        // but the two must disagree on at least one held item across a reasonably sized set,
+        // proving sizeBits is actually load-bearing rather than incidentally ignorable.
+        val disagreement = (0 until 50).any { i ->
+            wrongSize.mightContain("sos:$i") != correctSize.mightContain("sos:$i")
+        }
+        assertTrue("expected the wrong sizeBits to disagree with the correct one on at least one item", disagreement)
     }
 }

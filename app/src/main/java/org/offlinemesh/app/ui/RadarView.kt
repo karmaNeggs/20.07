@@ -22,6 +22,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,6 +43,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import org.offlinemesh.app.ble.MeshService
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -72,9 +74,6 @@ data class RadarPlacement(val distanceMeters: Float, val screenAngleDegrees: Flo
  * each polling independently. [title]/[subtitle] default to the Bluetooth-off copy; callers pass
  * different text for the offline-toggle case so the message stays accurate to the actual cause.
  */
-@Suppress("FunctionNaming") // PascalCase is the established Compose convention this whole file
-// (and every other screen) already uses for composables — see detekt-baseline.xml, which
-// grandfathers this exact violation for every pre-existing composable; same deliberate call here.
 @Composable
 fun MeshPausedNotice(
     modifier: Modifier = Modifier,
@@ -119,6 +118,22 @@ fun MeshPausedNotice(
  * place.
  */
 const val ROUGH_FIX_METERS = 250f
+
+/** Collects [MeshService.radarTick] (or a neutral placeholder if the service isn't bound yet) —
+ *  the one shared replacement for what used to be three near-identical per-screen polling loops
+ *  (Home/GroupChat/Navigate), each independently re-reading location/heading on its own
+ *  `while(true)`/`delay(1000)` timer. Extracted here (not left duplicated at each of the three
+ *  call sites) once it became clear all three needed the exact same one-line fallback — same
+ *  established pattern this app already uses for `bluetoothEnabled`/`meshActive` elsewhere
+ *  (conditionally calling `collectAsState()` behind a null check on the same service instance for
+ *  the composition's lifetime). */
+@Composable
+fun rememberRadarTick(meshService: MeshService?): MeshService.RadarTick {
+    val collected = meshService?.radarTick?.collectAsState()
+    return collected?.value ?: remember {
+        MeshService.RadarTick(location = null, headingDegrees = 0f, compassLowAccuracy = false)
+    }
+}
 
 /**
  * The single place peer distance/bearing + forward-up rotation is computed — previously copy-pasted

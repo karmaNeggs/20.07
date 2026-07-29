@@ -12,6 +12,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.location.Location
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -26,6 +27,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.data.EvidenceEntity
@@ -34,6 +37,9 @@ import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
 import org.offlinemesh.app.sensors.CompassTracker
 import org.offlinemesh.app.sensors.LocationTracker
+import org.offlinemesh.app.transport.wifidirect.WifiDirectAccelerator
+import org.offlinemesh.app.transport.wifidirect.WifiDirectCapabilities
+import org.offlinemesh.app.transport.wifidirect.WifiDirectHandoffCoordinator
 import org.offlinemesh.app.ui.MainActivity
 
 /**
@@ -124,6 +130,38 @@ class MeshService : Service() {
         _meshActive.value = active
     }
 
+    /** Replaces three near-identical `while(true)`/`try`/`catch`/`delay(1000)` polling loops that
+     *  used to live one per screen (Home/GroupChat/Navigate), each independently re-reading
+     *  [locationTracker]/[compassTracker] and each wrapped in the same defensive catch-and-log
+     *  (an uncaught exception would otherwise silently kill that screen's loop forever, since
+     *  Compose's `LaunchedEffect` doesn't restart on its own). Collected here instead, once.
+     *
+     *  The periodic tick (not just reacting to [locationTracker]/[compassTracker] emitting) exists
+     *  because [HopTracker]/[PositionTracker] staleness is evaluated against wall-clock "now" — a
+     *  peer going quiet needs periodic re-evaluation even when no new position/hop event arrives to
+     *  naturally trigger one. Without a real tick, a screen deriving state from this flow could
+     *  only be as fresh as whatever also happens to change compass heading or GPS fix — which is
+     *  exactly the bug this replaces: HomeScreen's dot computation used to key off
+     *  `remember(myLocation, heading, groups)`, omitting `positionTracker` entirely, and only
+     *  appeared to work because compass jitter incidentally recomputed it once a second anyway. */
+    data class RadarTick(val location: Location?, val headingDegrees: Float, val compassLowAccuracy: Boolean)
+
+    private val _radarTick = MutableStateFlow(
+        RadarTick(location = null, headingDegrees = 0f, compassLowAccuracy = false)
+    )
+    val radarTick: StateFlow<RadarTick> = _radarTick
+    private var radarTickJob: Job? = null
+
+    private fun startRadarTickLoop() {
+        radarTickJob = serviceScope.launch {
+            val ticker = flow { while (isActive) { emit(Unit); delay(RADAR_TICK_INTERVAL_MS) } }
+            combine(
+                locationTracker.location, compassTracker.headingDegrees, compassTracker.lowAccuracy, ticker
+            ) { location, heading, lowAccuracy, _ -> RadarTick(location, heading, lowAccuracy) }
+                .collect { _radarTick.value = it }
+        }
+    }
+
     private var pruneJob: Job? = null
 
     // Radars must never keep showing peer dots as if the mesh were live once the radio that feeds
@@ -174,11 +212,24 @@ class MeshService : Service() {
         beaconRadio.startAdvertising()
         beaconRadio.startScanning()
         startPruning()
+        startRadarTickLoop()
+        // Once per process start, not periodic — see GroupRepository.sweepOrphanKeys' doc for why
+        // that's sufficient (new orphans can only appear via a destructive schema migration, which
+        // only happens across an app update, i.e. already a fresh start).
+        serviceScope.launch { repo.sweepOrphanKeys() }
     }
 
+    /** The `while` loop's body runs immediately on the first iteration (no delay before it) — so
+     *  this doubles as "run once at startup" (a phone that was off past a group's expiry cleans up
+     *  on next launch, not up to 30 minutes later) as well as the periodic sweep, with no separate
+     *  call needed for the startup case. */
     private fun startPruning() {
         pruneJob = serviceScope.launch {
             while (isActive) {
+                // expireGroups first: a group whose expiry lands in this exact tick has its
+                // evidence files collected by pruneExpired's orphan sweep in the SAME pass, not
+                // left dangling until the next one 30 minutes later.
+                repo.expireGroups()
                 relay.pruneExpired()
                 delay(30 * 60 * 1000L) // every 30 min — this is housekeeping, not latency-sensitive
             }
@@ -190,11 +241,19 @@ class MeshService : Service() {
 
     override fun onDestroy() {
         pruneJob?.cancel()
+        radarTickJob?.cancel()
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
         beaconRadio.stop()
         gattServer.stop()
         locationTracker.stop()
         compassTracker.stop()
+        // WFD groups left open are a real cost beyond just this service (see
+        // WifiDirectAccelerator.teardown's own doc) — setMeshActive(false) already aborts this on
+        // the "go offline" path, but process teardown (onDestroy) previously didn't, so a transfer
+        // mid-flight at the exact moment the service is destroyed could leave a WFD group open
+        // past the service's own lifetime. Found while reviewing this method for the radar-tick
+        // job cleanup above; fixed alongside it rather than left as a separate pass.
+        wifiDirectAccelerator.abortCurrent()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -322,5 +381,10 @@ class MeshService : Service() {
 
     companion object {
         private const val SOS_CHANNEL_ID = "sos_alerts"
+
+        // How often RadarTick re-emits purely to force staleness re-evaluation (HopTracker/
+        // PositionTracker check age against wall-clock "now") — see RadarTick's own doc for why a
+        // periodic tick, not just reacting to location/heading changes, is necessary here.
+        private const val RADAR_TICK_INTERVAL_MS = 1000L
     }
 }

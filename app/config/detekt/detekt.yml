@@ -1,0 +1,23 @@
+naming:
+  # PascalCase is the deliberate, established naming convention for every @Composable function in
+  # this codebase (matches Jetpack Compose's own convention across the ecosystem) — previously
+  # fought function-by-function with ~15 near-identical inline @Suppress("FunctionNaming")
+  # annotations and explanatory comments. This detekt version's FunctionNaming rule has no
+  # annotation-based exception (only a regex), so the pattern is widened to accept EITHER
+  # camelCase (ordinary functions) OR PascalCase (composables) rather than narrowly targeting
+  # @Composable specifically — a known, common tradeoff for Compose codebases on this rule.
+  FunctionNaming:
+    active: true
+    functionPattern: "([a-z][a-zA-Z0-9]*)|([A-Z][a-zA-Z0-9]*)"
+
+style:
+  # Several classes in this codebase's BLE layer use a deliberate multi-guard-clause shape — one
+  # early `return` per unmet precondition, read top-to-bottom as "bail here, or here, or here,
+  # otherwise proceed" — rather than nesting every precondition into one large boolean expression.
+  # excludeGuardClauses recognizes exactly that shape (a leading `if (...) return` with no other
+  # branch) and stops counting it toward the limit, replacing ~8 inline
+  # @Suppress("ReturnCount") annotations that all made the same argument individually.
+  # (ReturnCount lives under the "style" ruleset in detekt's own grouping, not "complexity".)
+  ReturnCount:
+    active: true
+    excludeGuardClauses: true

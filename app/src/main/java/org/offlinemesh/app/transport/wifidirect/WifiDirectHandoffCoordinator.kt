@@ -1,8 +1,10 @@
-package org.offlinemesh.app.ble
+package org.offlinemesh.app.transport.wifidirect
 
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.offlinemesh.app.ble.MeshFrameCodec
+import org.offlinemesh.app.ble.RelayEngine
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import java.security.SecureRandom
@@ -39,12 +41,9 @@ import java.security.SecureRandom
  * before this class is ever called.
  */
 @Suppress(
-    // Guard-clause-style early returns (bail the moment any verification step fails) is this
-    // whole protocol's deliberate shape — matches this codebase's established style for exactly
-    // this kind of multi-stage handshake (see also WifiDirectAccelerator). LongParameterList is
     // wire-protocol fields passed as plain scalars, matching MeshFrameCodec's own established
     // encode-function shape rather than introducing a request/response DTO type just for this.
-    "ReturnCount", "LongParameterList",
+    "LongParameterList",
 )
 class WifiDirectHandoffCoordinator(
     private val relay: RelayEngine,

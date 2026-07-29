@@ -18,25 +18,20 @@ import java.util.concurrent.ConcurrentHashMap
  * GATT client role: we connect out to peers we heard beaconing and push our data to them,
  * subscribing to their notifications so their push comes back over the same connection.
  *
- * The bug this class exists to prevent: BluetoothGatt allows exactly one outstanding operation
- * per connection, of any kind. The original code fired the CCCD subscription write and then,
- * without waiting for it — there was no onDescriptorWrite handler at all — immediately started
- * writing data frames on the same connection. That collision meant the peer we *connected to*
- * (the one we could see) never reliably received anything from us, while the peer's own
- * server-side notifications back to us still worked fine, since those weren't racing anything on
- * our side. That is the exact "I can see them but can't send; they can't see me but their
- * message gets through" asymmetry reported from live testing — [writeQueue] now serializes every
- * operation (descriptor write included) against a single address, so nothing on this connection
- * can go out until the previous thing actually completed.
+ * **Invariant: every outbound GATT operation on a connection — writes, the CCCD descriptor write
+ * included — is serialized through [writeQueue] against that connection's address**, so nothing
+ * goes out until the previous operation's completion callback has actually fired. `BluetoothGatt`
+ * allows exactly one outstanding operation per connection, of any kind; see `docs/DECISIONS.md`,
+ * decision 2, for the live-tested asymmetry ("I can see them but can't send") that not having this
+ * produced.
  *
  * Connection duration is activity-based, not a fixed timer: a connection stays open while writes
- * or notifications are still happening on it (evidence chunks arriving/leaving), and closes once
- * it's been idle for [BleTuning.Profile.connectionIdleMs] or hit the [BleTuning.Profile.connectionMaxMs]
- * hard cap — whichever comes first. Previously every connection was cut at a flat 8s regardless of
- * whether a transfer was still making real progress, so two stationary phones mid-transfer would
- * get disconnected and have to wait out [reconnectCooldownMs] before resuming. RelayResponder's own
- * per-session chunk budget (`maxChunksPerSession`) is what keeps one busy peer from starving the
- * rotation through others even with a longer-lived connection.
+ * or notifications are still happening on it, and closes once it's been idle for
+ * [BleTuning.Profile.connectionIdleMs] or hit the [BleTuning.Profile.connectionMaxMs] hard cap —
+ * whichever comes first, so two stationary phones mid-transfer aren't cut off just because a fixed
+ * timer expired. RelayResponder's own per-session chunk budget (`maxChunksPerSession`) is what
+ * keeps one busy peer from starving the rotation through others even with a longer-lived
+ * connection.
  */
 class MeshGattClient(
     private val context: Context,
@@ -48,18 +43,11 @@ class MeshGattClient(
     private val maxConcurrentClientConnections = 3
     private val reconnectCooldownMs = 45_000L
     // Peer-selection lever (see ConnectionAttemptTracker's class doc) — DELIBERATELY NEUTRALIZED
-    // (equal to reconnectCooldownMs, i.e. no behavior change) as of Pass 20. An earlier version of
-    // this pass set it to 180s, reasoning that an already-synced peer could afford to wait. That
-    // was wrong: position dots are ONLY refreshed via a GATT reconnect (there's no separate
-    // lightweight position channel), and PositionTracker/HopTracker expire a peer at 90s of no
-    // update — a 180s cooldown would let an in-range, unmoving member's radar dot silently vanish
-    // and reappear, which is the opposite of what "follow members on radar" needs. The
-    // peer-selection idea (bias limited connection slots toward not-yet-synced peers in a dense
-    // crowd) is still real and still worth having once there's actual multi-device density data to
-    // tune it against — until then it's not worth trading radar freshness for an unvalidated guess,
-    // especially right before a live test. Change this back above 90s only with real crowd-density
-    // evidence that it's needed, and re-derive it from the *shorter* of PositionTracker's and
-    // HopTracker's staleness windows, not picked independently.
+    // (equal to reconnectCooldownMs, i.e. no behavior change): a longer cooldown here for an
+    // already-synced peer once broke radar freshness (position dots refresh only via GATT
+    // reconnect) — see docs/DECISIONS.md, decision 5, before raising this above 90s, and re-derive
+    // any future value from the shorter of PositionTracker's/HopTracker's staleness windows, not
+    // picked independently.
     private val syncedReconnectCooldownMs = reconnectCooldownMs
     private val connectTimeoutMs = 15_000L
     // The connection-attempt state machine itself lives in ConnectionAttemptTracker (unit-tested in
@@ -72,6 +60,12 @@ class MeshGattClient(
     // Last write/notify time per peer address — drives the idle-based disconnect below.
     private val lastActivity = ConcurrentHashMap<String, Long>()
     private fun touch(address: String) { lastActivity[address] = System.currentTimeMillis() }
+    // Negotiated MTU per peer address, recorded in onMtuChanged — see pushOnConnect's use of it to
+    // size RelayResponder.framesToPushOnConnect's catalog-filter-vs-eager-push decision to what
+    // this specific connection can actually carry in one write. Cleared on disconnect alongside
+    // lastActivity/writeQueue, same reasoning: a BLE address rotates every ~15min, so this isn't a
+    // stable identity worth remembering past one connection's lifetime.
+    private val negotiatedMtu = ConcurrentHashMap<String, Int>()
     // Set once pushOnConnect actually ran for this connection (i.e. we got far enough to offer our
     // content, not necessarily that every frame succeeded) — read once by onConnectionStateChange's
     // disconnect branch to pick which of the two cooldowns above applies, then cleared either way.
@@ -85,15 +79,10 @@ class MeshGattClient(
         attemptTracker.attemptStarted(addr)
         val gatt = device.connectGatt(context, false, callback)
         // Guard against connectGatt() never calling onConnectionStateChange at all — a real,
-        // undocumented Android BLE failure mode (most commonly the peer going out of range mid-
-        // attempt, or Bluetooth itself getting toggled while a connection is pending). Without this,
-        // that peer's address stays marked "connecting" forever and maybeConnect() silently refuses
-        // to ever try it again — this was reported as "far away, connection breaks and doesn't come
-        // back," "Bluetooth off/on breaks things," and, since every message exchange opens fresh
-        // connection attempts, plausibly also "breaks after a handful of messages" (more attempts,
-        // more chances to hit a connection that never resolves). If nothing has called back for this
-        // exact address by the time this fires, force the cleanup ourselves instead of waiting
-        // forever for a callback that isn't coming.
+        // undocumented Android BLE failure mode (peer out of range mid-attempt, or Bluetooth
+        // toggled while pending) that otherwise left a peer's address marked "connecting" forever
+        // — see docs/DECISIONS.md, decision 5. If nothing has called back for this exact address
+        // by the time this fires, force the cleanup ourselves instead of waiting forever.
         serviceScope.launch {
             delay(connectTimeoutMs)
             if (attemptTracker.isStuck(addr)) {
@@ -119,7 +108,9 @@ class MeshGattClient(
 
     private suspend fun pushOnConnect(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
         val address = gatt.device.address
-        for (bytes in responder.framesToPushOnConnect()) {
+        val mtu = negotiatedMtu[address] ?: MeshProtocol.DEFAULT_ATT_MTU
+        val maxFrameBytes = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
+        for (bytes in responder.framesToPushOnConnect(maxFrameBytes)) {
             write(gatt, characteristic, bytes)
         }
         // Reaching here means we got through MTU negotiation, service discovery, and the CCCD write
@@ -153,11 +144,16 @@ class MeshGattClient(
                 attemptTracker.connectionEnded(address, synced = syncedThisSession.remove(address))
                 writeQueue.clear(address)
                 lastActivity.remove(address)
+                negotiatedMtu.remove(address)
                 gatt.close()
             }
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            // Only record a genuinely successful negotiation — on failure, pushOnConnect's fallback
+            // to MeshProtocol.DEFAULT_ATT_MTU (the safe, pre-negotiation floor) is more honest than
+            // trusting whatever value a failed request happened to report.
+            if (status == BluetoothGatt.GATT_SUCCESS) negotiatedMtu[gatt.device.address] = mtu
             gatt.discoverServices()
         }
 

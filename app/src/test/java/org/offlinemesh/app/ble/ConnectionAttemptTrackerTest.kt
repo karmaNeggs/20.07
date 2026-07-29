@@ -6,10 +6,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Tier 1: the exact state machine behind the Pass 16 bug ("far away, connection breaks, doesn't
- * come back"; "Bluetooth off/on breaks it"; "breaks after 4-5 messages") — a peer whose connection
- * attempt never received a single callback stayed marked "connecting" forever. A fake clock makes
- * the 15-second-timeout / 45-second-cooldown behavior deterministic without a real wait.
+ * Tier 1: the exact state machine behind a real live-tested bug ("far away, connection breaks,
+ * doesn't come back"; "Bluetooth off/on breaks it"; "breaks after 4-5 messages") — a peer whose
+ * connection attempt never received a single callback stayed marked "connecting" forever. See
+ * `docs/DECISIONS.md`, decision 5, for the full story. A fake clock makes the 15-second-timeout /
+ * 45-second-cooldown behavior deterministic without a real wait.
  */
 class ConnectionAttemptTrackerTest {
     private var clock = 0L
@@ -68,8 +69,9 @@ class ConnectionAttemptTrackerTest {
 
     @Test
     fun `a stuck attempt force-cleaned by the caller can eventually be retried`() {
-        // The exact Pass 16 regression scenario end to end: start an attempt, never get a callback
-        // (peer went out of range / Bluetooth toggled mid-attempt), the caller's own timer confirms
+        // The exact regression scenario end to end (docs/DECISIONS.md, decision 5): start an
+        // attempt, never get a callback (peer went out of range / Bluetooth toggled mid-attempt),
+        // the caller's own timer confirms
         // isStuck() after its wait and calls connectionEnded() to force cleanup — the address must
         // NOT stay permanently unattemptable, which is exactly what the original bug did.
         val t = tracker(cooldownMs = 45_000L)

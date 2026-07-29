@@ -2,14 +2,18 @@ package org.offlinemesh.app.ble
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.offlinemesh.app.crypto.CryptoUtils
+import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
 import java.security.SecureRandom
 
 /**
@@ -43,6 +47,30 @@ class MeshFrameCodecTest {
     }
 
     @Test
+    fun `sos frame round-trips a signature alongside the mac`() {
+        val pair = SenderIdentity.generateKeyPair()
+        val sos = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8,
+            mac = ByteArray(16), signature = SenderIdentity.sign(pair.privateKey, "sos-1".toByteArray())
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertArrayEquals(sos.signature, decoded.sos.signature)
+    }
+
+    @Test
+    fun `sos frame with no signature round-trips a null signature`() {
+        val sos = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16)
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertNull(decoded.sos.signature)
+    }
+
+    @Test
     fun `evidence meta frame round-trips including the sha256 digest`() {
         val meta = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
@@ -55,6 +83,21 @@ class MeshFrameCodecTest {
         assertEquals(meta.sha256, decoded.meta.sha256)
         assertEquals(meta.totalChunks, decoded.meta.totalChunks)
         assertEquals(meta.mimeType, decoded.meta.mimeType)
+        assertNull(decoded.meta.signature)
+    }
+
+    @Test
+    fun `evidence meta frame round-trips a signature alongside the mac`() {
+        val pair = SenderIdentity.generateKeyPair()
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16),
+            signature = SenderIdentity.sign(pair.privateKey, "evid-1".toByteArray())
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
+        check(decoded is MeshFrameCodec.Frame.EvidMeta)
+        assertArrayEquals(meta.signature, decoded.meta.signature)
     }
 
     @Test
@@ -84,6 +127,56 @@ class MeshFrameCodecTest {
         assertEquals(78.9012, body.lon, 1e-6)
         assertEquals(5, body.accuracyM)
         assertEquals(2, body.hop)
+    }
+
+    @Test
+    fun `position frame carries a signature inside the seal, verifiable once opened`() {
+        val key = randomKey()
+        val pair = SenderIdentity.generateKeyPair()
+        val frame = MeshFrameCodec.encodePosition(
+            "group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0,
+            signingPrivateKey = pair.privateKey
+        )
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.PositionSealed)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, key)
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertTrue(SenderIdentity.verify(pair.publicKey, body.signature!!, body.signedBytes))
+    }
+
+    @Test
+    fun `position signature detects impersonation even though the group-key seal is still valid`() {
+        // The threat sender identity exists for: a malicious GROUP MEMBER (who legitimately holds the
+        // group key, so GCM authentication alone passes) forges a position "from" someone else.
+        // They can produce a validly-sealed frame claiming any senderId they like, but they don't
+        // hold that sender's Ed25519 private key — so their own signature verifies fine under
+        // THEIR OWN public key, but not under the impersonated sender's.
+        val key = randomKey()
+        val impostor = SenderIdentity.generateKeyPair()
+        val realSender = SenderIdentity.generateKeyPair()
+        val frame = MeshFrameCodec.encodePosition(
+            "group-1", key, "real-sender-id", 1.0, 2.0, 5, 1_700_000_000L, 0,
+            signingPrivateKey = impostor.privateKey // signed by the impostor, claiming to be real-sender-id
+        )
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.PositionSealed)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, key) // GCM auth passes — same group key
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertFalse(SenderIdentity.verify(realSender.publicKey, body.signature!!, body.signedBytes))
+        assertTrue(SenderIdentity.verify(impostor.publicKey, body.signature!!, body.signedBytes))
+    }
+
+    @Test
+    fun `position frame with no signing key round-trips a null signature`() {
+        val key = randomKey()
+        val frame = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.PositionSealed)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, key)
+        checkNotNull(body)
+        assertNull(body.signature)
     }
 
     @Test
@@ -122,6 +215,19 @@ class MeshFrameCodecTest {
         check(decoded is MeshFrameCodec.Frame.Nickname)
         assertEquals(MeshFrameCodec.MAX_USERNAME_CHARS, decoded.nickname.username.length)
         assertTrue(tooLong.startsWith(decoded.nickname.username))
+        assertNull(decoded.nickname.signature)
+    }
+
+    @Test
+    fun `nickname frame round-trips a signature alongside the mac`() {
+        val pair = SenderIdentity.generateKeyPair()
+        val nick = NicknameEntity(
+            "group-1", "sender-1", "responder", 1_700_000_000_000L,
+            mac = ByteArray(16), signature = SenderIdentity.sign(pair.privateKey, "responder".toByteArray())
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeNickname(nick))
+        check(decoded is MeshFrameCodec.Frame.Nickname)
+        assertArrayEquals(nick.signature, decoded.nickname.signature)
     }
 
     @Test
@@ -132,15 +238,36 @@ class MeshFrameCodecTest {
         check(decoded is MeshFrameCodec.Frame.Presence)
         assertEquals("group-1", decoded.groupId)
         assertEquals("sender-1", decoded.senderId)
+        assertNull(decoded.senderPublicKey)
+        assertNull(decoded.signature)
+    }
+
+    @Test
+    fun `presence frame round-trips a sender public key and signature`() {
+        val key = randomKey()
+        val pair = SenderIdentity.generateKeyPair()
+        val frame = MeshFrameCodec.encodePresence(
+            "group-1", "sender-1", 1_700_000_000_000L, key,
+            senderPublicKey = pair.publicKey, signingPrivateKey = pair.privateKey
+        )
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.Presence)
+        assertArrayEquals(pair.publicKey, decoded.senderPublicKey)
+        checkNotNull(decoded.signature)
+        val macInput = MeshFrameCodec.presenceMacInput("group-1", "sender-1", 1_700_000_000_000L)
+        assertTrue(SenderIdentity.verify(pair.publicKey, decoded.signature!!, macInput))
     }
 
     @Test
     fun `catalog filter frame round-trips seed and bits, and preserves membership answers`() {
         val filter = CatalogFilter.build(listOf("sos:a", "evid:b"), seed = 12345L)
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.toBits()))
+        val decoded = MeshFrameCodec.decode(
+            MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.sizeBits, filter.toBits())
+        )
         check(decoded is MeshFrameCodec.Frame.CatalogFilter)
         assertEquals(12345L, decoded.seed)
-        val reconstructed = CatalogFilter.fromBits(decoded.bits, decoded.seed)
+        assertEquals(filter.sizeBits, decoded.sizeBits)
+        val reconstructed = CatalogFilter.fromBits(decoded.bits, decoded.seed, decoded.sizeBits)
         assertTrue(reconstructed.mightContain("sos:a"))
         assertTrue(reconstructed.mightContain("evid:b"))
     }
@@ -208,5 +335,126 @@ class MeshFrameCodecTest {
         val encoded = MeshFrameCodec.encodePresence("g", "s", 0L, randomKey())
         val wrongVersion = encoded.copyOf().also { it[1] = 99 }
         assertNull(MeshFrameCodec.decode(wrongVersion))
+    }
+
+    // ---------- hostile totalChunks must never reach MeshProtocol.encodeBitset's allocation ----------
+    // A remote, unauthenticated, non-member relay can send an evidence header or manifest carrying
+    // an arbitrary totalChunks — encodeBitset allocates (totalChunks + 7) / 8 bytes downstream
+    // (RelayResponder.framesToPushOnConnect / handleIncoming's Manifest case), and the header is
+    // persisted to Room, so the crash recurs on every future connection until the 48h prune. decode()
+    // is the one choke point every such frame must pass through regardless of entry path.
+
+    @Test
+    fun `decode rejects an evidence meta frame with a hostile totalChunks`() {
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = Int.MAX_VALUE,
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
+        )
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta)))
+    }
+
+    @Test
+    fun `decode rejects an evidence meta frame with a negative or zero totalChunks`() {
+        val negative = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = -1,
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
+        )
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(negative)))
+        val zero = negative.copy(totalChunks = 0)
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(zero)))
+    }
+
+    @Test
+    fun `decode still accepts a legitimate evidence meta frame under the cap`() {
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 200,
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
+        check(decoded is MeshFrameCodec.Frame.EvidMeta)
+        assertEquals(200, decoded.meta.totalChunks)
+    }
+
+    /** Hand-builds the raw manifest wire layout (rather than calling [MeshFrameCodec.encodeManifest],
+     *  which itself calls the vulnerable [MeshProtocol.encodeBitset] and would allocate on the
+     *  encode side too) — this is exactly what a hostile peer's raw bytes look like: a huge claimed
+     *  totalChunks paired with a tiny actual bitset payload. */
+    private fun rawManifestFrame(evidenceId: String, totalChunks: Int, bitsetBytes: ByteArray): ByteArray {
+        val bos = ByteArrayOutputStream()
+        val d = DataOutputStream(bos)
+        d.writeByte(MeshFrameCodec.FRAME_MANIFEST.toInt())
+        d.writeByte(MeshFrameCodec.VERSION)
+        val idBytes = evidenceId.toByteArray(Charsets.UTF_8)
+        d.writeByte(idBytes.size)
+        d.write(idBytes)
+        d.writeInt(totalChunks)
+        d.write(bitsetBytes)
+        return bos.toByteArray()
+    }
+
+    @Test
+    fun `decode rejects a manifest frame with a hostile totalChunks`() {
+        val hostile = rawManifestFrame("evid-1", Int.MAX_VALUE, ByteArray(4))
+        assertNull(MeshFrameCodec.decode(hostile))
+    }
+
+    @Test
+    fun `decode rejects a manifest frame with a negative totalChunks`() {
+        val hostile = rawManifestFrame("evid-1", -1, ByteArray(4))
+        assertNull(MeshFrameCodec.decode(hostile))
+    }
+
+    @Test
+    fun `decode still accepts a legitimate manifest frame under the cap`() {
+        val bitset = MeshProtocol.encodeBitset(setOf(0, 1, 2), 17)
+        val legit = rawManifestFrame("evid-1", 17, bitset)
+        val decoded = MeshFrameCodec.decode(legit)
+        check(decoded is MeshFrameCodec.Frame.Manifest)
+        assertEquals(17, decoded.totalChunks)
+    }
+
+    // ---------- sosMacInput must authenticate the FULL message, not just its first 255 bytes ----------
+    // sosMacInput used writeStr (1-byte length prefix, silently truncates at 255) while encodeSos
+    // put the full message on the wire via writeStr16 — so the MAC covered only the first 255
+    // bytes. Any relay, including a non-member blind carrier with no key, could rewrite everything
+    // past byte 255 and every member would still verify the forged message as authentic.
+
+    @Test
+    fun `sos mac input is sensitive to every byte of a long message, not just the first 255`() {
+        val key = ByteArray(32) { it.toByte() }
+        val head = "A".repeat(255)
+        val original = head + "MEET AT THE NORTH GATE"
+        val tampered = head + "MEET AT THE POLICE LINE"
+        val macOriginal = CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", original, 1000L))
+        val macTampered = CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", tampered, 1000L))
+        assertFalse(
+            "tail of a long SOS message must be authenticated",
+            macOriginal.contentEquals(macTampered)
+        )
+    }
+
+    @Test
+    fun `decode rejects an sos frame whose message exceeds MAX_SOS_MESSAGE_BYTES`() {
+        val tooLong = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1), timestamp = 1000L, ttl = 8,
+            mac = ByteArray(16)
+        )
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeSos(tooLong)))
+    }
+
+    @Test
+    fun `decode still accepts an sos frame at exactly MAX_SOS_MESSAGE_BYTES`() {
+        val atLimit = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES), timestamp = 1000L, ttl = 8,
+            mac = ByteArray(16)
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(atLimit))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertEquals(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES, decoded.sos.message.length)
     }
 }

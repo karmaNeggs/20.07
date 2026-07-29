@@ -3,11 +3,17 @@ package org.offlinemesh.app.data
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
+/** [expiresAt] is epoch millis, matching [createdAt]'s unit — the DB entity has no wire-size
+ *  constraint the way [JoinCode]'s own compact epoch-seconds field does, so full millis precision
+ *  costs nothing here. Always derived from [JoinCode.Parsed.expiresAtEpochSec] (never computed
+ *  independently), so every member of a group agrees on the exact same expiry regardless of when
+ *  each one joined — see [JoinCode]'s class doc. */
 @Entity(tableName = "groups")
 data class GroupEntity(
     @PrimaryKey val id: String,
     val name: String,
-    val createdAt: Long
+    val createdAt: Long,
+    val expiresAt: Long
 )
 
 /** Dedup cache: any packet id (sos id, evidence id, chunk composite id) we've already processed. */
@@ -43,17 +49,27 @@ data class SosEntity(
     // HMAC(group_key) over the immutable fields (everything but ttl). A member verifies this before
     // ever showing or acting on the SOS, so a phone without the key can't inject a fake emergency.
     // Stored (not just recomputed) so a non-member blind carrier can relay it onward byte-for-byte.
-    val mac: ByteArray? = null
+    val mac: ByteArray? = null,
+    // Ed25519 sender-identity signature over the exact same bytes [mac] covers, under
+    // this sender's per-group keypair — additive, not a replacement: [mac] alone still proves
+    // "someone holding the group key," this additionally proves "specifically this sender," once
+    // RelayResponder has pinned their key. Null is a tolerated, not a failure, state — see
+    // RelayResponder's pin-on-first-sight doc for when a null vs. a present-but-wrong signature are
+    // treated differently.
+    val signature: ByteArray? = null
 ) {
     private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl)
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is SosEntity) return false
-        return scalars() == other.scalars() && (mac?.contentEquals(other.mac) ?: (other.mac == null))
+        return scalars() == other.scalars() &&
+            (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
+            (signature?.contentEquals(other.signature) ?: (other.signature == null))
     }
 
-    override fun hashCode(): Int = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
+    override fun hashCode(): Int =
+        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
 }
 
 @Entity(tableName = "evidence")
@@ -72,7 +88,10 @@ data class EvidenceEntity(
     // HMAC(group_key) over the header fields — prevents a non-member from forging an evidence
     // header (which would otherwise seed a bogus reassembly target). The chunks themselves are
     // already AES-GCM; this authenticates the metadata that steers them.
-    val mac: ByteArray? = null
+    val mac: ByteArray? = null,
+    // See SosEntity.signature's doc — same additive per-sender Ed25519 signature, same tolerance
+    // rules, over evidMacInput's canonical bytes instead of sosMacInput's.
+    val signature: ByteArray? = null
 ) {
     private fun scalars() = listOf(
         id, groupId, senderId, senderIsMe, timestamp, sha256, totalChunks, mimeType, ttl, originalLocalPath, complete
@@ -81,10 +100,13 @@ data class EvidenceEntity(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is EvidenceEntity) return false
-        return scalars() == other.scalars() && (mac?.contentEquals(other.mac) ?: (other.mac == null))
+        return scalars() == other.scalars() &&
+            (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
+            (signature?.contentEquals(other.signature) ?: (other.signature == null))
     }
 
-    override fun hashCode(): Int = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
+    override fun hashCode(): Int =
+        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
 }
 
 @Entity(tableName = "evidence_chunks", primaryKeys = ["evidenceId", "chunkIndex"])
@@ -102,6 +124,33 @@ data class EvidenceChunkEntity(
     override fun hashCode(): Int = 31 * (31 * evidenceId.hashCode() + chunkIndex) + data.contentHashCode()
 }
 
+/** Pins one sender's Ed25519 public key within one group, on first sight of their presence
+ *  heartbeat (see [org.offlinemesh.app.ble.RelayResponder]'s pin-on-first-sight verification).
+ *  Composite-keyed on (groupId, senderId), not a global identity — a device's key here
+ *  is scoped to this one group only, matching [org.offlinemesh.app.crypto.SenderIdentity]'s
+ *  per-group (not per-device) keypair design, so a device is unlinkable across the groups it's in
+ *  even by an observer who has compromised one group's traffic. */
+@Entity(tableName = "peer_keys", primaryKeys = ["groupId", "senderId"])
+data class PeerKeyEntity(
+    val groupId: String,
+    val senderId: String,
+    val publicKey: ByteArray,
+    val firstSeenAt: Long,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PeerKeyEntity) return false
+        return groupId == other.groupId && senderId == other.senderId &&
+            publicKey.contentEquals(other.publicKey) && firstSeenAt == other.firstSeenAt
+    }
+
+    override fun hashCode(): Int {
+        var result = 31 * groupId.hashCode() + senderId.hashCode()
+        result = 31 * result + publicKey.contentHashCode()
+        return 31 * result + firstSeenAt.hashCode()
+    }
+}
+
 /** A device's chosen display name within one specific group — not global: the same device can
  *  show a different name in each group it's a member of. Latest [updatedAt] wins on conflict, so
  *  relaying an older copy after a newer one has already arrived is a no-op (see NicknameDao). */
@@ -113,15 +162,21 @@ data class NicknameEntity(
     val updatedAt: Long,
     // HMAC(group_key) over the fields above — same authenticated-cleartext pattern as SosEntity/
     // EvidenceEntity, so a non-member can't inject a fake display name for a real member.
-    val mac: ByteArray? = null
+    val mac: ByteArray? = null,
+    // See SosEntity.signature's doc — same additive per-sender Ed25519 signature, same tolerance
+    // rules, over nicknameMacInput's canonical bytes instead of sosMacInput's.
+    val signature: ByteArray? = null
 ) {
     private fun scalars() = listOf(groupId, senderId, username, updatedAt)
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is NicknameEntity) return false
-        return scalars() == other.scalars() && (mac?.contentEquals(other.mac) ?: (other.mac == null))
+        return scalars() == other.scalars() &&
+            (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
+            (signature?.contentEquals(other.signature) ?: (other.signature == null))
     }
 
-    override fun hashCode(): Int = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
+    override fun hashCode(): Int =
+        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
 }

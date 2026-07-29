@@ -2,9 +2,10 @@ package org.offlinemesh.app.ble
 
 /**
  * The GATT client connection-attempt state machine, extracted out of [MeshGattClient] so it's
- * testable without any real Bluetooth API — this is exactly the class of logic behind the Pass 16
- * bug ("a peer that never gets a `connectGatt` callback stays marked 'connecting' forever, and
- * `maybeConnect` silently refuses to ever retry it"). A fake/injectable clock lets a test assert the
+ * testable without any real Bluetooth API — this is exactly the class of logic behind a real,
+ * live-tested bug (`docs/DECISIONS.md`, decision 5: "a peer that never gets a `connectGatt`
+ * callback stays marked 'connecting' forever, and `maybeConnect` silently refuses to ever retry
+ * it"). A fake/injectable clock lets a test assert the
  * timeout behavior deterministically, without waiting real seconds for a real Android callback that
  * — in the bug this exists to prevent — was never going to arrive anyway.
  *
@@ -34,8 +35,8 @@ package org.offlinemesh.app.ble
  * real peer sampling, a peer we just *fully* synced with (see [connectionEnded]'s `synced` param)
  * is put on a longer cooldown than one whose connection failed or ended before any real exchange —
  * that alone biases the limited concurrent-connection slots toward peers not yet caught up, using
- * the same cooldown mechanism already proven by the Pass 16 bug fix rather than a new data
- * structure. Defaults to [reconnectCooldownMs] (i.e. no behavior change) when not specified.
+ * the same cooldown mechanism already proven by the decision-5 bug fix above rather than a new
+ * data structure. Defaults to [reconnectCooldownMs] (i.e. no behavior change) when not specified.
  *
  * [currentEpoch] closes a gap found live-testing a 3-phone "passerby relay" scenario: two phones
  * out of range of each other, a third carrying content between them. The synced cooldown above is
@@ -80,8 +81,6 @@ class ConnectionAttemptTracker(
      *  connected, under the concurrency limit, and either not in post-disconnect cooldown or
      *  carrying something new for this specific peer since the last time we fully synced with it
      *  (see [currentEpoch]'s doc above). */
-    @Suppress("ReturnCount") // three independent guard clauses read more clearly early-return than
-    // folded into one boolean expression — same style choice as other early-return guards in this file.
     @Synchronized
     fun canAttempt(address: String): Boolean {
         if (address in connecting) return false

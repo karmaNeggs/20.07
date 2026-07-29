@@ -13,8 +13,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1-dev"
+        versionCode = 4
+        versionName = "0.3.0-dev"
     }
 
     buildTypes {
@@ -59,6 +59,11 @@ android {
 
 detekt {
     buildUponDefaultConfig = true
+    // Two rule tweaks (Compose's PascalCase convention for @Composable functions; the guard-clause
+    // early-return shape this codebase's BLE layer uses deliberately) that used to be fought
+    // function-by-function with ~15 inline @Suppress annotations — see the config file's own
+    // comments for why each exists. Everything else is still the plain default ruleset.
+    config.setFrom(files("config/detekt/detekt.yml"))
     // Baselined rather than tuned rule-by-rule: passes 1-17 predate this rig, so a baseline lets
     // detekt gate *new* issues going forward without a one-time cleanup sweep blocking adoption.
     // Regenerate via `./gradlew detektBaseline` after a deliberate cleanup, not to silence a new one.
@@ -84,6 +89,13 @@ dependencies {
     kapt("androidx.room:room-compiler:2.6.1")
 
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Declared explicitly (Phase 4, sender identity) rather than relying on it arriving
+    // transitively via security-crypto above — RelayEngine/RelayResponder now call Tink's Ed25519
+    // classes directly, so the version actually in use should be pinned by us, not whatever
+    // security-crypto happens to pull in. Only the `subtle.Ed25519Sign`/`Ed25519Verify` classes are
+    // used (see crypto/SenderIdentity.kt) — deliberately not Tink's KeysetHandle/registry API,
+    // which needs its own key-management/serialization story this app has no use for.
+    implementation("com.google.crypto.tink:tink-android:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
     // zxing:core does both generation AND, as of the in-app QR scanner, decoding — one QR library

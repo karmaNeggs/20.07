@@ -1,6 +1,7 @@
 package org.offlinemesh.app.ble
 
 import org.offlinemesh.app.crypto.CryptoUtils
+import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
@@ -46,7 +47,34 @@ object MeshFrameCodec {
      *  one-line, cheap-to-relay addition rather than a second chat field. */
     const val MAX_USERNAME_CHARS = 20
 
-    private const val VERSION: Int = 1
+    /** Absolute ceiling on any wire-carried `totalChunks` (evidence-meta headers AND manifests —
+     *  two independent frame types that both feed [MeshProtocol.encodeBitset]/`decodeBitset`,
+     *  whose cost is O(totalChunks)). Without this, an unauthenticated, non-member relay can send
+     *  one ~120-byte evidence-meta frame claiming e.g. `totalChunks = Int.MAX_VALUE` and force a
+     *  ~268MB allocation on every device that relays it — worse, that header is persisted to Room
+     *  and re-encoded into a manifest on every future connection (see
+     *  [org.offlinemesh.app.ble.RelayResponder.framesToPushOnConnect]), so the crash recurs until
+     *  the 48h prune. `authOk` intentionally returns true for a group we hold no key for (blind
+     *  relaying), so this frame type has no authentication gate at all — the length cap here is
+     *  the only line of defense. 4096 chunks * 400 bytes/chunk (`RelayEngine.CHUNK_SIZE`) = 1.6MB,
+     *  generous against `EvidenceCapture`'s 640px/quality-45 JPEGs (typically ~200 chunks). */
+    const val MAX_EVIDENCE_CHUNKS = 4096
+
+    /** Absolute ceiling on an SOS message's UTF-8 byte length. [writeStr16]/[readStr16] can
+     *  represent up to 65535 bytes, but nothing upstream ever intends a message that large — this
+     *  cap exists so [decode] can reject anything past it as malformed, rather than accepting an
+     *  arbitrarily large message from a wire frame with no size hint anyone actually chose. */
+    const val MAX_SOS_MESSAGE_BYTES = 2000
+
+    // v1 -> v2 (0.3.0): every frame type gained a field (Sos/EvidMeta/Nickname/Presence's
+    // additive `signature`, Presence's `senderPublicKey`, Position's inner signed body) — bumped so
+    // a v1 build and a v2 build talking to each other get a clean, explicit "different version,
+    // drop it" via decode()'s own version check, instead of a v2 peer's readBlob() calls silently
+    // throwing (caught, returned null) partway through an old-shape v1 frame.
+    // Not private — a test that needs to hand-construct a raw frame (to exercise a malformed field
+    // encode() itself would never produce, e.g. a hostile totalChunks) must reference this directly
+    // rather than duplicate the literal, which is exactly what silently went stale across this bump.
+    const val VERSION: Int = 2
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
@@ -58,13 +86,27 @@ object MeshFrameCodec {
         data class Manifest(val evidenceId: String, val totalChunks: Int, val peerHave: Set<Int>) : Frame()
         data class Nickname(val nickname: NicknameEntity) : Frame()
         /** Not stored, not relayed — a direct-neighbor heartbeat proving group co-membership over the
-         *  GATT link, so presence doesn't depend solely on hearing a beacon (which can be one-way). */
-        data class Presence(val groupId: String, val senderId: String, val timestamp: Long, val mac: ByteArray?) : Frame()
+         *  GATT link, so presence doesn't depend solely on hearing a beacon (which can be one-way).
+         *  [senderPublicKey] is what a receiver pins per (groupId, senderId) on first sight — see
+         *  [RelayResponder]'s pin-on-first-sight doc and `docs/DECISIONS.md`, decision 7. [signature]
+         *  is the same additive per-sender Ed25519 tag every other frame type carries, over
+         *  [presenceMacInput]'s bytes. */
+        data class Presence(
+            val groupId: String,
+            val senderId: String,
+            val timestamp: Long,
+            val mac: ByteArray?,
+            val senderPublicKey: ByteArray? = null,
+            val signature: ByteArray? = null,
+        ) : Frame()
         /** One filter per connection, covering ALL of the sender's current relayable sos/evidence-
          *  header/nickname holdings across every group — see [CatalogFilter] and
          *  [RelayResponder.handleIncoming]'s handling of this case for what the receiver does with
-         *  it (computes and pushes its own deficit against it). Not stored, not relayed. */
-        data class CatalogFilter(val seed: Long, val bits: ByteArray) : Frame()
+         *  it (computes and pushes its own deficit against it). Not stored, not relayed.
+         *  [sizeBits] must travel alongside [seed]/[bits] — see [CatalogFilter.sizeBits]'s doc for
+         *  why the receiver can't assume a fixed bit-space anymore now that filter size scales with
+         *  catalog size. */
+        data class CatalogFilter(val seed: Long, val sizeBits: Int, val bits: ByteArray) : Frame()
 
         /** "I support the WiFi Direct accelerator and my opt-in is on" — device-level, no MAC (see
          *  [WifiDirectHandoffCoordinator]'s doc for why this carries no sensitive claim: it can
@@ -97,19 +139,43 @@ object MeshFrameCodec {
         ) : Frame()
     }
 
-    /** Decrypted inner of a position frame. */
+    /** Decrypted inner of a position frame. [signature] is the sender's Ed25519 signature
+     *  over [signedBytes] — carried INSIDE the AES-GCM-sealed envelope, not alongside it, so a
+     *  blind relay (or anyone else without the group key) never sees this 64-byte, effectively
+     *  per-sender-static fingerprint, which would otherwise let position traffic be correlated
+     *  across time/movement even by an observer who can't read a single position's actual lat/lon.
+     *  The caller ([RelayResponder]) verifies it against the pinned public key for [senderId] —
+     *  [MeshFrameCodec] stays keyless/pure for that check, same as every other frame type here.
+     *
+     *  [signedBytes] is the exact wire bytes the signature covers, captured verbatim from the
+     *  decrypted buffer rather than re-derived from [lat]/[lon] — those two have already round-
+     *  tripped through a `/1e7` division into a [Double], and re-encoding via `* 1e7` is NOT
+     *  guaranteed to reproduce the original signed integer bit-for-bit (float rounding can land one
+     *  ULP short, e.g. `1234567 -> 0.1234567 -> 1234566.999999998 -> 1234566` after truncation) —
+     *  that would make a perfectly genuine signature spuriously fail to verify. Capturing the raw
+     *  bytes sidesteps the whole class of float round-trip bugs instead of trying to avoid it. */
     data class PositionBody(
         val senderId: String, val lat: Double, val lon: Double,
-        val accuracyM: Int, val timestampSec: Long, val hop: Int
+        val accuracyM: Int, val timestampSec: Long, val hop: Int,
+        val signature: ByteArray?,
+        val signedBytes: ByteArray,
     )
 
     // ---------- canonical byte layouts the auth tags are computed over ----------
     // These MUST stay byte-for-byte stable: the sender computes the tag over these exact bytes and
     // every receiver recomputes it the same way. Deliberately excludes ttl (mutated per hop).
 
+    // writeStr16, not writeStr — writeStr is 1-byte-length-prefixed and silently truncates at 255
+    // bytes, while encodeSos below puts the FULL message on the wire via writeStr16. Using writeStr
+    // here previously meant the MAC covered only the first 255 bytes of the message: any relay —
+    // including a non-member blind carrier with no group key at all, since authOk lets an
+    // unverifiable frame through for relaying — could rewrite everything past byte 255 and every
+    // member would still verify the forged message as authentic. See MAX_SOS_MESSAGE_BYTES for the
+    // matching decode-time bound that keeps this field's size actually meaningful.
     fun sosMacInput(id: String, groupId: String, senderId: String, message: String, timestamp: Long): ByteArray =
         build { d ->
-            d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId); d.writeStr(message); d.writeLong(timestamp)
+            d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId)
+            d.writeSosMessage(message); d.writeLong(timestamp)
         }
 
     fun evidMacInput(
@@ -121,7 +187,9 @@ object MeshFrameCodec {
     }
 
     fun nicknameMacInput(groupId: String, senderId: String, username: String, updatedAt: Long): ByteArray =
-        build { d -> d.writeStr(groupId); d.writeStr(senderId); d.writeStr(username); d.writeLong(updatedAt) }
+        build { d ->
+            d.writeStr(groupId); d.writeStr(senderId); d.writeNicknameUsername(username); d.writeLong(updatedAt)
+        }
 
     fun presenceMacInput(groupId: String, senderId: String, timestamp: Long): ByteArray =
         build { d -> d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp) }
@@ -156,13 +224,13 @@ object MeshFrameCodec {
     fun encodeSos(sos: SosEntity): ByteArray = frame(FRAME_SOS) { d ->
         d.writeStr(sos.id); d.writeStr(sos.groupId); d.writeStr(sos.senderId)
         d.writeByte(sos.ttl.coerceIn(0, 255)); d.writeLong(sos.timestamp)
-        d.writeStr16(sos.message); d.writeBlob(sos.mac)
+        d.writeSosMessage(sos.message); d.writeBlob(sos.mac); d.writeBlob(sos.signature)
     }
 
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
         d.writeStr(e.id); d.writeStr(e.groupId); d.writeStr(e.senderId); d.writeLong(e.timestamp)
         d.write(hexToBytes(e.sha256)); d.writeInt(e.totalChunks); d.writeStr(e.mimeType)
-        d.writeByte(e.ttl.coerceIn(0, 255)); d.writeBlob(e.mac)
+        d.writeByte(e.ttl.coerceIn(0, 255)); d.writeBlob(e.mac); d.writeBlob(e.signature)
     }
 
     fun encodeChunk(c: EvidenceChunkEntity): ByteArray = frame(FRAME_EVID_CHUNK) { d ->
@@ -201,10 +269,16 @@ object MeshFrameCodec {
     /** Seals the sensitive body with the group key before framing. Only a member holding the key
      *  can produce or read this — non-members that relay it move opaque bytes. Uses a deterministic
      *  nonce (see [positionNonce]) rather than [CryptoUtils.encrypt]'s random one — see the doc
-     *  comment above [positionNonceCounter] for why this frame type specifically needs it. */
+     *  comment above [positionNonceCounter] for why this frame type specifically needs it.
+     *
+     *  [signingPrivateKey] is optional (this device may not have a sender identity for [groupId]
+     *  yet, or the caller may be a blind relay authoring nothing of its own) — see
+     *  [PositionBody.signature]'s doc for why the resulting signature travels INSIDE the seal, not
+     *  alongside it. */
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun encodePosition(
         groupId: String, key: ByteArray, senderId: String, lat: Double, lon: Double,
-        accuracyM: Int, timestampSec: Long, hop: Int
+        accuracyM: Int, timestampSec: Long, hop: Int, signingPrivateKey: ByteArray? = null,
     ): ByteArray {
         val inner = build { d ->
             d.writeStr(senderId)
@@ -212,30 +286,48 @@ object MeshFrameCodec {
             d.writeByte(accuracyM.coerceIn(0, 255)); d.writeInt(timestampSec.toInt())
             d.writeByte(hop.coerceIn(0, 255))
         }
-        val sealed = CryptoUtils.encryptWithNonce(key, inner, positionNonce(senderId, timestampSec))
+        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
+        val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
+        val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, positionNonce(senderId, timestampSec))
         return frame(FRAME_POSITION) { d -> d.writeStr(groupId); d.writeStr16Bytes(sealed) }
     }
 
     fun encodeNickname(n: NicknameEntity): ByteArray = frame(FRAME_NICKNAME) { d ->
-        d.writeStr(n.groupId); d.writeStr(n.senderId); d.writeStr(n.username.take(MAX_USERNAME_CHARS))
-        d.writeLong(n.updatedAt); d.writeBlob(n.mac)
+        d.writeStr(n.groupId); d.writeStr(n.senderId); d.writeNicknameUsername(n.username)
+        d.writeLong(n.updatedAt); d.writeBlob(n.mac); d.writeBlob(n.signature)
     }
 
     /** Computes the tag internally (like encodePosition takes the key) — there's no stored entity
-     *  for a presence heartbeat, it's generated fresh each connect. */
-    fun encodePresence(groupId: String, senderId: String, timestamp: Long, key: ByteArray): ByteArray {
-        val mac = CryptoUtils.authTag(key, presenceMacInput(groupId, senderId, timestamp))
+     *  for a presence heartbeat, it's generated fresh each connect. [senderPublicKey]/
+     *  [signingPrivateKey] are both optional and independent of each other in principle, but in
+     *  practice a caller either has a sender identity for this group (and passes both) or doesn't
+     *  (and passes neither) — see [RelayResponder.framesToPushOnConnect]'s only real call site. */
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    fun encodePresence(
+        groupId: String,
+        senderId: String,
+        timestamp: Long,
+        key: ByteArray,
+        senderPublicKey: ByteArray? = null,
+        signingPrivateKey: ByteArray? = null,
+    ): ByteArray {
+        val macInput = presenceMacInput(groupId, senderId, timestamp)
+        val mac = CryptoUtils.authTag(key, macInput)
+        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, macInput) }
         return frame(FRAME_PRESENCE) { d ->
             d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
+            d.writeBlob(senderPublicKey); d.writeBlob(signature)
         }
     }
 
-    /** [bits] can be shorter than [CatalogFilter.SIZE_BITS] / 8 bytes (trailing-zero truncation —
-     *  see [CatalogFilter.toBits]'s doc), so this uses the 2-byte-length [writeStr16Bytes] rather
+    /** [sizeBits] is written as an unsigned short — [CatalogFilter]'s MAX_SIZE_BITS (4096)
+     *  comfortably fits. [bits] can be shorter than `sizeBits / 8` bytes (trailing-zero truncation
+     *  — see [CatalogFilter.toBits]'s doc), so this uses the 2-byte-length [writeStr16Bytes] rather
      *  than the 1-byte [writeBlob] (which would silently truncate anything over 255 bytes). */
-    fun encodeCatalogFilter(seed: Long, bits: ByteArray): ByteArray = frame(FRAME_CATALOG_FILTER) { d ->
-        d.writeLong(seed); d.writeStr16Bytes(bits)
-    }
+    fun encodeCatalogFilter(seed: Long, sizeBits: Int, bits: ByteArray): ByteArray =
+        frame(FRAME_CATALOG_FILTER) { d ->
+            d.writeLong(seed); d.writeShort(sizeBits); d.writeStr16Bytes(bits)
+        }
 
     fun encodeWifiDirectCap(version: Int): ByteArray = frame(FRAME_WIFI_DIRECT_CAP) { d ->
         d.writeByte(version.coerceIn(0, 255))
@@ -283,7 +375,9 @@ object MeshFrameCodec {
             val accuracy = buf.get().toInt() and 0xFF
             val ts = buf.int.toLong()
             val hop = buf.get().toInt() and 0xFF
-            PositionBody(senderId, lat, lon, accuracy, ts, hop)
+            val signedBytes = inner.copyOfRange(0, buf.position()) // see PositionBody.signedBytes' doc
+            val signature = buf.readBlob()
+            PositionBody(senderId, lat, lon, accuracy, ts, hop, signature, signedBytes)
         } catch (e: Exception) {
             null
         }
@@ -304,22 +398,34 @@ object MeshFrameCodec {
                     val ttl = buf.get().toInt() and 0xFF
                     val timestamp = buf.long
                     val message = buf.readStr16()
+                    // Matches the cap RelayEngine.createSos enforces at authorship — see
+                    // MAX_SOS_MESSAGE_BYTES's doc. Checked on UTF-8 byte length (what the wire
+                    // format and the MAC both actually operate on), not String.length.
+                    if (message.toByteArray(UTF8).size > MAX_SOS_MESSAGE_BYTES) return null
                     val mac = buf.readBlob()
-                    Frame.Sos(SosEntity(id, groupId, senderId, false, message, timestamp, ttl, mac))
+                    val signature = buf.readBlob()
+                    Frame.Sos(SosEntity(id, groupId, senderId, false, message, timestamp, ttl, mac, signature))
                 }
                 FRAME_EVID_META -> {
                     val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()
                     val timestamp = buf.long
                     val sha = ByteArray(32).also { buf.get(it) }
                     val totalChunks = buf.int
+                    // Guards MeshProtocol.encodeBitset's O(totalChunks) allocation, which this
+                    // persisted header later feeds via RelayResponder.framesToPushOnConnect — see
+                    // MAX_EVIDENCE_CHUNKS's doc. Not gated behind authOk (blind relays never hold a
+                    // key), so this is the only check standing between a hostile 120-byte frame and
+                    // a repeating ~268MB allocation.
+                    if (totalChunks !in 1..MAX_EVIDENCE_CHUNKS) return null
                     val mimeType = buf.readStr()
                     val ttl = buf.get().toInt() and 0xFF
                     val mac = buf.readBlob()
+                    val signature = buf.readBlob()
                     Frame.EvidMeta(
                         EvidenceEntity(
                             id = id, groupId = groupId, senderId = senderId, senderIsMe = false,
                             timestamp = timestamp, sha256 = bytesToHex(sha), totalChunks = totalChunks,
-                            mimeType = mimeType, ttl = ttl, mac = mac
+                            mimeType = mimeType, ttl = ttl, mac = mac, signature = signature
                         )
                     )
                 }
@@ -334,23 +440,33 @@ object MeshFrameCodec {
                 }
                 FRAME_MANIFEST -> {
                     val evidenceId = buf.readStr(); val totalChunks = buf.int
+                    // Same MAX_EVIDENCE_CHUNKS guard as FRAME_EVID_META above — decodeBitset's loop
+                    // is O(totalChunks), and a negative value silently "succeeds" with an empty
+                    // peerHave (0 until totalChunks is an empty range) rather than being rejected,
+                    // which would otherwise let a nonsensical manifest reach RelayEngine's deficit
+                    // calculation downstream.
+                    if (totalChunks !in 1..MAX_EVIDENCE_CHUNKS) return null
                     val bitset = ByteArray(buf.remaining()).also { buf.get(it) }
                     Frame.Manifest(evidenceId, totalChunks, MeshProtocol.decodeBitset(bitset, totalChunks))
                 }
                 FRAME_NICKNAME -> {
                     val groupId = buf.readStr(); val senderId = buf.readStr(); val username = buf.readStr()
                     val updatedAt = buf.long; val mac = buf.readBlob()
-                    Frame.Nickname(NicknameEntity(groupId, senderId, username, updatedAt, mac))
+                    val signature = buf.readBlob()
+                    Frame.Nickname(NicknameEntity(groupId, senderId, username, updatedAt, mac, signature))
                 }
                 FRAME_PRESENCE -> {
                     val groupId = buf.readStr(); val senderId = buf.readStr()
                     val timestamp = buf.long; val mac = buf.readBlob()
-                    Frame.Presence(groupId, senderId, timestamp, mac)
+                    val senderPublicKey = buf.readBlob()
+                    val signature = buf.readBlob()
+                    Frame.Presence(groupId, senderId, timestamp, mac, senderPublicKey, signature)
                 }
                 FRAME_CATALOG_FILTER -> {
                     val seed = buf.long
+                    val sizeBits = buf.short.toInt() and 0xFFFF
                     val bits = buf.readStr16Bytes()
-                    Frame.CatalogFilter(seed, bits)
+                    Frame.CatalogFilter(seed, sizeBits, bits)
                 }
                 FRAME_WIFI_DIRECT_CAP -> {
                     val capVersion = buf.get().toInt() and 0xFF
@@ -402,6 +518,26 @@ object MeshFrameCodec {
     private fun DataOutputStream.writeBlob(b: ByteArray?) {
         if (b == null) { writeByte(0) } else { writeByte(b.size.coerceAtMost(255)); write(b, 0, b.size.coerceAtMost(255)) }
     }
+
+    // ---------- shared per-field writers ----------
+    // These two exist specifically so a frame's encode function and its MAC-input function can
+    // never independently disagree on how to write a shared variable-length field again — that
+    // exact class of drift (encodeSos used writeStr16 for message; sosMacInput used writeStr,
+    // silently truncating at 255 bytes and leaving everything past that point unauthenticated) is
+    // what let a relay rewrite the tail of any long SOS message undetected. Of every MAC-input/
+    // encode pair in this file, only Sos/message and Nickname/username carry a variable-length,
+    // caller-supplied field at all — every other MAC-input (position, presence, WFD handoff/accept)
+    // covers only short, fixed-shape ids/nonces with no such risk, which is why only these two get
+    // a shared writer rather than restructuring every frame type in this file around one.
+
+    /** writeStr16 (2-byte length), not writeStr (1-byte, silently truncates at 255) — see
+     *  MAX_SOS_MESSAGE_BYTES for the actual enforced size bound. */
+    private fun DataOutputStream.writeSosMessage(message: String) = writeStr16(message)
+
+    /** Truncates to MAX_USERNAME_CHARS on BOTH the encode and MAC-input path via this one function,
+     *  so a mac computed over a truncated value can never need verifying against an untruncated
+     *  one (or vice versa) because the two call sites disagreed on whether truncation happened. */
+    private fun DataOutputStream.writeNicknameUsername(username: String) = writeStr(username.take(MAX_USERNAME_CHARS))
 
     private fun ByteBuffer.readStr(): String { val n = get().toInt() and 0xFF; val b = ByteArray(n); get(b); return String(b, UTF8) }
     private fun ByteBuffer.readStr16(): String { val n = short.toInt() and 0xFFFF; val b = ByteArray(n); get(b); return String(b, UTF8) }

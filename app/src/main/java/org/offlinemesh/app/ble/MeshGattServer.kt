@@ -10,10 +10,14 @@ import android.bluetooth.BluetoothGattServerCallback
 import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.content.Context
+import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -21,6 +25,20 @@ import java.util.concurrent.ConcurrentHashMap
  * GATT server role: peers connect to us and push data our way; we push ours back as
  * notifications once they subscribe. All outbound notifications for one peer are serialized
  * through [writeQueue] so a manifest push can never race a reactive response frame.
+ *
+ * **Cross-peer notify race (fixed).** [BluetoothGattServer.notifyCharacteristicChanged]'s
+ * pre-API-33 overload has no `value` parameter — it notifies whatever is currently set on the
+ * *shared* [BluetoothGattCharacteristic] instance this whole service owns. [writeQueue] only ever
+ * serialized notifies *to the same address*; two concurrent notifies to two *different* peers had
+ * no mutual exclusion at all, so peer A's bytes could be delivered to peer B. Inbound connections
+ * are deliberately uncapped (see [maxConcurrentServerConnections]'s doc), so this was live at
+ * exactly the density this app targets. Android 13 (API 33) added an overload that takes `value`
+ * as a parameter instead of shared state, which sidesteps the race entirely; below that, [notify]
+ * serializes the ENTIRE operation — the synchronous set-and-notify call *and* the async wait for
+ * [BluetoothGattServerCallback.onNotificationSent] — behind one server-wide [notifyLegacyMutex],
+ * not a per-address one, since the shared characteristic's value must stay untouched by any other
+ * peer's notify until this one has actually completed at the controller level, not just been
+ * issued.
  */
 class MeshGattServer(
     private val context: Context,
@@ -33,33 +51,28 @@ class MeshGattServer(
     private val writeQueue = GattOperationQueue()
 
     // Unlike MeshGattClient (capped at 3 outbound connections), incoming connections here have no
-    // cap — anyone who can see our advertisement can connect, and nothing stops a dense crowd from
-    // piling more simultaneous inbound links onto us than a chipset's shared central+peripheral GATT
-    // pool (commonly ~4-7 total) can handle. That's a real gap for this app's ~10-person/100m²
-    // target, but an *enforced* cap (actively cancelling connections over the limit) was tried in
-    // this same pass and immediately caused total, symmetric mesh failure in live testing — a
-    // BluetoothDevice-object-keyed tracking set failed to dedupe the same physical peer across this
-    // app's routine ~45s reconnects, so the (miscounted) cap was crossed within a couple of cycles
-    // even with only 2-3 real phones, and every connection after that got cancelled. Re-enabling
-    // enforcement needs: (1) confirmation the fix below (address-keyed, not object-keyed) is
-    // actually sufficient — Pass 16 found an analogous "disconnect callback never fires" failure
-    // mode on the *client* role that needed an explicit forced-timeout cleanup; the server role
-    // hasn't been proven immune to the same thing, so a leak here could still happen silently over
-    // a long-running session even with the key type fixed. Until then this only counts and logs,
-    // never rejects — a real crowd will find the actual failure mode (or lack of one) faster and
-    // more honestly than another guess would.
+    // enforced cap — anyone who can see our advertisement can connect, and nothing stops a dense
+    // crowd from piling more simultaneous inbound links onto us than a chipset's shared
+    // central+peripheral GATT pool (commonly ~4-7 total) can handle. Enforcing a cap here
+    // previously caused total, symmetric mesh failure in live testing — see docs/DECISIONS.md,
+    // decision 4, before re-attempting enforcement.
     @Suppress("MagicNumber") // self-documented by the property name + the comment above
     private val maxConcurrentServerConnections = 4
-    // Keyed by address, like every other per-peer structure in this class (writeQueue,
-    // subscribedDevices notwithstanding) and in MeshGattClient (lastActivity, ConnectionAttemptTracker)
-    // — NOT by the BluetoothDevice object itself. A first version of this used
-    // Set<BluetoothDevice>, which does not reliably dedupe the *same* physical peer across the
-    // repeated reconnects this app does every ~45s (BluetoothDevice has no guaranteed stable
-    // equals() across separate callback deliveries from the stack) — stale entries piled up, the
-    // cap was crossed within a couple of reconnect cycles even with only 2-3 real phones, and every
-    // connection after that got cancelled immediately: total, symmetric mesh failure (no radar, no
-    // messages, no SOS) caught in live testing.
+    // Keyed by address, like every other per-peer structure in this class and in MeshGattClient —
+    // NOT by the BluetoothDevice object itself, which has no guaranteed stable equals() across
+    // separate callback deliveries from the stack (see docs/DECISIONS.md, decision 4).
     private val connectedDevices = ConcurrentHashMap.newKeySet<String>()
+
+    // Negotiated MTU per peer address — same purpose and same disconnect-time cleanup reasoning as
+    // MeshGattClient's identical field; see pushOnConnect's use of it below.
+    private val negotiatedMtu = ConcurrentHashMap<String, Int>()
+
+    // Only ever acquired on pre-API-33 devices (see notify's doc and the class-level "cross-peer
+    // notify race" note) — API 33+ never touches shared characteristic state, so there's nothing
+    // for this to protect there. A single global mutex, not one per address: the thing being
+    // protected (the one shared BluetoothGattCharacteristic instance's value) is itself global,
+    // not per-peer.
+    private val notifyLegacyMutex = Mutex()
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -84,12 +97,33 @@ class MeshGattServer(
         try { gattServer?.close() } catch (_: Exception) {}
     }
 
+    /** See the class-level "cross-peer notify race" doc for why this branches on API level. */
     @SuppressLint("MissingPermission")
     private suspend fun notify(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic, data: ByteArray): Boolean {
         val server = gattServer ?: return false
-        return writeQueue.run(device.address) {
-            characteristic.value = data
-            try { server.notifyCharacteristicChanged(device, characteristic, false) } catch (e: Exception) { false }
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // value is a parameter here, not shared characteristic state — two concurrent notifies
+            // to different peers can never cross-deliver each other's bytes, so per-address
+            // serialization (writeQueue) is all that's needed, same as every other write in this app.
+            writeQueue.run(device.address) {
+                try {
+                    server.notifyCharacteristicChanged(device, characteristic, false, data) ==
+                        BluetoothStatusCodes.SUCCESS
+                } catch (e: Exception) { false }
+            }
+        } else {
+            // Pre-33: held for the FULL operation, including the suspend inside writeQueue.run that
+            // awaits onNotificationSent — releasing it any earlier would let a second peer's notify
+            // mutate the shared characteristic's value before this one has actually completed at
+            // the controller level, which is the exact race this exists to close.
+            notifyLegacyMutex.withLock {
+                writeQueue.run(device.address) {
+                    characteristic.value = data
+                    try {
+                        server.notifyCharacteristicChanged(device, characteristic, false)
+                    } catch (e: Exception) { false }
+                }
+            }
         }
     }
 
@@ -98,7 +132,9 @@ class MeshGattServer(
         val server = gattServer ?: return
         val service = server.getService(MeshProtocol.SERVICE_UUID) ?: return
         val characteristic = service.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: return
-        for (bytes in responder.framesToPushOnConnect()) {
+        val mtu = negotiatedMtu[device.address] ?: MeshProtocol.DEFAULT_ATT_MTU
+        val maxFrameBytes = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
+        for (bytes in responder.framesToPushOnConnect(maxFrameBytes)) {
             notify(device, characteristic, bytes)
         }
     }
@@ -129,6 +165,13 @@ class MeshGattServer(
             writeQueue.complete(device.address, status == BluetoothGatt.GATT_SUCCESS)
         }
 
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            // Unlike the client role's onMtuChanged, this callback carries no status — it only
+            // ever fires here once the platform has actually applied a new MTU for this
+            // connection, so there's no failure case to filter out the way MeshGattClient does.
+            negotiatedMtu[device.address] = mtu
+        }
+
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 connectedDevices.add(device.address)
@@ -144,6 +187,7 @@ class MeshGattServer(
                 connectedDevices.remove(device.address)
                 subscribedDevices.remove(device)
                 writeQueue.clear(device.address)
+                negotiatedMtu.remove(device.address)
             }
         }
     }

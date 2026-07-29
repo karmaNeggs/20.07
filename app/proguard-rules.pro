@@ -31,6 +31,19 @@
 -dontwarn com.google.errorprone.annotations.**
 -dontwarn javax.annotation.**
 
+# Phase 4 (sender identity): tink-android is now a direct dependency and actually exercised at
+# runtime (crypto/SenderIdentity.kt), not just transitively present and unused. Tink's optional
+# Conscrypt fast-path (com.google.crypto.tink.subtle.Ed25519Sign/Verify probe for a Conscrypt
+# provider and fall back to Tink's own pure-Java implementation if it's absent) references
+# org.conscrypt.* classes that aren't on this app's compile classpath (Android's own bundled
+# Conscrypt lives in a different, non-public namespace) — harmless at runtime (the fallback is
+# exactly what this app's minSdk 26 needs; see SenderIdentity's class doc), but R8 needs telling
+# not to fail full-mode analysis over classes it can't find.
+-dontwarn org.conscrypt.**
+-keep class com.google.crypto.tink.subtle.Ed25519Sign { *; }
+-keep class com.google.crypto.tink.subtle.Ed25519Sign$KeyPair { *; }
+-keep class com.google.crypto.tink.subtle.Ed25519Verify { *; }
+
 # Strip every android.util.Log call out of release builds entirely (R8 removes the call site, not
 # just silences output) — a security-scan finding: this app logs peer BLE addresses, connection
 # diagnostics, and warning messages (RelayResponder, MeshGattClient, the screens' defensive catch

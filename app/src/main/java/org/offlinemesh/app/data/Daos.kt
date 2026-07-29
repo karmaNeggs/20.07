@@ -18,8 +18,25 @@ interface GroupDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(group: GroupEntity)
 
-    @Query("SELECT * FROM groups")
+    // Filters out expired rows entirely at the SQL level — belt-and-braces so an expired group
+    // can never be advertised, relayed for, or have its presence heartbeat sent even in the brief
+    // window before GroupRepository.expireGroups' own periodic sweep actually deletes it (up to
+    // 30 minutes; see MeshService.startPruning). The real deletion (and the security property that
+    // matters — dropping the key, wiping content) still happens in expireGroups, not here; this is
+    // only a display/relay-eligibility gate. strftime('%s','now') is UTC epoch seconds (SQLite),
+    // matching System.currentTimeMillis()'s own UTC-epoch basis once scaled to millis.
+    @Query("SELECT * FROM groups WHERE expiresAt > CAST(strftime('%s','now') AS INTEGER) * 1000")
     suspend fun getActiveGroups(): List<GroupEntity>
+
+    @Query("SELECT id FROM groups WHERE expiresAt <= :nowMillis")
+    suspend fun expiredGroupIds(nowMillis: Long): List<String>
+
+    // Unfiltered — unlike getActiveGroups, this must include an already-expired-but-not-yet-swept
+    // group too (see GroupRepository.sweepOrphanKeys' doc for why: that row's key is still validly
+    // in use until expireGroups actually dismantles it, so treating it as "orphaned" here would
+    // race the real cleanup and delete a key still needed for a few more minutes).
+    @Query("SELECT id FROM groups")
+    suspend fun allGroupIds(): List<String>
 
     @Query("DELETE FROM groups WHERE id = :id")
     suspend fun delete(id: String)
@@ -51,11 +68,23 @@ interface SosDao {
     )
     fun observeForGroup(groupId: String): Flow<List<SosEntity>>
 
+    // Long, not Unit: Room returns the inserted rowid, or -1 when OnConflictStrategy.IGNORE
+    // dropped the row because this id already exists — RelayEngine.ingestSos derives "is this
+    // actually new" from that return value rather than from the separate seen-message cache (see
+    // RelayEngine's doc on why: the two caches have different retention windows, and reading
+    // newness off the shorter-lived one caused a stale SOS to re-fire as a fresh alarm).
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insert(sos: SosEntity)
+    suspend fun insert(sos: SosEntity): Long
 
     @Query("SELECT * FROM sos_events WHERE ttl > 0")
     suspend fun getRelayable(): List<SosEntity>
+
+    // No ttl filter, unlike getRelayable — "what do we hold" (used to build the outgoing catalog
+    // filter, see RelayEngine.heldSosIds) is a different question from "what do we still forward"
+    // (getRelayable, ttl > 0 only). An item at ttl 0 has stopped propagating but is still held
+    // until the 48h prune; mirrors EvidenceDao.allIds's identical existing pattern.
+    @Query("SELECT id FROM sos_events")
+    suspend fun allIds(): List<String>
 
     @Query("DELETE FROM sos_events WHERE groupId = :groupId")
     suspend fun deleteForGroup(groupId: String)
@@ -74,8 +103,11 @@ interface EvidenceDao {
     )
     fun observeForGroup(groupId: String): Flow<List<EvidenceEntity>>
 
+    // Long, not Unit — same reasoning as SosDao.insert above: -1 means IGNORE dropped the row
+    // because this id was already stored, which RelayEngine.ingestEvidenceMeta uses as the real
+    // signal for "is this new," not the separate seen-message cache.
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insert(evidence: EvidenceEntity)
+    suspend fun insert(evidence: EvidenceEntity): Long
 
     @Update
     suspend fun update(evidence: EvidenceEntity)
@@ -121,6 +153,23 @@ interface EvidenceChunkDao {
 
     @Query("DELETE FROM evidence_chunks WHERE evidenceId = :evidenceId")
     suspend fun deleteForEvidence(evidenceId: String)
+}
+
+@Dao
+interface PeerKeyDao {
+    @Query("SELECT * FROM peer_keys WHERE groupId = :groupId AND senderId = :senderId LIMIT 1")
+    suspend fun get(groupId: String, senderId: String): PeerKeyEntity?
+
+    // REPLACE, not IGNORE — a first-sight pin only ever inserts once (RelayResponder checks `get`
+    // first and only calls this when there was no existing row), so on-conflict semantics don't
+    // matter for that path in practice; REPLACE is still the safer default should a caller ever
+    // insert without checking first, since a stale duplicate row silently winning over IGNORE
+    // would defeat the entire point of pinning.
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: PeerKeyEntity)
+
+    @Query("DELETE FROM peer_keys WHERE groupId = :groupId")
+    suspend fun deleteForGroup(groupId: String)
 }
 
 @Dao

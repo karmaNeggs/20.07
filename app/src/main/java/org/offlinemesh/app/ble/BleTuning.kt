@@ -23,8 +23,8 @@ import android.bluetooth.le.ScanSettings
  *    of the time. Fixed by removing the wait, refreshing back-to-back instead — which then turned
  *    out to be *worse*: stopping and restarting the advertiser every ~700-900ms, continuously,
  *    pushed real hardware into total, symmetric discovery failure on *both* test phones (rapid BLE
- *    advertise start/stop cycling is a known category of chipset instability — see CHANGELOG Pass 7
- *    for an earlier, different instance of exactly this class of bug). Fixed properly: the
+ *    advertise start/stop cycling is a known category of chipset instability — see
+ *    `docs/DECISIONS.md`, decision 1, for the full story). Fixed properly: the
  *    advertiser is now only stopped/restarted when the actual payload changes (new rotating-id
  *    window, a different group in the round-robin, a shifted SOS hop) — [advertiseCheckIntervalMs]
  *    below governs how often that's *checked*, not how often the radio is touched. A stable
@@ -62,8 +62,7 @@ object BleTuning {
         advertiseCheckIntervalMs = 2000L,
         scanMode = ScanSettings.SCAN_MODE_LOW_LATENCY,
         // BALANCED (~250ms interval between actual radio bursts) — LOW_POWER's ~1000ms interval
-        // historically didn't leave enough margin and silently transmitted nothing on some chipsets
-        // (see CHANGELOG Pass 7).
+        // historically didn't leave enough margin and silently transmitted nothing on some chipsets.
         advertiseMode = AdvertiseSettings.ADVERTISE_MODE_BALANCED,
         advertiseTxPower = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
         connectionIdleMs = 3000L,

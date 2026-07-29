@@ -1,4 +1,4 @@
-package org.offlinemesh.app.ble
+package org.offlinemesh.app.transport.wifidirect
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -11,6 +11,7 @@ import android.util.Log
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
+import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import java.io.DataInputStream
@@ -50,18 +51,21 @@ import kotlin.coroutines.resume
  * **Token handshake before anything is trusted.** Directly reapplies the lesson from
  * [MeshGattClient]'s CCCD-before-data-write bug (see that class's doc): the first thing either side
  * does on a freshly opened socket is exchange and verify [WifiDirectHandoffCoordinator]'s token —
- * chunk bytes never flow before that succeeds.
+ * chunk bytes never flow before that succeeds. The exchange is role-asymmetric (see [TokenRole]):
+ * neither side ever puts the shared [WifiDirectHandoffCoordinator]-derived `token` itself on the
+ * wire, only a role-tagged derivation of it, so a party that wins the raw socket's `accept()`/
+ * `connect()` race without actually holding `token` (e.g. an unrelated nearby WFD-capable device)
+ * learns nothing usable from what it receives. The peer's length-prefixed tag is also bounded
+ * ([WifiDirectTuning.MAX_TOKEN_TAG_BYTES]) before being allocated — see that constant's doc for the
+ * crash this closes.
  */
 @Suppress(
     // A broad catch-and-log-and-fail-closed is this whole class's core, deliberate design — see
     // the class doc — not sloppy exception handling; every catch here exists specifically so an
-    // unverified WifiP2pManager/socket failure can never propagate into BLE state. Guard-clause-
-    // style early returns (bail out step by step the moment any stage fails) is the same reason
-    // ReturnCount trips throughout this file — matches this codebase's established style for
-    // exactly this kind of multi-stage, fail-fast radio sequence. TooManyFunctions is this class
-    // broken into small, single-purpose private steps (mirrors MeshFrameCodec's own many-small-
-    // functions shape) rather than a few large ones.
-    "TooGenericExceptionCaught", "SwallowedException", "ReturnCount", "TooManyFunctions",
+    // unverified WifiP2pManager/socket failure can never propagate into BLE state. TooManyFunctions
+    // is this class broken into small, single-purpose private steps (mirrors MeshFrameCodec's own
+    // many-small-functions shape) rather than a few large ones.
+    "TooGenericExceptionCaught", "SwallowedException", "TooManyFunctions",
 )
 class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport {
     private val manager: WifiP2pManager? =
@@ -89,7 +93,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
             awaitReadyTime(readyAtEpochMs)
             val socket = openSocket(info) ?: return
             currentSocket = socket
-            if (!handshakeToken(socket, token)) return
+            if (!handshakeToken(socket, token, TokenRole.INITIATOR)) return
             sendChunks(socket, chunks)
         } catch (e: Exception) {
             Log.w(TAG, "WFD initiator transfer to $peerAddress failed: ${e.message}")
@@ -117,7 +121,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
             awaitReadyTime(readyAtEpochMs)
             val socket = openSocket(info) ?: return
             currentSocket = socket
-            if (!handshakeToken(socket, token)) return
+            if (!handshakeToken(socket, token, TokenRole.RESPONDER)) return
             receiveChunks(socket, onChunk)
         } catch (e: Exception) {
             Log.w(TAG, "WFD responder transfer from $peerAddress failed: ${e.message}")
@@ -241,20 +245,54 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
         null
     }
 
-    /** Writes this side's token, then reads and compares the peer's — nothing past this point is
-     *  trusted until both match. See class doc for why this mirrors the CCCD-before-data-write
-     *  lesson from [MeshGattClient]. */
-    private suspend fun handshakeToken(socket: Socket, token: ByteArray): Boolean = try {
+    /** Which side of the handshake this device is playing — see [handshakeToken]'s doc and
+     *  [deriveTokenTag] for why the exchange is asymmetric rather than both sides sending the
+     *  identical raw [WifiDirectHandoffCoordinator] token. */
+    @Suppress("MagicNumber") // ASCII 'I'/'R' — self-documented by the trailing comments and the
+    // enum entry names themselves, not values chosen for any other reason.
+    internal enum class TokenRole(val wireTag: Byte) {
+        INITIATOR(0x49), // 'I'
+        RESPONDER(0x52), // 'R'
+    }
+
+    /** Derives what [role] actually puts on the wire from the shared [token] — reuses
+     *  [CryptoUtils.authTag] as a keyed derivation (HMAC-SHA256 truncated to 16 bytes) with [token]
+     *  itself as the HMAC key and a single role-tag byte as the message, rather than transmitting
+     *  [token] verbatim. Both sides can independently compute both directions' tags (each already
+     *  holds [token] in full), so this adds no new key-agreement step — only which of the two
+     *  already-derivable values gets sent versus expected differs by [role]. */
+    internal fun deriveTokenTag(token: ByteArray, role: TokenRole): ByteArray =
+        CryptoUtils.authTag(token, byteArrayOf(role.wireTag))
+
+    /** Writes this side's role-tagged token derivation, then reads and checks the peer's — nothing
+     *  past this point is trusted until both match. See the class doc's "Token handshake before
+     *  anything is trusted" section for why this mirrors the CCCD-before-data-write lesson from
+     *  [MeshGattClient], and [TokenRole]/[deriveTokenTag] for why the two directions carry different
+     *  values instead of both sides sending the identical raw [token]. `internal`, not `private` —
+     *  this is the one piece of WFD logic that's a real (not fake-transport) socket handshake and
+     *  is directly unit-testable over a loopback socket pair without any `WifiP2pManager`/Context
+     *  dependency, so it's exposed for that rather than only reachable through the full,
+     *  device-dependent [beginAsInitiator]/[beginAsResponder] paths. */
+    internal suspend fun handshakeToken(socket: Socket, token: ByteArray, role: TokenRole): Boolean = try {
         withTimeoutOrNull(WifiDirectTuning.TOKEN_HANDSHAKE_TIMEOUT_MS) {
+            val peerRole = if (role == TokenRole.INITIATOR) TokenRole.RESPONDER else TokenRole.INITIATOR
+            val outgoing = deriveTokenTag(token, role)
+            val expectedIncoming = deriveTokenTag(token, peerRole)
             val out = DataOutputStream(socket.getOutputStream())
-            out.writeInt(token.size)
-            out.write(token)
+            out.writeInt(outgoing.size)
+            out.write(outgoing)
             out.flush()
             val din = DataInputStream(socket.getInputStream())
             val peerLen = din.readInt()
-            val peerToken = ByteArray(peerLen)
-            din.readFully(peerToken)
-            CryptoUtils.constantTimeEquals(token, peerToken)
+            // Bounded BEFORE allocating — this length prefix is untrusted input from whoever is on
+            // the other end of the socket, read before anything is authenticated (that read IS the
+            // authentication). See WifiDirectTuning.MAX_TOKEN_TAG_BYTES's doc for the crash this
+            // closes: any device winning the accept()/connect() race could previously send a small
+            // hostile length prefix and force an unbounded allocation.
+            if (peerLen !in 1..WifiDirectTuning.MAX_TOKEN_TAG_BYTES) return@withTimeoutOrNull false
+            val peerTag = ByteArray(peerLen)
+            din.readFully(peerTag)
+            CryptoUtils.constantTimeEquals(expectedIncoming, peerTag)
         } ?: false
     } catch (e: Exception) {
         Log.w(TAG, "WFD token handshake failed: ${e.message}")
@@ -277,10 +315,21 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
         out.flush()
     }
 
-    private suspend fun receiveChunks(socket: Socket, onChunk: suspend (EvidenceChunkEntity) -> Unit) {
+    /** `internal`, same reasoning as [handshakeToken] — a real socket-stream parser, directly
+     *  unit-testable over a loopback pair with no `WifiP2pManager`/Context dependency. */
+    internal suspend fun receiveChunks(socket: Socket, onChunk: suspend (EvidenceChunkEntity) -> Unit) {
         val din = DataInputStream(socket.getInputStream())
+        // `return`, not `break` — there's nothing after this loop either way, and a function-level
+        // return (rather than two `break`s exiting the same infinite loop) reads more directly as
+        // "the transfer ends here" for both exit conditions: normal EOF and a rejected length prefix.
         while (true) {
-            val len = try { din.readInt() } catch (e: EOFException) { break }
+            val len = try { din.readInt() } catch (e: EOFException) { return }
+            // Bounded before allocating — same reasoning as handshakeToken's peerLen check: this
+            // length prefix comes straight off the socket, unauthenticated (the token handshake
+            // only ran once, before this loop started; nothing re-checks per frame). Without this,
+            // any peer that passed the handshake — or, before this pass, any peer at all — could
+            // send one hostile 4-byte length prefix and force an unbounded allocation.
+            if (len !in 1..WifiDirectTuning.MAX_CHUNK_FRAME_BYTES) return
             val bytes = ByteArray(len)
             din.readFully(bytes)
             val frame = MeshFrameCodec.decode(bytes)

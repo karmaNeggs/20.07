@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.3.0] — groups are ephemeral by design, sender identity, and a security/efficiency pass
+
+The framing shift behind this release: groups in 20.07 are ad hoc and short-lived (2-3 days
+typical, 6 months an absolute ceiling), not standing chat rooms — which changes which problems are
+worth solving. Bumps `MeshFrameCodec.VERSION` 1→2 and `AppDatabase.version` to 6 (destructive
+migration, as with every schema bump so far — see Known Limitations). 203 tests, up from 112, still
+detekt-clean; `assembleRelease` (R8-minified) also verified green.
+
+**Ephemeral group expiry — the headline feature:**
+- A group's lifetime (12h/48h-default/7d/30d/6mo, chosen at creation) is baked directly into the
+  shareable join code's binary format, not tracked per-phone — so every member, whoever created it
+  and whoever joined later, agrees on the exact same expiry moment.
+- Every member's own app dismantles an expired group on its own — key, messages, evidence, all of
+  it — checked on a periodic sweep and once on every app startup.
+- Home screen shows a countdown per group, flagged as expiring soon within the last 2 hours.
+
+**Sender identity (Ed25519), additive to the existing group-key authentication:**
+- Every member gets a per-(device, group) — not per-device — Ed25519 keypair, so a device can't be
+  linked across the different groups it's in.
+- A signature under this key rides alongside the existing group HMAC on SOS, evidence headers,
+  nicknames, presence heartbeats, and (inside the encrypted envelope, so it's invisible to blind
+  relays) position updates — telling members apart, not just confirming "someone with the group key
+  sent this."
+- Trust is pin-on-first-sight, not a certificate authority: a receiver pins whichever public key it
+  sees first from a given sender in a given group, and hard-rejects any later, different key for
+  that same sender — matching this app's flat, no-owner group model. Full reasoning in
+  `docs/DECISIONS.md`, decision 7.
+
+**Security fixes:**
+- A hostile `totalChunks` value in an evidence header or manifest could force a large allocation on
+  every device that relayed it, repeatedly, until the 48h prune — now capped and rejected at decode.
+- The SOS auth tag only covered the first 255 bytes of a message (a length-prefix mismatch between
+  the MAC input and the wire encoding) — a relay could rewrite everything past that point
+  undetected. Fixed, and the two can no longer independently drift again (shared writer functions).
+- A captured presence heartbeat could be replayed indefinitely and still verify as authentic —
+  added a skew check on the timestamp before any key/MAC work happens.
+- A stale SOS re-ingested after its short-lived dedup cache (not the content itself) expired could
+  re-fire the high-priority alarm notification for hours-old content.
+- Unbounded WiFi Direct accelerator socket reads driven by an attacker-controlled length prefix.
+
+**Efficiency / correctness:**
+- Catalog-sync filter now sizes itself to the group's actual catalog instead of a fixed worst-case,
+  with an MTU-aware fallback so a filter that still doesn't fit a low-MTU connection can't silently
+  drop delivery.
+- Fixed a cross-peer GATT notification race on the server side (API 33+ path takes the value as a
+  parameter instead of shared mutable state).
+- Hop-tracking now tracks which peer "owns" the current best value, so a route that's genuinely
+  gotten worse is reflected instead of frozen at its best-ever reading forever.
+- A per-connection cap on catalog-item pushes, so one connection with an unusually large deficit
+  can't starve the rotation through other peers — anything left over is retried next reconnect.
+
+**Structure:**
+- Verbose inline "why" comments explaining past live-testing failures extracted into
+  `docs/DECISIONS.md`, leaving one-line pointers in the code.
+- `RelayResponder`'s 165-line frame dispatcher split into one small handler per frame type.
+- WiFi Direct files moved into their own `transport/wifidirect/` package.
+- `detekt-baseline.xml`'s ad hoc per-function `@Suppress` annotations mostly replaced by two
+  targeted rule-config changes (`detekt.yml`).
+
 ## [0.2.1] — loosened the radar's GPS-accuracy gate
 
 Live-confirmed trigger for the "peer shows a hop count but never gets a radar dot" gap from

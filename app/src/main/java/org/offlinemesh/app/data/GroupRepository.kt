@@ -1,6 +1,7 @@
 package org.offlinemesh.app.data
 
 import android.content.Context
+import org.offlinemesh.app.crypto.SenderIdentity
 import java.util.UUID
 
 class GroupRepository(context: Context) {
@@ -18,6 +19,7 @@ class GroupRepository(context: Context) {
     private val evidenceDao = db.evidenceDao()
     private val evidenceChunkDao = db.evidenceChunkDao()
     private val nicknameDao = db.nicknameDao()
+    val peerKeyDao = db.peerKeyDao()
 
     /** deviceId identifies this phone within groups; random per-install, never tied to real identity. */
     val deviceId: String by lazy {
@@ -27,36 +29,77 @@ class GroupRepository(context: Context) {
         }
     }
 
-    /** Creates a brand-new group with a random id+key, and returns the shareable code for it. */
-    suspend fun createGroup(name: String): Pair<GroupEntity, String> {
-        val parsed = JoinCode.generate(name)
+    /** Creates a brand-new group with a random id+key, expiring at [lifetimeMillis] from now
+     *  (coerced to [JoinCode.MAX_LIFETIME_MILLIS] — see that constant's doc). Returns the
+     *  shareable code for it. */
+    suspend fun createGroup(
+        name: String,
+        lifetimeMillis: Long = JoinCode.DEFAULT_LIFETIME_MILLIS,
+    ): Pair<GroupEntity, String> {
+        val parsed = JoinCode.generate(name, lifetimeMillis)
         keyStore.putKey(parsed.groupId, parsed.key)
-        val group = GroupEntity(id = parsed.groupId, name = name, createdAt = System.currentTimeMillis())
+        ensureSenderIdentity(parsed.groupId)
+        val group = GroupEntity(
+            id = parsed.groupId, name = name, createdAt = System.currentTimeMillis(),
+            expiresAt = parsed.expiresAtEpochSec * 1000
+        )
         groupDao.insert(group)
         return group to JoinCode.encode(parsed)
     }
 
-    /** Joins a group from someone else's shared code (or a mesh2007://join?c=... link). Null if malformed. */
+    /** Joins a group from someone else's shared code (or a mesh2007://join?c=... link). Null if
+     *  malformed OR already expired ([JoinCode.decode] rejects both). The joiner's local
+     *  `expiresAt` is taken directly from the code — see [JoinCode]'s class doc for why this must
+     *  be the same absolute moment for every member, not independently computed per-join. */
     suspend fun joinGroup(rawCode: String): GroupEntity? {
         val parsed = JoinCode.decode(JoinCode.extractCode(rawCode)) ?: return null
         keyStore.putKey(parsed.groupId, parsed.key)
-        val group = GroupEntity(id = parsed.groupId, name = parsed.name, createdAt = System.currentTimeMillis())
+        ensureSenderIdentity(parsed.groupId)
+        val group = GroupEntity(
+            id = parsed.groupId, name = parsed.name, createdAt = System.currentTimeMillis(),
+            expiresAt = parsed.expiresAtEpochSec * 1000
+        )
         groupDao.insert(group)
         return group
     }
 
     fun getGroupKey(groupId: String): ByteArray? = keyStore.getKey(groupId)
 
+    /** Generates this device's Ed25519 sender-identity keypair for [groupId] — once. A join code
+     *  can be re-scanned for a group already joined (`groupDao.insert` uses `REPLACE`), and
+     *  regenerating the keypair on every call would silently change what every peer who already
+     *  pinned our old public key (see [PeerKeyEntity]) considers "our" identity — indistinguishable
+     *  from impersonation on their end, since [org.offlinemesh.app.ble.RelayResponder]'s
+     *  pin-on-first-sight verification hard-rejects a changed key by design. Only ever generates
+     *  fresh when nothing is stored yet for this exact groupId. */
+    private fun ensureSenderIdentity(groupId: String) {
+        if (keyStore.getSigningKeyPair(groupId) == null) {
+            keyStore.putSigningKeyPair(groupId, SenderIdentity.generateKeyPair())
+        }
+    }
+
+    /** This device's own per-group Ed25519 keypair (see [SenderIdentity]'s class doc for why
+     *  per-group, not per-device) — used to sign authored content ([org.offlinemesh.app.ble.
+     *  RelayEngine]'s `createSos`/`createEvidence`/`setNickname`) and to attach our public key to
+     *  the outgoing presence heartbeat ([org.offlinemesh.app.ble.RelayResponder.
+     *  framesToPushOnConnect]). Null only if [groupId] was never actually joined/created through
+     *  this repository (every real join/create path establishes one via [ensureSenderIdentity]). */
+    fun getSenderKeyPair(groupId: String): SenderIdentity.Ed25519KeyPair? = keyStore.getSigningKeyPair(groupId)
+
     /**
      * Reconstructs the exact same invite code any member could show — there's no "owner" role
      * in this design. Whoever joined has the full (id, key, name) stored locally already, so
      * every member can invite new people just as well as whoever originally created it. This is
      * what lets a group outlive its creator deleting their own copy or going offline for good.
+     *
+     * Passes the group's ALREADY-STORED `expiresAt` through unchanged — never recomputes a fresh
+     * one — so a code reconstructed partway through a group's life still carries the exact same
+     * expiry every existing member already agreed on, not a new one measured from this moment.
      */
     suspend fun getShareCode(groupId: String): String? {
         val group = groupDao.getGroup(groupId) ?: return null
         val key = keyStore.getKey(groupId) ?: return null
-        return JoinCode.encode(JoinCode.Parsed(groupId, key, group.name))
+        return JoinCode.encode(JoinCode.Parsed(groupId, key, group.name, expiresAtEpochSec = group.expiresAt / 1000))
     }
 
     /** Actually deletes the group and everything relayed for it — not just hides it. */
@@ -67,7 +110,36 @@ class GroupRepository(context: Context) {
         evidenceDao.deleteForGroup(groupId)
         sosDao.deleteForGroup(groupId)
         nicknameDao.deleteForGroup(groupId)
+        peerKeyDao.deleteForGroup(groupId)
         groupDao.delete(groupId)
         keyStore.removeKey(groupId)
+        keyStore.removeSigningKeyPair(groupId)
+    }
+
+    /** Dismantles every group whose baked-in expiry has passed — the actual enforcement behind
+     *  the "groups are ephemeral" promise (see [JoinCode]'s class doc). Called periodically from
+     *  [org.offlinemesh.app.ble.MeshService.startPruning] and once on service startup, so a phone
+     *  that was off past a group's expiry cleans it up on next launch rather than waiting for the
+     *  next scheduled sweep. Reuses [dismantleGroup] for the actual deletion — evidence/chunks/
+     *  SOS/nicknames/key, all of it, not just the group row. */
+    suspend fun expireGroups(now: Long = System.currentTimeMillis()) {
+        for (groupId in groupDao.expiredGroupIds(now)) {
+            dismantleGroup(groupId)
+        }
+    }
+
+    /** Deletes any stored group key with no matching row left in the `groups` table — a real, if
+     *  narrow, leak: `EncryptedSharedPreferences` (where keys live, see [GroupKeyStore]) is a
+     *  separate store from Room, so a destructive schema migration
+     *  (`AppDatabase`'s `fallbackToDestructiveMigration`, used for every schema bump so far) wipes
+     *  every group row but leaves old keys behind with nothing left to use them. Called once on
+     *  [org.offlinemesh.app.ble.MeshService] startup — cheap (one Room query, one prefs read) and
+     *  not worth a periodic re-check since new orphans can only appear via a migration, which only
+     *  happens across an app update, i.e. already a fresh process start. */
+    suspend fun sweepOrphanKeys() {
+        val liveIds = groupDao.allGroupIds().toSet()
+        for (groupId in keyStore.allGroupIds()) {
+            if (groupId !in liveIds) keyStore.removeKey(groupId)
+        }
     }
 }

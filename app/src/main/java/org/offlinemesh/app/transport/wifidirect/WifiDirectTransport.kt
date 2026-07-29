@@ -1,4 +1,4 @@
-package org.offlinemesh.app.ble
+package org.offlinemesh.app.transport.wifidirect
 
 import org.offlinemesh.app.data.EvidenceChunkEntity
 

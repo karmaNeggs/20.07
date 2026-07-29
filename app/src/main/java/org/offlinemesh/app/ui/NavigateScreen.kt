@@ -1,7 +1,6 @@
 package org.offlinemesh.app.ui
 
 import android.location.Location
-import android.util.Log
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -12,7 +11,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.delay
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.ble.PositionTracker
@@ -40,23 +38,29 @@ private data class PlacedPeer(
     val ageSeconds: Float,
 )
 
-@Suppress("CyclomaticComplexMethod", "LongMethod", "FunctionNaming", "TooGenericExceptionCaught")
+@Suppress("CyclomaticComplexMethod", "LongMethod")
 // a screen-level composable's branches are UI states (no Bluetooth / no GPS fix / low compass
 // confidence / empty peer list / active SOS), not tangled logic — matches MainActivity.onCreate's
 // identical call on LongMethod for the same reason: comment-dense, explanatory branching here is
 // a deliberate choice, not something to fragment across more functions just to satisfy a
-// line-count-style metric. TooGenericExceptionCaught: the refresh loop's catch is deliberately
-// broad — anything is better caught+logged than left to silently kill the loop.
-// FunctionNaming: PascalCase is the established Compose convention this whole app uses.
+// line-count-style metric.
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun NavigateScreen(groupId: String, meshService: MeshService?) {
-    var myLocation by remember { mutableStateOf<Location?>(null) }
-    var positions by remember { mutableStateOf<Map<String, PositionTracker.Record>>(emptyMap()) }
-    var heading by remember { mutableStateOf(0f) }
-    var compassLowAccuracy by remember { mutableStateOf(false) }
-    var groupPresenceHop by remember { mutableStateOf(MeshProtocol.UNKNOWN_HOP) }
-    var sosHop by remember { mutableStateOf(MeshProtocol.UNKNOWN_HOP) }
+    // Single shared tick (see MeshService.RadarTick's doc) replaces this screen's own polling loop.
+    val radarTick = rememberRadarTick(meshService)
+    val myLocation = radarTick.location
+    val heading = radarTick.headingDegrees
+    val compassLowAccuracy = radarTick.compassLowAccuracy
+    val positions = remember(radarTick, groupId, meshService) {
+        meshService?.positionTracker?.forGroup(groupId) ?: emptyMap()
+    }
+    val groupPresenceHop = remember(radarTick, groupId, meshService) {
+        meshService?.hopToGroupPresence(groupId) ?: MeshProtocol.UNKNOWN_HOP
+    }
+    val sosHop = remember(radarTick, groupId, meshService) {
+        meshService?.hopTracker?.bestActiveSosHop(groupId) ?: MeshProtocol.UNKNOWN_HOP
+    }
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
     val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
@@ -79,28 +83,7 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
     // too rough — placePeerOnRadar's own honesty gate, reused here rather than duplicated).
     val sosList by db.sosDao().observeForGroup(groupId).collectAsState(initial = emptyList())
 
-    LaunchedEffect(groupId, meshService) {
-        while (true) {
-            // See HomeScreen's identical wrap — an uncaught exception here would silently kill
-            // this loop forever, not just skip one tick.
-            try {
-                val svc = meshService
-                if (svc != null) {
-                    myLocation = svc.locationTracker.location.value
-                    positions = svc.positionTracker.forGroup(groupId)
-                    heading = svc.compassTracker.headingDegrees.value
-                    compassLowAccuracy = svc.compassTracker.lowAccuracy.value
-                    groupPresenceHop = svc.hopToGroupPresence(groupId)
-                    sosHop = svc.hopTracker.bestActiveSosHop(groupId)
-                }
-            } catch (e: Exception) {
-                Log.w("NavigateScreen", "radar refresh tick failed: ${e.message}")
-            }
-            delay(1000)
-        }
-    }
-
-    val placedPeers = remember(myLocation, positions, heading) {
+    val placedPeers = remember(radarTick, positions, heading) {
         val me = myLocation ?: return@remember emptyList()
         positions.mapNotNull { (senderId, record) ->
             placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)

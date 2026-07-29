@@ -42,6 +42,12 @@ A few decisions worth calling out, because they're deliberate rather than defaul
 
 See Security model below for exactly what this app's own design does *not* protect against.
 
+See [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) for a short architecture writeup — not a feature
+tour, just the handful of pieces (radio-touch discipline, GATT operation queueing, the Bloom-filter
+catalog sync, and a few others) that took real engineering to get right, and an honest note on
+which parts are borrowed techniques rather than original ones. [`docs/DECISIONS.md`](docs/DECISIONS.md)
+records the specific designs this project tried and walked back after live-device testing, and why.
+
 ## What it does (3 features, on purpose — nothing else)
 
 1. **Navigate** — a forward-up radar: your group members show up as dots at their real bearing
@@ -81,6 +87,15 @@ exact code is in the exact same group — no two people separately typing "the s
 hoping it matches. The code gets shared "over whatever channel you already trust" — in person,
 an existing chat app, read aloud, or scanned as a QR code — same trust model either way, just a
 more reliable payload than a typed passphrase.
+
+**Groups are ephemeral by design and expiry is baked into the code itself.** 20.07 is built for
+ad hoc coordination, not standing chat rooms — a typical group lives 2-3 days, and 6 months is a
+hard ceiling (picked at creation from a lifetime menu: 12h/48h-default/7d/30d/6mo). The expiry
+timestamp is encoded directly into the shareable join code, not tracked separately per phone, so
+every member — whoever created the group, whoever joined an hour later — agrees on the exact same
+expiry moment. Once it passes, every member's own app dismantles the group on its own: the key,
+the messages, the evidence, all of it, gone, with nothing to "clean up" on a server because there
+isn't one.
 
 **Discovery uses rotating, anonymous beacon IDs.** Instead of broadcasting anything that
 identifies your group, your phone advertises `HMAC(group_key, current_60s_time_window)` — a
@@ -180,6 +195,14 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 - **Authenticity**: SOS, evidence headers, nicknames, and presence heartbeats carry a truncated
   **HMAC-SHA256** (128-bit) tag under the group key. A phone without the key can relay these but
   cannot forge one a real member will act on — verified with a constant-time comparison.
+- **Per-sender authenticity, additive to the above**: every member also has their own per-group
+  Ed25519 keypair (not a per-device identity — a device gets a fresh keypair for each group it
+  joins, so it can't be linked across groups). A signature under this key rides alongside the
+  group HMAC on every frame, so a receiver can tell one group member from another — not just "some
+  member sent this," the way the shared HMAC alone can. Trust is pin-on-first-sight (the first
+  public key seen for a sender is trusted and remembered; a later, different key for that same
+  sender is rejected outright) rather than a certificate authority, matching this app's flat,
+  no-owner group model. See `docs/DECISIONS.md`, decision 7, for the full reasoning.
 - **Key storage**: group keys live only in `EncryptedSharedPreferences`, backed by the Android
   Keystore (hardware-backed on most devices) — never in the app's regular (Room) database.
 - **Key exchange is entirely out-of-band.** There is no server, account, or key-exchange
@@ -201,10 +224,13 @@ where it matters:
   in the clear. An adversary who can capture mesh traffic (even without any group's key) can
   correlate which packets belong to the same group and build a traffic-analysis picture, even
   though they can't read the content.
-- **No forward secrecy, no membership revocation.** The group key is a single static secret for
-  the group's lifetime. Anyone who ever had it can decrypt all past and future traffic for that
-  group from a mesh capture. There's no way to remove a member's access short of dismantling the
-  group and recreating it with an entirely new key/code for everyone remaining.
+- **No forward secrecy, no membership revocation — mitigated, not solved, by groups being
+  short-lived by design.** The group key is a single static secret for the group's lifetime, and
+  there's still no way to remove one member's access short of dismantling the group and recreating
+  it with an entirely new key/code for everyone remaining. What's changed: groups now carry a
+  built-in expiry (2-3 days is the typical/intended use, 6 months is the hard ceiling — see "How it
+  works" above), enforced by every member's own app, not a social convention — so the blast radius
+  of a static key is bounded to however long that particular group actually lived, not forever.
 - **The decoy/disguised launcher icon is a UI-level disguise only, not a hidden-app one.** It
   changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, see below),
   not the installed package name, requested permissions, or its presence in Android
@@ -285,14 +311,13 @@ where it matters:
   peer instead of silence) is scoped but not yet built.
 - **`GattOperationQueue`'s per-peer write lock isn't guaranteed to release if a connection hangs
   between `CONNECTED` and `DISCONNECTED`.** Once a connection gets past the initial `CONNECTED`
-  callback, `MeshGattClient`'s stuck-attempt timeout (the Pass 16 fix) no longer watches it — if
-  the underlying radio then goes silent without ever firing `DISCONNECTED` (the same class of
-  undocumented Android BLE failure Pass 16 fixed for the *pre-connect* case), that peer's queue
-  entries leak and it can never be reconnected to. Real but narrow; a proper fix needs a second,
-  later connection-lifecycle timeout — deliberately not attempted blind here given how much live
-  2-phone testing this exact GATT lifecycle code has already needed to get right (see CHANGELOG
-  Pass 16).
-- **Automated test coverage is logic-only.** 112 pure-JVM/Robolectric unit tests cover crypto,
+  callback, `MeshGattClient`'s stuck-attempt timeout (see `docs/DECISIONS.md`, decision 5) no
+  longer watches it — if the underlying radio then goes silent without ever firing `DISCONNECTED`
+  (the same class of undocumented Android BLE failure decision 5 fixed for the *pre-connect* case),
+  that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
+  needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
+  how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
+- **Automated test coverage is logic-only.** 203 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, and the catalog-sync round trip
   (`./gradlew test`). There are no automated UI tests and no CI pipeline — both are manual/planned,
   not built.
@@ -317,7 +342,7 @@ compiler or an emulator).
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.2.1-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.3.0-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
