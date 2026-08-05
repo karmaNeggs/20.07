@@ -107,20 +107,25 @@ old COVID exposure-notification apps) use for rotating device identifiers.
 **Every phone relays for every group, whether or not it's a member.** Encrypted content is
 opaque bytes — a phone carrying data for a group it doesn't belong to can't read it, only pass
 it along. This means propagation speed depends on the whole local population of app users, not
-just your handful of group members: strangers' phones act as blind couriers. Each phone also
-keeps a "here's the diff" bitset in memory before pushing any large item to a peer, so once
-data has spread through an area, later contacts exchange a few hundred bytes of bookkeeping
-instead of resending anything already delivered — this is what keeps bigger files (evidence
-photos) viable instead of collapsing into redundant retransmission.
+just your handful of group members: strangers' phones act as blind couriers.
 
-**A passing phone can carry content between two members who've drifted apart.** Reconnecting to a
-peer you've already fully synced with normally waits out a cooldown (~45s), to avoid wasting
-limited concurrent-connection slots re-visiting someone with nothing new to say. That cooldown is
-skipped for one specific peer the moment your device's own holdings change since you last synced
-with *them* — so a phone that syncs with member A (nothing new yet), then meets member B and
-picks up something new, doesn't sit out the full cooldown before getting back to A with it. This
-is what makes "someone walks between two separated group members" actually work as a relay path,
-not just a lucky timing coincidence.
+**Connections stay open, and new content reaches every other open link immediately.** Earlier
+versions connected to a peer just long enough to exchange a "here's the diff" bitset and sync up,
+then disconnected — content only ever moved at the moment two phones happened to connect, which
+got slower the more crowded the area got. Links now stay open (minutes, not seconds) for as long
+as they're useful, held against real signal-diversity rather than whoever connected first. The
+moment something new exists — you send an SOS, one relays to you — it floods immediately across
+every other link currently open, no reconnect required. This is also what makes "a passing phone
+carries content between two separated members" actually work: if your phone is briefly connected
+to both of them at once, content from one reaches the other the instant it arrives. The Bloom-
+filter diff-bitset exchange still happens too, once, right when a link first opens — that's what
+catches a newly-connected peer up on everything that existed *before* the link opened, so later
+contacts exchange a few hundred bytes of bookkeeping instead of resending anything already
+delivered.
+This immediate-forward path currently covers SOS only (position and presence instead refresh every
+15-30s on every open link, so a radar dot or hop count never goes stale for a link's whole
+lifetime; evidence headers and nicknames still move only via the one-shot connect-time sync,
+a known, smaller gap — see Known Limitations).
 
 **The radar is forward-up: GPS for bearing/distance, compass for rotation.** Each phone shares
 its current GPS fix over the mesh (short hop range, latest-fix-wins, kept in memory only — see
@@ -262,10 +267,15 @@ where it matters:
   on real devices, not in a compiler.
 - **Two phones minimum to see anything work.** Discovery, navigation, and relay need at least
   two devices in the same group, physically near each other.
-- **Only tested at small scale so far (2-3 physical phones).** The app's actual target — roughly
-  10 people in a ~100m² area — has not been validated live. A defensive cap on simultaneous
-  inbound BLE connections exists (`MeshGattServer`) but its enforcement is currently **disabled**
-  (logging only) pending real dense-crowd data on whether it's needed and safe.
+- **Only hardware-tested at small scale so far (2-3 physical phones, four separate live rounds).**
+  The actual operating envelope is a small group (3-8 people) whose *carrier medium* — the total
+  local population of app users acting as blind relays, per "Every phone relays for every group"
+  above — can vary from a couple of people to hundreds (`PLAN-v2.md` §5.5). The high end of that
+  is validated only in a JVM discrete-event simulator driving the real connection/relay/dedup
+  classes from D=3 to D=400 (`app/src/test/.../sim/`), not on physical hardware — no crowd-scale
+  live test has been run. A defensive cap on simultaneous inbound BLE connections exists
+  (`MeshGattServer`) but its enforcement is currently **disabled** (logging only) pending real
+  dense-crowd data on whether it's needed and safe.
 - **Large files take real time.** A short low-res photo should propagate through a populated
   area in minutes. Anything larger depends heavily on how continuously populated the physical
   area is between sender and destination — a gap in coverage is a gap no protocol can bridge.
@@ -296,12 +306,18 @@ where it matters:
   (`BleCapabilities.kt`/`TrickleTimer.kt`, extends beacon range on hardware that supports it) is
   capability-gated and purely additive — on unsupported hardware, or if anything about it
   misbehaves, it's a silent no-op that can't affect the proven legacy discovery path.
-- **The Bloom-filter catalog sync (`CatalogFilter.kt`, replaced the old per-peer
-  `PeerDeliveryTracker`) is now live-2-phone-tested for direct delivery** (message/SOS content
-  confirmed arriving correctly between two directly-connected phones), including a real,
-  since-fixed gap where a third phone passing between two separated members wasn't reliably
-  relaying content between them (see "How it works" above). **Still not validated at crowd
-  scale** — only ever run with a handful of physical phones at once.
+- **Delivery is now a forwarding protocol, not just a sync protocol — hardware-confirmed across
+  four live rounds (2026-08-05), one real gap still open.** SOS floods immediately across every
+  open link the moment it's created or received, and links now stay open for minutes instead of
+  seconds (`docs/DECISIONS.md` decisions 18-19) — closing the "a message between two already-
+  connected phones sat delayed" and "the radar went stale for a link's whole life" bugs the first
+  live test found (decision 20), a duplicate-connection radio-waste bug the second round found
+  (decision 21), and a Bluetooth off→on recovery gap the third/fourth rounds found (decision 22).
+  **Not yet done: a sustained multi-hour 3-phone session** — all four rounds so far were short
+  (tens of minutes) ad hoc tests, and PLAN-v2.md's P3 phase explicitly calls for a longer one
+  before this is fully trusted. Evidence headers and nicknames still move only via the one-shot
+  connect-time sync (the Bloom-filter catalog exchange), the same gap SOS itself had before this
+  round of fixes — smaller blast radius, deliberately not yet closed.
 - **A peer with only a low-accuracy GPS fix doesn't show up on the radar at all, with no
   on-screen explanation why.** `placePeerOnRadar` deliberately refuses to plot a dot when your
   accuracy plus theirs exceeds ~250m combined, rather than show a confidently-wrong position —
@@ -323,10 +339,11 @@ where it matters:
   that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
-- **Automated test coverage is logic-only.** 203 pure-JVM/Robolectric unit tests cover crypto,
-  wire-format encode/decode, connection/dedup state machines, and the catalog-sync round trip
-  (`./gradlew test`). There are no automated UI tests and no CI pipeline — both are manual/planned,
-  not built.
+- **Automated test coverage is logic-only.** 304 pure-JVM/Robolectric unit tests cover crypto,
+  wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
+  of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
+  relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI
+  pipeline — both are manual/planned, not built.
 - **The WiFi Direct evidence accelerator is experimental, opt-in (default OFF), and
   compile-verified only — the least-trusted thing in this codebase.** Turned on from the Home
   screen (own toggle, separate from the disguise/power-saver tiles, with its own permission
@@ -345,10 +362,22 @@ See [`TESTING.md`](TESTING.md) for how the test suite is organized, and
 project have actually been found by (BLE radio behavior at this level doesn't show up in a
 compiler or an emulator).
 
+## Roadmap
+
+Full plan and reasoning in [`PLAN-v2.md`](PLAN-v2.md). Shipped so far: the crowd-scale simulator,
+peer identity keyed on a stable id instead of the rotating BLE address, immediate SOS flood-
+forwarding, and persistent connections (see Known Limitations above for hardware-confirmed status).
+**Next, planned but not started: a connectionless broadcast tier** using BLE Extended Advertising —
+presence/position/SOS/hop-gradient reaching every phone in range at once with no connection at all,
+governed by a Trickle-style (RFC 6206) suppression timer so it doesn't spam a crowd once redundancy
+is established. Deliberately not started on the device yet — the persistent-connections work above
+needs its sustained multi-hour hardware session first, so a new failure mode isn't stacked on an
+unconfirmed one.
+
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.3.0-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.6.3-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
