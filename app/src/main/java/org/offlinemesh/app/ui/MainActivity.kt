@@ -112,6 +112,30 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /** One-time, best-effort nudge for `ACCESS_BACKGROUND_LOCATION` — never part of
+     *  [requiredPermissions] (a "no" here never blocks using the app; positions just go stale
+     *  faster with the screen off — see the manifest's comment on this permission for why it's
+     *  needed at all). Must be requested in its OWN [launcher], separately from
+     *  [ACCESS_FINE_LOCATION][android.Manifest.permission.ACCESS_FINE_LOCATION] — Android
+     *  silently ignores a background-location request bundled into the same call as any other
+     *  permission, and it can't be granted before foreground location already is, which is why
+     *  this fires from `LaunchedEffect(allGranted)` (after [requiredPermissions] are already
+     *  satisfied), not the initial launch request. No-op below API 29, where this permission
+     *  doesn't exist — [ACCESS_FINE_LOCATION][android.Manifest.permission.ACCESS_FINE_LOCATION]
+     *  alone already covered background access on those versions. */
+    private fun maybeRequestBackgroundLocation(
+        prefs: android.content.SharedPreferences,
+        launcher: androidx.activity.result.ActivityResultLauncher<String>,
+    ) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val alreadyHandled = prefs.getBoolean("asked_background_location", false) ||
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        if (alreadyHandled) return
+        prefs.edit().putBoolean("asked_background_location", true).apply()
+        launcher.launch(android.Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+    }
+
     /** Status/navigation bar color is a separate system-drawn layer the manifest's Activity theme
      *  doesn't fully pin down on every OEM skin — set explicitly to the app's current background
      *  so nothing ever shows the wrong-theme default (was surfacing as a stray white bar on some
@@ -164,6 +188,11 @@ class MainActivity : ComponentActivity() {
             prefs.edit().putBoolean("asked_once", true).apply()
             resumeTick++
         }
+        // Separate launcher, separate permission — see maybeRequestBackgroundLocation's doc for
+        // why ACCESS_BACKGROUND_LOCATION can never share a request with the one above. The result
+        // itself needs no handling either way: a "no" just means positions go stale faster with
+        // the screen off, nothing else in the app branches on this.
+        val backgroundLocationLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
 
         setContent {
             AppTheme {
@@ -195,7 +224,10 @@ class MainActivity : ComponentActivity() {
                         if (!allGranted && !askedBefore) launcher.launch(requiredPermissions)
                     }
                     LaunchedEffect(allGranted) {
-                        if (allGranted) maybeRequestBatteryOptimizationExemption(prefs)
+                        if (allGranted) {
+                            maybeRequestBatteryOptimizationExemption(prefs)
+                            maybeRequestBackgroundLocation(prefs, backgroundLocationLauncher)
+                        }
                     }
 
                     if (allGranted) {

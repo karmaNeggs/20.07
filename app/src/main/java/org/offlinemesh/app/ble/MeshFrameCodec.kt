@@ -66,6 +66,12 @@ object MeshFrameCodec {
      *  arbitrarily large message from a wire frame with no size hint anyone actually chose. */
     const val MAX_SOS_MESSAGE_BYTES = 2000
 
+    /** Largest value a single unsigned wire byte can carry — hop/ttl fields coerce into this. */
+    private const val MAX_UNSIGNED_BYTE = 255
+
+    // v3: presence gained an envelope hop too, for the same blind-relay reason.
+    // v2 -> v3: the position frame's hop moved from inside the encrypted body into the cleartext
+    // envelope, so a non-member can blind-relay positions (see Frame.PositionSealed's doc).
     // v1 -> v2 (0.3.0): every frame type gained a field (Sos/EvidMeta/Nickname/Presence's
     // additive `signature`, Presence's `senderPublicKey`, Position's inner signed body) — bumped so
     // a v1 build and a v2 build talking to each other get a clean, explicit "different version,
@@ -74,15 +80,26 @@ object MeshFrameCodec {
     // Not private — a test that needs to hand-construct a raw frame (to exercise a malformed field
     // encode() itself would never produce, e.g. a hostile totalChunks) must reference this directly
     // rather than duplicate the literal, which is exactly what silently went stale across this bump.
-    const val VERSION: Int = 2
+    const val VERSION: Int = 3
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
         data class Sos(val sos: SosEntity) : Frame()
         data class EvidMeta(val meta: EvidenceEntity) : Frame()
         data class EvidChunk(val chunk: EvidenceChunkEntity) : Frame()
-        /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition]. */
-        data class PositionSealed(val groupId: String, val sealed: ByteArray) : Frame()
+        /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
+         *
+         *  [hop] lives out here in the cleartext envelope, NOT inside [sealed], specifically so a
+         *  phone that holds no key for [groupId] can still carry this frame onward and increment
+         *  its hop — the same store-and-forward blind relaying SOS/evidence already get. Without
+         *  that, positions could only ever travel member-to-member: a non-member relay dropped them
+         *  outright, so a member two hops away behind a stranger's phone never appeared on the
+         *  radar at all (confirmed live — every position ever received was hop=0). The sealed body
+         *  still carries its own copy of the hop for the signature to cover; receivers use THIS
+         *  one, since it reflects the path actually travelled. Exposing hop depth in cleartext
+         *  reveals topology distance and nothing about who or where — the same tradeoff
+         *  `SosEntity.ttl` already makes. */
+        data class PositionSealed(val groupId: String, val hop: Int, val sealed: ByteArray) : Frame()
         data class Manifest(val evidenceId: String, val totalChunks: Int, val peerHave: Set<Int>) : Frame()
         data class Nickname(val nickname: NicknameEntity) : Frame()
         /** Not stored, not relayed — a direct-neighbor heartbeat proving group co-membership over the
@@ -98,6 +115,13 @@ object MeshFrameCodec {
             val mac: ByteArray?,
             val senderPublicKey: ByteArray? = null,
             val signature: ByteArray? = null,
+            /** Hops travelled, in the cleartext envelope for exactly the same reason
+             *  [PositionSealed.hop] is: a phone holding no key for [groupId] can neither verify
+             *  [mac] nor read anything here, but it CAN still carry this onward and advance the hop
+             *  (see [OpaqueFrameRelay]). Without it, a member with no GPS fix — who therefore pushes
+             *  no position for the position path to piggyback on — was invisible past a non-member
+             *  relay rather than merely distant. */
+            val hop: Int = 0,
         ) : Frame()
         /** One filter per connection, covering ALL of the sender's current relayable sos/evidence-
          *  header/nickname holdings across every group — see [CatalogFilter] and
@@ -289,8 +313,17 @@ object MeshFrameCodec {
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
         val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
         val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, positionNonce(senderId, timestampSec))
-        return frame(FRAME_POSITION) { d -> d.writeStr(groupId); d.writeStr16Bytes(sealed) }
+        return reframePositionForRelay(groupId, hop, sealed)
     }
+
+    /** Re-frames an already-sealed position for another hop **without needing the group key** —
+     *  the whole point of keeping hop in the envelope (see [Frame.PositionSealed]). A blind relay
+     *  moves the exact same opaque ciphertext along, only the hop byte differs, so it never learns
+     *  a member's position while still carrying it. */
+    fun reframePositionForRelay(groupId: String, hop: Int, sealed: ByteArray): ByteArray =
+        frame(FRAME_POSITION) { d ->
+            d.writeStr(groupId); d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
+        }
 
     fun encodeNickname(n: NicknameEntity): ByteArray = frame(FRAME_NICKNAME) { d ->
         d.writeStr(n.groupId); d.writeStr(n.senderId); d.writeNicknameUsername(n.username)
@@ -314,10 +347,32 @@ object MeshFrameCodec {
         val macInput = presenceMacInput(groupId, senderId, timestamp)
         val mac = CryptoUtils.authTag(key, macInput)
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, macInput) }
-        return frame(FRAME_PRESENCE) { d ->
-            d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
-            d.writeBlob(senderPublicKey); d.writeBlob(signature)
-        }
+        return encodePresenceFrame(groupId, senderId, timestamp, mac, senderPublicKey, signature, hop = 0)
+    }
+
+    /** Re-frames a received presence for another hop **without needing the group key** — the point of
+     *  keeping hop in the envelope (see [Frame.Presence.hop]). Every field is copied verbatim from
+     *  what arrived; only the hop advances, so the [Frame.Presence.mac] a real member will verify is
+     *  untouched and a relay cannot forge presence it couldn't already forge. */
+    fun reframePresenceForRelay(frame: Frame.Presence, hop: Int): ByteArray =
+        encodePresenceFrame(
+            frame.groupId, frame.senderId, frame.timestamp, frame.mac,
+            frame.senderPublicKey, frame.signature, hop
+        )
+
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    private fun encodePresenceFrame(
+        groupId: String,
+        senderId: String,
+        timestamp: Long,
+        mac: ByteArray?,
+        senderPublicKey: ByteArray?,
+        signature: ByteArray?,
+        hop: Int,
+    ): ByteArray = frame(FRAME_PRESENCE) { d ->
+        d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
+        d.writeBlob(senderPublicKey); d.writeBlob(signature)
+        d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE))
     }
 
     /** [sizeBits] is written as an unsigned short — [CatalogFilter]'s MAX_SIZE_BITS (4096)
@@ -435,8 +490,10 @@ object MeshFrameCodec {
                     Frame.EvidChunk(EvidenceChunkEntity(evidenceId, index, data))
                 }
                 FRAME_POSITION -> {
-                    val groupId = buf.readStr(); val sealed = buf.readStr16Bytes()
-                    Frame.PositionSealed(groupId, sealed)
+                    val groupId = buf.readStr()
+                    val hop = buf.get().toInt() and 0xFF
+                    val sealed = buf.readStr16Bytes()
+                    Frame.PositionSealed(groupId, hop, sealed)
                 }
                 FRAME_MANIFEST -> {
                     val evidenceId = buf.readStr(); val totalChunks = buf.int
@@ -460,7 +517,10 @@ object MeshFrameCodec {
                     val timestamp = buf.long; val mac = buf.readBlob()
                     val senderPublicKey = buf.readBlob()
                     val signature = buf.readBlob()
-                    Frame.Presence(groupId, senderId, timestamp, mac, senderPublicKey, signature)
+                    // Appended last, so a hop-less v3 presence still decodes as hop 0 rather than
+                    // throwing — the same tolerance readBlob-appended fields already rely on.
+                    val hop = if (buf.hasRemaining()) buf.get().toInt() and 0xFF else 0
+                    Frame.Presence(groupId, senderId, timestamp, mac, senderPublicKey, signature, hop)
                 }
                 FRAME_CATALOG_FILTER -> {
                     val seed = buf.long

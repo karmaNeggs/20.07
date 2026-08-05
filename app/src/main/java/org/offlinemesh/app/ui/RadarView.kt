@@ -173,10 +173,14 @@ fun placePeerOnRadar(
 // in for a tight cluster nearby but never zooms back out past this ceiling for one far outlier.
 private val ringScaleLadder = listOf(20, 40, 80, 200)
 
-// See the stale-dot fade in RadarCanvas's draw loop below.
+// See the stale-dot fade in RadarCanvas's draw loop below. END must track PositionTracker's own base
+// staleness window (180s): the fade is the only thing distinguishing "here now" from "was here up to
+// three minutes ago", and a dot that stays fully opaque until the instant it vanishes is worse than
+// no dot — someone walks toward a position that may be 250m out of date at walking pace. MIN_ALPHA
+// is lower than it was for the same reason: a nearly-expired dot should read as a ghost.
 private const val STALE_FADE_START_SECONDS = 30f
-private const val STALE_FADE_END_SECONDS = 90f
-private const val STALE_FADE_MIN_ALPHA = 0.35f
+private const val STALE_FADE_END_SECONDS = 180f
+private const val STALE_FADE_MIN_ALPHA = 0.2f
 
 private fun ringScaleFor(farthestMeters: Float): Int =
     ringScaleLadder.firstOrNull { it >= farthestMeters } ?: ringScaleLadder.last()

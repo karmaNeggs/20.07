@@ -109,13 +109,28 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     // GATT refreshes and make "nearby" flicker for a peer we can only reach one-directionally. The
     // cost is a peer that has actually left lingers as "nearby" for up to 90s — acceptable for a
     // presence hint, and far better than flicker.
-    private val staleMs = 90_000L
+    //
+    // Live-tested finding: this flat window has NO margin at all once relay is actually required.
+    // A value at hop N depends on N independent GATT reconnect cycles succeeding in a row (each
+    // hop needs its own peer's reconnectCooldownMs, ~45s, to elapse before it can even attempt to
+    // pass the update on) — a 2-hop reading's worst-case propagation time is ~45s + 45s = 90s, the
+    // ENTIRE staleness window, with zero slack for connection setup or ordinary jitter. That's
+    // exactly the reported symptom: direct (1-hop) presence was reliable, but a farthest member
+    // needing one relay hop flickered in and out rather than stabilizing. effectiveStaleMs adds one
+    // more reconnect-cooldown's worth of slack per hop beyond the first, rather than a flat window
+    // tuned only for the single-hop case.
+    // Kept deliberately equal to PositionTracker's own base window (see its maxAgeSeconds doc for the
+    // measured reason it went 90s -> 180s). If these two diverge, the group row and the radar
+    // disagree about whether anyone is there at all — the exact hop-vs-radar mismatch already
+    // reported as confusing.
+    private val staleMs = BASE_STALE_MS
 
     fun myHop(groupId: String, target: String): Int {
         val key = Key(groupId, target)
         val ts = lastUpdated[key] ?: return MeshProtocol.UNKNOWN_HOP
-        if (now() - ts > staleMs) return MeshProtocol.UNKNOWN_HOP
-        return table[key] ?: MeshProtocol.UNKNOWN_HOP
+        val hop = table[key] ?: return MeshProtocol.UNKNOWN_HOP
+        if (now() - ts > effectiveStaleMs(staleMs, hop)) return MeshProtocol.UNKNOWN_HOP
+        return hop
     }
 
     /** A direct BLE neighbor is by definition 1 hop away for whatever they're broadcasting as 0/near.
@@ -152,14 +167,29 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
         val key = Key(groupId, target)
         val current = myHop(groupId, target)
         val ownedBySameSource = lastSource[key] == sourceId
-        if (candidate < current || (ownedBySameSource && candidate != current)) {
+        val accept = candidate < current || (ownedBySameSource && candidate != current)
+        val confirmsCurrent = candidate == current
+        if (accept) {
             table[key] = candidate
             lastSource[key] = sourceId
             lastUpdated[key] = now()
             _snapshot.update { it + (key to candidate) }
-        } else {
+        } else if (confirmsCurrent) {
+            // Someone still sees the same distance, so the route is real — refresh it, and let
+            // ownership follow whoever confirmed it. That second part matters: [lastSource] is a BLE
+            // address, which rotates every ~10-15 minutes, so without transfer-on-confirm the
+            // ownership needed to later revise a value UPWARD gets permanently stranded on an
+            // address that no longer exists.
+            lastSource[key] = sourceId
             lastUpdated[key] = now()
         }
+        // Otherwise: a WORSE reading from a source that doesn't own this route. Neither the value
+        // nor the recency is touched — and the recency part was a real, live-confirmed bug. Every
+        // report used to refresh recency, including rejected ones, so once a group had ever recorded
+        // "1 hop" ANY later traffic for it (including a 3-hop relayed frame from a stranger) kept
+        // that 1 alive forever: the staleness window could never fire and the reading could never
+        // degrade. That is why the group row sat at "1 hop(s) away" through every build and never
+        // reached 2 or "no one nearby" — the relay was working, the display value was frozen.
     }
 
     fun markSosOrigin(groupId: String, sosId: String) {
@@ -179,8 +209,27 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
         return table.keys
             .asSequence()
             .filter { it.groupId == groupId && it.target != "PRESENCE" }
-            .filter { nowMs - (lastUpdated[it] ?: 0L) <= staleMs }
+            .filter { key -> nowMs - (lastUpdated[key] ?: 0L) <= effectiveStaleMs(staleMs, table[key] ?: 0) }
             .mapNotNull { table[it] }
             .minOrNull() ?: MeshProtocol.UNKNOWN_HOP
+    }
+
+    companion object {
+        // See staleMs's doc above for the live-tested reasoning: one more reconnect-cooldown's
+        // worth of slack per hop beyond the first, since each additional hop depends on one more
+        // independent GATT reconnect cycle succeeding before a value can propagate further.
+        // Matches MeshGattClient.reconnectCooldownMs (45s) — not referenced directly to avoid a
+        // ble-internal dependency from this shared MeshProtocol.kt file; kept in sync by doc only.
+        private const val PER_HOP_SLACK_MS = 45_000L
+
+        /** Deliberately equal to PositionTracker's BASE_MAX_AGE_SECONDS — see staleMs' note. */
+        private const val BASE_STALE_MS = 180_000L
+
+        /** `internal`, no instance state — directly unit-testable (see [HopTrackerTest]). [hop]
+         *  is the CURRENTLY STORED value at a key, not a hop being newly considered — a hop of 0
+         *  or 1 (self, or a direct single-connection neighbor) gets exactly [baseStaleMs], since
+         *  those need only one connection to refresh; each hop beyond that adds [PER_HOP_SLACK_MS]. */
+        internal fun effectiveStaleMs(baseStaleMs: Long, hop: Int): Long =
+            baseStaleMs + (hop - 1).coerceAtLeast(0) * PER_HOP_SLACK_MS
     }
 }

@@ -50,4 +50,25 @@ class RelayResponderPresenceSkewTest {
         val now = 1_700_000_000_000L
         assertFalse(RelayResponder.presenceWithinSkew(now + 10 * 60_000L, now))
     }
+
+    @Test
+    fun `a relayed heartbeat gets per-hop slack the flat window denied it`() {
+        // Each relay hop costs at least one ~45s reconnect cycle, because presence only moves in
+        // framesToPushOnConnect. A 2-hop heartbeat therefore needs ~90-135s to arrive — and the flat
+        // 120s gate rejected it as a replay, silently defeating the whole blind-presence-relay path.
+        val now = 1_700_000_000_000L
+        val aged = now - 150_000L // 150s old: past the flat window, fine for a 2-hop path
+        assertFalse(
+            "hop 0 must still be held to the strict replay window",
+            RelayResponder.presenceWithinSkew(aged, now)
+        )
+        assertTrue("a 2-hop heartbeat must be accepted", RelayResponder.presenceWithinSkew(aged, now, hop = 2))
+    }
+
+    @Test
+    fun `slack is bounded, so a relayed heartbeat cannot be replayed indefinitely`() {
+        val now = 1_700_000_000_000L
+        val ancient = now - 400_000L
+        assertFalse(RelayResponder.presenceWithinSkew(ancient, now, hop = 3))
+    }
 }

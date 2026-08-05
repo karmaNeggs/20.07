@@ -134,7 +134,7 @@ class MeshGattServer(
         val characteristic = service.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: return
         val mtu = negotiatedMtu[device.address] ?: MeshProtocol.DEFAULT_ATT_MTU
         val maxFrameBytes = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
-        for (bytes in responder.framesToPushOnConnect(maxFrameBytes)) {
+        for (bytes in responder.framesToPushOnConnect(maxFrameBytes, device.address)) {
             notify(device, characteristic, bytes)
         }
     }

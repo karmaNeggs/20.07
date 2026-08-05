@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Exposes only filesDir/evidence/ via FileProvider — nothing else in internal storage is
-     shareable, matching RelayEngine.outputFile's own naming convention exactly. -->
+<!-- Exposes only filesDir/evidence/ and filesDir/diagnostics/ via FileProvider — nothing else in
+     internal storage is shareable. evidence/ matches RelayEngine.outputFile's naming convention;
+     diagnostics/ is the debug-only exportable event log (see DiagnosticsLog, which is a no-op in
+     release builds and never records positions or message bodies). -->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <files-path name="evidence" path="evidence/" />
+    <files-path name="diagnostics" path="diagnostics/" />
 </paths>

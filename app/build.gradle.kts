@@ -13,8 +13,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "0.3.0-dev"
+        versionCode = 5
+        versionName = "0.4.0-dev"
     }
 
     buildTypes {
@@ -38,6 +38,9 @@ android {
 
     buildFeatures {
         compose = true
+        // DiagnosticsLog / HomeScreen's export row gate on BuildConfig.DEBUG so the on-device event
+        // log exists in debug builds only — AGP 8 no longer generates BuildConfig unless asked.
+        buildConfig = true
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.14"

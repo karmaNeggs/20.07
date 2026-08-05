@@ -22,6 +22,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.crypto.CryptoUtils
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
 
@@ -33,7 +34,10 @@ import org.offlinemesh.app.data.GroupRepository
  *
  * **Invariant: the radio is only ever touched (stop+restart) when the payload itself needs to
  * change** — a new rotating-id window, a different group in the round-robin, a changed SOS hop —
- * never on a fixed timer. Scanning runs continuously once started — one `startScan()` per power
+ * never on a fixed timer. Stronger than that now: a payload change usually costs no radio
+ * operation at all, because the beacon runs as an [AdvertisingSet] whose data is replaced in
+ * place (`setAdvertisingData`) instead of stopped and restarted — see
+ * [startAdvertisingSetOrLegacy]. Scanning runs continuously once started — one `startScan()` per power
  * tier, left running, with [BleTuning.Profile.scanMode] as the only duty-cycle lever, left to the
  * OS. See `docs/DECISIONS.md`, decision 1, for why this is an invariant, not a preference — live
  * 2-phone testing hit total, symmetric discovery failure under a version that touched the radio on
@@ -44,6 +48,11 @@ import org.offlinemesh.app.data.GroupRepository
  * recomputed once per slot (3 HMACs per group) rather than per scan result (which, in a crowd,
  * meant hundreds of HMACs and a DB query per second for a value that only changes every 60s).
  */
+// TooManyFunctions: the in-place-advertising work (startAdvertisingSetOrLegacy plus the two small
+// BleTuning->AdvertisingSetParameters unit mappers) pushed this two over the threshold. Each is
+// small and single-purpose, and this class already deliberately keeps one function per radio
+// concern (advertise/scan/long-range/callbacks) rather than fewer, larger ones.
+@Suppress("TooManyFunctions")
 class BeaconRadio(
     private val bluetoothManager: BluetoothManager,
     private val repo: GroupRepository,
@@ -60,6 +69,12 @@ class BeaconRadio(
     // What's currently actually being transmitted — compared against the next candidate payload so
     // the radio is only stopped/restarted when something real changed, not on every loop tick.
     private var currentPayloadKey: String? = null
+
+    // Handle to the running legacy advertising set, when we have one — the whole point of using
+    // startAdvertisingSet() for the legacy beacon (see startAdvertisingSetOrLegacy). Null means
+    // we're on the plain startAdvertising fallback, where a payload change still costs a restart.
+    // @Volatile: written from the OS advertising-set callback thread, read from the advertise loop.
+    @Volatile private var advertisingSet: AdvertisingSet? = null
 
     // Per-device jitter applied before an actual radio restart (never before the cheap
     // has-anything-changed check above). The rotating id itself flips on a shared wall-clock
@@ -93,6 +108,18 @@ class BeaconRadio(
     // state genuinely crossing threads in this class follows that same convention.
     @Volatile private var longRangeAdvertisingActive = false
     @Volatile private var longRangeCurrentPayloadKey: String? = null
+    // Live-tested finding: a device can report isLeCodedPhySupported/isLeExtendedAdvertisingSupported
+    // true (BleCapabilities' own gate above) while still having no free advertising-set SLOT for a
+    // second, non-legacy advertiser — the legacy advertiser already holds the chipset's only one, on
+    // some hardware. Without a circuit breaker, that failure (ADVERTISE_FAILED_TOO_MANY_ADVERTISERS)
+    // retried every single check cycle, forever, for an entire live session, on real hardware — the
+    // exact "repeated failed radio operation churn" category decision 1 (docs/DECISIONS.md) already
+    // identified as capable of destabilizing the whole BLE stack, just from a different source this
+    // time. After LONG_RANGE_FAILURE_LIMIT consecutive failures, this stops retrying for the rest of
+    // the session rather than hammering a slot that's demonstrably never going to free up — a stop()/
+    // restart cycle (e.g. the "go offline"/"go active" toggle) resets this, in case conditions changed.
+    @Volatile private var longRangeConsecutiveFailures = 0
+    @Volatile private var longRangeDisabledForSession = false
     private val longRangeTrickle = TrickleTimer(minIntervalMs = 5_000L, maxIntervalMs = 60_000L)
     private var longRangeScanner: BluetoothLeScanner? = null
     private var longRangeScanJob: Job? = null
@@ -116,9 +143,17 @@ class BeaconRadio(
                 bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(longRangeAdvertisingSetCallback)
             }
         } catch (_: Exception) {}
+        try {
+            if (advertisingSet != null) {
+                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(legacyAdvertisingSetCallback)
+            }
+        } catch (_: Exception) {}
+        advertisingSet = null
         currentPayloadKey = null
         longRangeCurrentPayloadKey = null
         longRangeAdvertisingActive = false
+        longRangeConsecutiveFailures = 0
+        longRangeDisabledForSession = false
     }
 
     /** 3 HMACs per group, once per slot — not per scan result. Also refreshes the active-group
@@ -154,6 +189,16 @@ class BeaconRadio(
         }
         advertiseJob = serviceScope.launch {
             var roundRobin = 0
+            var roundRobinSlotStartedAtMs = System.currentTimeMillis()
+            // Round-robin dwell is ADAPTIVE — see roundRobinDwellMs. A fixed 60s dwell was tried
+            // and reverted: it starved whichever group wasn't currently "up" of all advertising
+            // airtime for up to a minute, breaking same-room discovery outright. Rotating on every
+            // check tick (the original behavior) instead restarts the radio every ~3s for any
+            // multi-group phone — confirmed live at 343 of 526 log lines — which is the
+            // known-dangerous churn category of decision 1. The adaptive rule below takes neither
+            // horn: rotate fast while we can't hear anyone (discovery is what matters, and there's
+            // no established presence to protect), dwell once we can (stability is what matters,
+            // and a peer already discovered doesn't need us re-announcing every 3s).
             while (isActive) {
                 val profile = BleTuning.forTier(currentTier())
                 refreshCaches()
@@ -172,8 +217,12 @@ class BeaconRadio(
                         profile, MeshProtocol.ADV_TYPE_GENERIC, genericRid, MeshProtocol.UNKNOWN_HOP, "generic"
                     )
                 } else {
+                    val nowMs = System.currentTimeMillis()
+                    if (nowMs - roundRobinSlotStartedAtMs >= roundRobinDwellMs(isBlind())) {
+                        roundRobin++
+                        roundRobinSlotStartedAtMs = nowMs
+                    }
                     val g = groups[roundRobin % groups.size]
-                    roundRobin++
                     val key = repo.getGroupKey(g.id)
                     if (key != null) {
                         val rid = CryptoUtils.rotatingAdvertisementId(key)
@@ -211,13 +260,7 @@ class BeaconRadio(
     ) {
         if (payloadKey == currentPayloadKey) return
         if (currentPayloadKey != null && advertiseJitterMs > 0) delay(advertiseJitterMs)
-        val adv = advertiser ?: return
         val payload = MeshProtocol.encodeBeacon(type, rid, sHop)
-        val settings = AdvertiseSettings.Builder()
-            .setAdvertiseMode(profile.advertiseMode)
-            .setTxPowerLevel(profile.advertiseTxPower)
-            .setConnectable(true)
-            .build()
         // Deliberately NOT addServiceUuid() — a Service UUID list AD structure (18 bytes) plus this
         // Service Data structure overflow legacy BLE's 31-byte limit. Service Data alone carries our
         // UUID as a prefix, read back via getServiceData in the scan callback below.
@@ -225,14 +268,111 @@ class BeaconRadio(
             .addServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID), payload)
             .setIncludeDeviceName(false)
             .build()
+        // Preferred path: mutate the payload of an already-running advertising set IN PLACE, never
+        // touching the radio. This is the root fix for the churn that dominated live captures — a
+        // multi-group phone changes payload every time round-robin moves to the next group, and the
+        // old stop+restart path therefore tore down and rebuilt the advertiser every few seconds
+        // (343 of 526 log lines in one capture), which is the destabilizing pattern decision 1
+        // identified. setAdvertisingData() has no such cost: same session, new bytes.
+        val set = advertisingSet
+        if (set != null) {
+            try {
+                set.setAdvertisingData(data)
+                currentPayloadKey = payloadKey
+                return
+            } catch (e: Exception) {
+                // Fall through to the legacy path and let it re-establish from scratch.
+                Log.w(TAG, "in-place advertising data update failed: ${e.message}")
+                advertisingSet = null
+            }
+        }
+        startAdvertisingSetOrLegacy(profile, data, payloadKey)
+    }
+
+    /** Starts a fresh advertising session. Prefers [BluetoothLeAdvertiser.startAdvertisingSet] —
+     *  API 26, i.e. this app's `minSdk`, so it's always available — because that hands back an
+     *  [AdvertisingSet] whose payload can later be changed in place by [ensureAdvertising] with no
+     *  radio restart at all. `setLegacyMode(true)`/`setConnectable(true)` keep what goes on air
+     *  byte-identical to the proven legacy beacon: same 31-byte legacy advertisement, same Service
+     *  Data layout, same connectability that GATT depends on — this changes only HOW the payload is
+     *  updated, never what a peer sees or how it connects.
+     *
+     *  Falls back to plain `startAdvertising` if the advertising-set call fails for any reason, so a
+     *  chipset that refuses it still advertises exactly as it did before. */
+    @SuppressLint("MissingPermission")
+    private fun startAdvertisingSetOrLegacy(
+        profile: BleTuning.Profile,
+        data: AdvertiseData,
+        payloadKey: String,
+    ) {
+        val adv = advertiser ?: return
+        val setParams = AdvertisingSetParameters.Builder()
+            .setLegacyMode(true)
+            .setConnectable(true)
+            .setScannable(true)
+            .setInterval(legacyIntervalFor(profile))
+            .setTxPowerLevel(legacyTxPowerFor(profile))
+            .build()
+        try {
+            if (advertisingSet != null) adv.stopAdvertisingSet(legacyAdvertisingSetCallback)
+            adv.startAdvertisingSet(setParams, data, null, null, null, legacyAdvertisingSetCallback)
+            currentPayloadKey = payloadKey
+            Log.d(TAG, "advertising set started (payload updates in place from here)")
+            return
+        } catch (e: Exception) {
+            Log.w(TAG, "startAdvertisingSet failed, falling back to legacy startAdvertising: ${e.message}")
+            advertisingSet = null
+        }
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(profile.advertiseMode)
+            .setTxPowerLevel(profile.advertiseTxPower)
+            .setConnectable(true)
+            .build()
         try {
             adv.stopAdvertising(advertiseCallback)
             adv.startAdvertising(settings, data, advertiseCallback)
             currentPayloadKey = payloadKey
+            Log.d(TAG, "legacy advertiser restarted (payload changed)")
+            DiagnosticsLog.event("beacon", "legacy restart (no advertising-set support)")
         } catch (e: Exception) {
             Log.w(TAG, "advertise failed: ${e.message}")
         }
     }
+
+    /** Receives the [AdvertisingSet] handle that makes in-place payload updates possible. */
+    private val legacyAdvertisingSetCallback = object : AdvertisingSetCallback() {
+        override fun onAdvertisingSetStarted(advertisingSet: AdvertisingSet?, txPower: Int, status: Int) {
+            if (status == ADVERTISE_SUCCESS && advertisingSet != null) {
+                this@BeaconRadio.advertisingSet = advertisingSet
+            } else {
+                this@BeaconRadio.advertisingSet = null
+                Log.w(TAG, "advertising set failed to start: status=$status")
+                DiagnosticsLog.event("beacon", "advertising set start failed: $status")
+            }
+        }
+
+        override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
+            this@BeaconRadio.advertisingSet = null
+        }
+    }
+
+    // AdvertisingSetParameters takes raw interval/TX-power units rather than the AdvertiseSettings
+    // MODE_*/TX_POWER_* constants BleTuning is expressed in, so the two profiles are mapped across
+    // here. Values are AdvertisingSetParameters' own named constants — chosen to match what each
+    // BleTuning profile already asked for, not retuned.
+    private fun legacyIntervalFor(profile: BleTuning.Profile): Int =
+        if (profile.advertiseMode == AdvertiseSettings.ADVERTISE_MODE_LOW_POWER) {
+            AdvertisingSetParameters.INTERVAL_HIGH
+        } else {
+            AdvertisingSetParameters.INTERVAL_MEDIUM
+        }
+
+    private fun legacyTxPowerFor(profile: BleTuning.Profile): Int =
+        if (profile.advertiseTxPower == AdvertiseSettings.ADVERTISE_TX_POWER_HIGH) {
+            AdvertisingSetParameters.TX_POWER_HIGH
+        } else {
+            AdvertisingSetParameters.TX_POWER_MEDIUM
+        }
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartFailure(errorCode: Int) { Log.w(TAG, "advertise start failure: $errorCode") }
@@ -272,6 +412,7 @@ class BeaconRadio(
     // legacy path now is.
     @SuppressLint("MissingPermission")
     private fun evaluateLongRangeAdvertising(type: Byte, rid: ByteArray, sHop: Int, payloadKey: String) {
+        if (longRangeDisabledForSession) return
         val adapter = bluetoothManager.adapter ?: return
         if (!BleCapabilities.longRangeBeaconSupported(adapter)) return
         val adv = adapter.bluetoothLeAdvertiser ?: return
@@ -313,8 +454,20 @@ class BeaconRadio(
     private val longRangeAdvertisingSetCallback = object : AdvertisingSetCallback() {
         override fun onAdvertisingSetStarted(advertisingSet: AdvertisingSet?, txPower: Int, status: Int) {
             if (status != ADVERTISE_SUCCESS) {
-                Log.w(TAG, "long-range advertising set failed to start: status=$status")
                 longRangeAdvertisingActive = false
+                longRangeConsecutiveFailures++
+                if (longRangeConsecutiveFailures >= LONG_RANGE_FAILURE_LIMIT) {
+                    longRangeDisabledForSession = true
+                    Log.w(
+                        TAG,
+                        "long-range advertising set failed $longRangeConsecutiveFailures times in a row " +
+                            "(status=$status) — giving up for this session rather than retrying forever"
+                    )
+                } else {
+                    Log.w(TAG, "long-range advertising set failed to start: status=$status")
+                }
+            } else {
+                longRangeConsecutiveFailures = 0
             }
         }
         override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
@@ -465,6 +618,28 @@ class BeaconRadio(
 
     companion object {
         private const val TAG = "BeaconRadio"
+
+        // See longRangeConsecutiveFailures/longRangeDisabledForSession's doc above.
+        private const val LONG_RANGE_FAILURE_LIMIT = 3
+
+        /** How long one group holds the shared advertiser before round-robin moves to the next.
+         *  Deliberately NOT the ~60s a single group's rotating id stays stable for (decision 1's
+         *  number) — that's about how often ONE group's payload changes on its own, a different
+         *  question from how long one group may monopolize a radio shared by several, and
+         *  conflating the two is exactly what broke discovery in the reverted 60s attempt.
+         *
+         *  0 while [blind] (nothing heard from any group): rotate on every check tick, so a phone
+         *  that can't hear anyone gets the original, known-working fast discovery behavior and no
+         *  group can be starved while it still needs finding. Once presence IS established there's
+         *  nothing left to discover urgently, so dwelling cuts radio restarts ~3x versus rotating
+         *  every tick, without any group going dark for more than one dwell period.
+         *
+         *  `internal`, pure — unit-tested rather than reasoned about, given both neighboring values
+         *  (~700-900ms and ~3s) are known to misbehave on real hardware. Still needs field
+         *  verification: see docs/DECISIONS.md. */
+        internal fun roundRobinDwellMs(blind: Boolean): Long = if (blind) 0L else ROUND_ROBIN_DWELL_MS
+
+        private const val ROUND_ROBIN_DWELL_MS = 10_000L
 
         // advertiseJitterMs's range and byte-mixing constants — see that property's doc above.
         private const val JITTER_RANGE_MS = 2000L

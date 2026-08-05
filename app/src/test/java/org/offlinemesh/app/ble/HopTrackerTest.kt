@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 /**
- * Tier 1: the hop-count state machine, with a fake clock so staleness (a real 90-second window in
+ * Tier 1: the hop-count state machine, with a fake clock so staleness (a real 180-second window in
  * production) is testable in milliseconds instead of minutes. This is exactly the kind of test that
  * would have caught a real live-tested bug — a stale SOS hop-count showing "2 hops" with only 2
  * phones in the mesh — that bug came from a second, unstaled tracking channel leaking into the
@@ -72,11 +72,13 @@ class HopTrackerTest {
     }
 
     @Test
-    fun `presence goes stale after 90 seconds of no update`() {
+    fun `presence goes stale after the base window of no update`() {
+        // 180s, widened from 90s after live measurement showed 5-8% of position/presence refresh
+        // gaps exceeding 90s and blanking the radar — see PositionTracker's maxAgeSeconds note.
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA")
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
-        clock += 90_001
+        clock += 180_001
         assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "PRESENCE"))
     }
 
@@ -84,7 +86,7 @@ class HopTrackerTest {
     fun `presence is still fresh at exactly the staleness boundary`() {
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA")
-        clock += 90_000
+        clock += 180_000
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
     }
 
@@ -92,9 +94,9 @@ class HopTrackerTest {
     fun `a repeated report at the same value refreshes recency and prevents staleness`() {
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA")
-        clock += 80_000
+        clock += 170_000
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // refresh, still 1 hop
-        clock += 80_000 // 160s total elapsed, but only 80s since the refresh
+        clock += 170_000 // 340s total elapsed, but only 170s since the refresh
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
     }
 
@@ -137,7 +139,7 @@ class HopTrackerTest {
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA")
         t.markSosOrigin("group-1", "sos-1")
         assertEquals(0, t.bestActiveSosHop("group-1"))
-        clock += 90_001
+        clock += 180_001
         assertEquals(MeshProtocol.UNKNOWN_HOP, t.bestActiveSosHop("group-1")) // expired, not shown as current
     }
 
@@ -163,5 +165,101 @@ class HopTrackerTest {
         t.considerDirectHop("group-1", "PRESENCE", -1, sourceId = "peerA")
         t.considerDirectHop("group-1", "PRESENCE", MeshProtocol.UNKNOWN_HOP, sourceId = "peerA")
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
+    }
+
+    // ---------- hop-aware staleness (live-tested finding: a flat window had zero margin for a
+    // relayed value's worst-case propagation delay — see HopTracker.effectiveStaleMs's doc) ----------
+
+    @Test
+    fun `effectiveStaleMs gives hop 0 and hop 1 exactly the base window, no extra slack`() {
+        assertEquals(90_000L, HopTracker.effectiveStaleMs(90_000L, hop = 0))
+        assertEquals(90_000L, HopTracker.effectiveStaleMs(90_000L, hop = 1))
+    }
+
+    @Test
+    fun `effectiveStaleMs adds one reconnect-cooldown's worth of slack per hop beyond the first`() {
+        assertEquals(135_000L, HopTracker.effectiveStaleMs(90_000L, hop = 2))
+        assertEquals(180_000L, HopTracker.effectiveStaleMs(90_000L, hop = 3))
+    }
+
+    @Test
+    fun `a direct (1-hop) presence reading goes stale at exactly the base window`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
+        clock += 180_001
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `a relayed (2-hop) presence reading survives past the old flat 90s window`() {
+        // The exact scenario this fix targets: a 2-hop reading's worst-case propagation delay
+        // (two independent ~45s reconnect cycles) can legitimately take close to 90s to arrive at
+        // all — it must not then immediately read as stale the moment it does.
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 1, sourceId = "peerA") // -> 2
+        clock += 180_001 // would have expired a 1-hop reading, must not expire a 2-hop one
+        assertEquals(2, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `a relayed (2-hop) presence reading still eventually goes stale`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 1, sourceId = "peerA") // -> 2
+        clock += 225_001 // 180s base + 45s (one extra hop's worth of slack) + 1ms
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `bestActiveSosHop applies the same hop-aware staleness as myHop`() {
+        val t = tracker()
+        t.considerDirectHop("group-1", "sos-1", hopValue = 2, sourceId = "peerA")
+        clock += 180_001 // would expire a hop-1 SOS reading, must not expire this hop-2 one
+        assertEquals(2, t.bestActiveSosHop("group-1"))
+    }
+
+    // ---------- recency must not be refreshed by rejected reports ----------
+
+    @Test
+    fun `a worse report from a non-owning source does not keep a stale reading alive`() {
+        // The live-confirmed freeze: every report used to refresh recency, including rejected ones.
+        // Once a group recorded "1 hop", any later traffic — even a 3-hop relayed frame from a
+        // stranger — kept that 1 fresh forever, so the window never fired and the reading never
+        // degraded. This is why the group row sat at "1 hop(s) away" through build after build.
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
+        // peerA is gone. Only worse reports keep arriving, from someone else.
+        repeat(5) {
+            clock += 40_000
+            t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 3, sourceId = "peerB") // -> 4
+        }
+        // With the bug, peerA's "1" was kept permanently fresh by peerB's rejected reports and the
+        // reading stayed 1 forever. Correctly, peerA's reading ages out and reality takes over.
+        assertEquals(4, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `a report confirming the current value does refresh recency`() {
+        // The legitimate steady state: the route is still real, someone still sees it at that
+        // distance, so it must not age out.
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
+        repeat(5) {
+            clock += 40_000
+            t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1, confirms
+        }
+        assertEquals(1, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `ownership follows whoever confirms the value, so a rotated address cannot strand it`() {
+        // lastSource is a BLE address and those rotate every ~10-15 min. Without transfer-on-confirm
+        // the ownership needed to revise a value UPWARD is stranded on an address that no longer
+        // exists, and the reading can never degrade again.
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "oldAddr") // -> 1
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "newAddr") // confirms, takes over
+        // Same peer, new address, now genuinely further away — must be able to revise upward.
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "newAddr")
+        assertEquals(3, t.myHop("group-1", "PRESENCE"))
     }
 }

@@ -8,8 +8,20 @@
          written to disk, latest-fix-only, expires from memory on its own). Requested on every
          OS version for that reason, not just the pre-Android-12 BLE-scan quirk. -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Live-testing found GPS fixes going sparse/intermittent within seconds of the screen
+         turning off, even with the mesh service in the foreground — Android 10+ treats
+         "screen off" as background for location purposes regardless of a foreground service,
+         unless the app separately holds this permission (requested as its own, later, optional
+         step — see MainActivity.maybeRequestBackgroundLocation — since the OS requires it be
+         asked for separately from ACCESS_FINE_LOCATION, never in the same request). A "no" here
+         just means positions go stale faster with the screen off; the app is otherwise unaffected. -->
+    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Required alongside the service's foregroundServiceType="...|location" below on Android 14+
+         (a service must declare, and hold the matching permission for, every foreground service
+         type it actually uses) — see the ACCESS_BACKGROUND_LOCATION comment above for why. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <!-- A correctly-declared foreground service (see MeshService below) is Android's own guarantee
          against being killed in the background, but OEM battery managers (MIUI, Samsung, OnePlus,
@@ -164,7 +176,7 @@
         <service
             android:name=".ble.MeshService"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|location" />
 
         <!-- Lets GroupChatScreen's "tap to view" hand a received evidence file to whatever app the
              user has for viewing it (gallery, photo viewer), without exposing raw file:// paths or

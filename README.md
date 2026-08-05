@@ -156,6 +156,12 @@ propagate independently through whoever's nearby, group member or not.
   database) so it can relay them onward and plot the radar. Entries expire on their own after
   about 90 seconds. If a phone is seized, there's no persisted location trail to find — at
   worst, a stale snapshot already sitting in RAM at that moment.
+- **Background location — a separate, optional nudge, never at launch.** Live testing found GPS
+  fixes going sparse within seconds of the screen turning off, even with the mesh service in the
+  foreground — Android treats "screen off" as background for location purposes regardless. This
+  permission is requested once, after core setup, only to keep radar positions fresher with the
+  screen off; declining it leaves everything else working exactly as before, just with staler
+  positions in that specific situation.
 - **Notifications** — required to run BLE scanning reliably in the background via a foreground
   service (shows a minimal, low-priority "Syncing" notification, deliberately disguised so a
   glance at your lock screen doesn't reveal a mesh app is running), plus a separate, high-priority

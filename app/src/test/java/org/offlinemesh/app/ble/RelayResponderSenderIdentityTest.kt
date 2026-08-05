@@ -22,23 +22,23 @@ class RelayResponderSenderIdentityTest {
     // ---------- checkSenderKeyPin ----------
 
     @Test
-    fun `first sight of a key with no existing pin is OK`() {
+    fun `first sight of a key with no existing pin reports FIRST_SIGHT`() {
         val pair = SenderIdentity.generateKeyPair()
         assertEquals(
-            RelayResponder.SenderKeyPinResult.OK,
+            RelayResponder.SenderKeyPinResult.FIRST_SIGHT,
             RelayResponder.checkSenderKeyPin(existingPublicKey = null, incomingPublicKey = pair.publicKey)
         )
     }
 
     @Test
-    fun `no incoming key at all (a peer not yet carrying one) is OK regardless of any existing pin`() {
+    fun `no incoming key at all (a peer not yet carrying one) changes nothing, whatever is pinned`() {
         val pinned = SenderIdentity.generateKeyPair()
         assertEquals(
-            RelayResponder.SenderKeyPinResult.OK,
+            RelayResponder.SenderKeyPinResult.UNCHANGED,
             RelayResponder.checkSenderKeyPin(existingPublicKey = pinned.publicKey, incomingPublicKey = null)
         )
         assertEquals(
-            RelayResponder.SenderKeyPinResult.OK,
+            RelayResponder.SenderKeyPinResult.UNCHANGED,
             RelayResponder.checkSenderKeyPin(existingPublicKey = null, incomingPublicKey = null)
         )
     }
@@ -47,7 +47,7 @@ class RelayResponderSenderIdentityTest {
     fun `an incoming key matching the existing pin is OK`() {
         val pair = SenderIdentity.generateKeyPair()
         assertEquals(
-            RelayResponder.SenderKeyPinResult.OK,
+            RelayResponder.SenderKeyPinResult.UNCHANGED,
             RelayResponder.checkSenderKeyPin(
                 existingPublicKey = pair.publicKey.copyOf(), incomingPublicKey = pair.publicKey
             )
@@ -55,11 +55,11 @@ class RelayResponderSenderIdentityTest {
     }
 
     @Test
-    fun `an incoming key different from the existing pin is a MISMATCH`() {
+    fun `an incoming key different from the existing pin reports CHANGED`() {
         val pinned = SenderIdentity.generateKeyPair()
         val impostor = SenderIdentity.generateKeyPair()
         assertEquals(
-            RelayResponder.SenderKeyPinResult.MISMATCH,
+            RelayResponder.SenderKeyPinResult.CHANGED,
             RelayResponder.checkSenderKeyPin(
                 existingPublicKey = pinned.publicKey, incomingPublicKey = impostor.publicKey
             )
@@ -122,5 +122,17 @@ class RelayResponderSenderIdentityTest {
                 pinnedPublicKey = pair.publicKey, signature = signature, signedData = "tampered".toByteArray()
             )
         )
+    }
+
+    @Test
+    fun `a CHANGED key is reported as such rather than any kind of hard-failure signal`() {
+        // Regression guard for the live-confirmed outage this enum's redesign fixed: a changed key
+        // used to make the caller DROP the frame, so one stale pin silently killed every signed
+        // frame from that peer (presence, SOS, positions) with no recovery short of clearing app
+        // data on both phones. CHANGED must stay a re-pin-and-warn signal — the enum deliberately
+        // no longer has a value meaning "reject". See pinOrCheckSenderKey's doc.
+        val values = RelayResponder.SenderKeyPinResult.values().map { it.name }
+        assertFalse("no result may imply rejecting traffic", values.any { it == "MISMATCH" || it == "REJECT" })
+        assertEquals(3, values.size)
     }
 }

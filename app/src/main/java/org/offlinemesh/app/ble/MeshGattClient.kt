@@ -12,6 +12,7 @@ import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -50,6 +51,11 @@ class MeshGattClient(
     // picked independently.
     private val syncedReconnectCooldownMs = reconnectCooldownMs
     private val connectTimeoutMs = 15_000L
+    // Absolute ceiling on how long one connection may stay tracked before it's reclaimed as hung —
+    // see the second watchdog in maybeConnect. Comfortably above BleTuning's connectionMaxMs (the
+    // longest a healthy connection is allowed to run, ~20s) plus MTU/discovery/CCCD setup, so it
+    // never cuts a working transfer short.
+    private val connectionHardDeadlineMs = CONNECTION_HARD_DEADLINE_MS
     // The connection-attempt state machine itself lives in ConnectionAttemptTracker (unit-tested in
     // isolation there) — this class only owns the real connectGatt() call, the real timeout delay,
     // and closing the gatt object.
@@ -71,12 +77,23 @@ class MeshGattClient(
     // disconnect branch to pick which of the two cooldowns above applies, then cleared either way.
     private val syncedThisSession = ConcurrentHashMap.newKeySet<String>()
 
+    // Which attempt is currently the live one for each address. Both watchdogs below capture the
+    // value at launch and bail if it has moved on — without that, a watchdog scheduled by an
+    // EARLIER attempt to the same address fires while a LATER, perfectly healthy connection is in
+    // flight, sees it still tracked, and tears it down. Confirmed live: "synced ok" immediately
+    // followed by "hung past deadline" for the same peer ~1.5s later, repeatedly, each one costing
+    // one of only maxConcurrentClientConnections slots for a full deadline period.
+    private val attemptGeneration = ConcurrentHashMap<String, Long>()
+    private val attemptCounter = java.util.concurrent.atomic.AtomicLong(0)
+
     @Synchronized
     @SuppressLint("MissingPermission")
     fun maybeConnect(device: BluetoothDevice) {
         val addr = device.address
         if (!attemptTracker.canAttempt(addr)) return
         attemptTracker.attemptStarted(addr)
+        val generation = attemptCounter.incrementAndGet()
+        attemptGeneration[addr] = generation
         val gatt = device.connectGatt(context, false, callback)
         // Guard against connectGatt() never calling onConnectionStateChange at all — a real,
         // undocumented Android BLE failure mode (peer out of range mid-attempt, or Bluetooth
@@ -85,10 +102,33 @@ class MeshGattClient(
         // by the time this fires, force the cleanup ourselves instead of waiting forever.
         serviceScope.launch {
             delay(connectTimeoutMs)
+            if (attemptGeneration[addr] != generation) return@launch // superseded by a newer attempt
             if (attemptTracker.isStuck(addr)) {
                 Log.w("MeshGattClient", "connect attempt to $addr never got a callback — forcing cleanup")
                 try { gatt.close() } catch (_: Exception) {}
+                DiagnosticsLog.event("conn", "timeout, no callback: ${addr.take(PEER_ID_LOG_CHARS)}")
                 attemptTracker.connectionEnded(addr)
+                return@launch
+            }
+            // Second watchdog, for the failure the first one structurally cannot see. Once
+            // STATE_CONNECTED arrives, isStuck() goes false forever — so a connection that comes up
+            // and then goes silent without ever firing STATE_DISCONNECTED (the same undocumented
+            // class of BLE failure as decision 5, just one stage later) keeps its
+            // maxConcurrentClientConnections slot AND its writeQueue entries indefinitely, and that
+            // peer can never be reconnected to. With only 3 client slots, a few of these strand the
+            // client role entirely. Deadline is far beyond any legitimate connection
+            // (connectionMaxMs caps a real one at ~20s), so this can only ever catch a hung one.
+            delay(connectionHardDeadlineMs - connectTimeoutMs)
+            if (attemptGeneration[addr] != generation) return@launch // superseded by a newer attempt
+            if (attemptTracker.isTracked(addr)) {
+                Log.w("MeshGattClient", "connection to $addr hung past its hard deadline — forcing cleanup")
+                DiagnosticsLog.event("conn", "hung past deadline: ${addr.take(PEER_ID_LOG_CHARS)}")
+                try { gatt.disconnect() } catch (_: Exception) {}
+                try { gatt.close() } catch (_: Exception) {}
+                writeQueue.clear(addr)
+                lastActivity.remove(addr)
+                negotiatedMtu.remove(addr)
+                attemptTracker.connectionEnded(addr, synced = syncedThisSession.remove(addr))
             }
         }
     }
@@ -110,13 +150,14 @@ class MeshGattClient(
         val address = gatt.device.address
         val mtu = negotiatedMtu[address] ?: MeshProtocol.DEFAULT_ATT_MTU
         val maxFrameBytes = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
-        for (bytes in responder.framesToPushOnConnect(maxFrameBytes)) {
+        for (bytes in responder.framesToPushOnConnect(maxFrameBytes, address)) {
             write(gatt, characteristic, bytes)
         }
         // Reaching here means we got through MTU negotiation, service discovery, and the CCCD write
         // well enough to actually offer our content — that's "synced" for cooldown purposes even if
         // an individual frame above failed; see syncedReconnectCooldownMs.
         syncedThisSession.add(address)
+        DiagnosticsLog.event("conn", "synced ok: ${address.take(PEER_ID_LOG_CHARS)}")
     }
 
     /** Waits until either the connection has been idle for [BleTuning.Profile.connectionIdleMs] or
@@ -194,5 +235,14 @@ class MeshGattClient(
                 responder.handleIncoming(characteristic.value, address) { respBytes -> write(gatt, characteristic, respBytes) }
             }
         }
+    }
+
+    private companion object {
+        // Only this much of a peer address goes into the exportable diagnostics log — see
+        // DiagnosticsLog's class doc on why full identifiers are never written to disk.
+        const val PEER_ID_LOG_CHARS = 8
+
+        // See connectionHardDeadlineMs above for what this bounds and why it's this far out.
+        const val CONNECTION_HARD_DEADLINE_MS = 60_000L
     }
 }

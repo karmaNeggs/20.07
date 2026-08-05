@@ -43,11 +43,14 @@ package org.offlinemesh.app.ble
  * peer-agnostic — it has no memory of *what* we synced, only *that* we did — so a phone that syncs
  * with peer B (nothing new to offer yet), then meets peer A and picks up something new, stays
  * locked out of retrying B for the full cooldown even though it's now carrying content B needs. Each
- * [connectionEnded] with `synced=true` records [RelayEngine.catalogEpoch] (via [currentEpoch]) at
- * that moment in [syncedEpoch]; [canAttempt] then skips the cooldown, but only for that one address,
- * if the epoch has moved since — i.e. only when there's actually something new to offer that specific
- * peer, not as a general excuse to reconnect more often. Defaults to a constant so existing callers
- * (and every pre-existing test) see no behavior change unless they opt in.
+ * [connectionEnded] with `synced=true` records the current epoch (via [currentEpoch]) at that
+ * moment in [syncedEpoch]; [canAttempt] then skips the cooldown, but only for that one address, if
+ * the epoch has moved since — i.e. only when there's actually something new to offer that specific
+ * peer, not as a general excuse to reconnect more often. In production, [currentEpoch] is
+ * [RelayResponder.catalogEpoch] — a combination of new content ([RelayEngine.catalogEpoch]) AND a
+ * fresher position accepted for someone ([PositionTracker.positionEpoch]); see that property's doc
+ * for why position needed the exact same fast path content already had. Defaults to a constant so
+ * existing callers (and every pre-existing test) see no behavior change unless they opt in.
  */
 class ConnectionAttemptTracker(
     private val maxConcurrent: Int,
@@ -77,6 +80,13 @@ class ConnectionAttemptTracker(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>) = size > maxTrackedAddresses
     }
 
+    // Same LRU bounding again — see canAttempt's rate-limit comment for what this gates.
+    private val lastCooldownSkipAt = object : LinkedHashMap<String, Long>(
+        DEFAULT_MAP_CAPACITY, DEFAULT_MAP_LOAD_FACTOR, true
+    ) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Long>) = size > maxTrackedAddresses
+    }
+
     /** True if a fresh attempt to [address] should proceed right now — not already attempting/
      *  connected, under the concurrency limit, and either not in post-disconnect cooldown or
      *  carrying something new for this specific peer since the last time we fully synced with it
@@ -85,12 +95,35 @@ class ConnectionAttemptTracker(
     fun canAttempt(address: String): Boolean {
         if (address in connecting) return false
         val cooldown = cooldownUntil[address]
-        if (cooldown != null && now() < cooldown) {
-            val lastSyncedEpoch = syncedEpoch[address]
-            val hasSomethingNewForThisPeer = lastSyncedEpoch != null && lastSyncedEpoch != currentEpoch()
-            if (!hasSomethingNewForThisPeer) return false
-        }
+        val cooling = cooldown != null && now() < cooldown
+        if (cooling && !mayBypassCooldown(address)) return false
         return connecting.size < maxConcurrent
+    }
+
+    /** Whether [address]'s active cooldown may be bypassed right now because we're carrying
+     *  something it hasn't seen — and, crucially, whether we're allowed to act on that *again* yet.
+     *
+     *  The rate limit exists because the epoch signal was broadened to include live position
+     *  updates ([RelayResponder.catalogEpoch]). That epoch is a single global counter, so "something
+     *  changed" fires on ANY position from ANY peer in ANY group — and positions change every few
+     *  seconds, unlike the rare new SOS/evidence this mechanism was originally built for. With no
+     *  floor between skips, a live mesh keeps the epoch permanently moving and the cooldown is
+     *  effectively disabled for every peer at once; with only [maxConcurrent] client slots that
+     *  degenerates into a reconnect storm that starves the very transfers it was meant to speed up
+     *  (consistent with the "connect attempt never got a callback" timeouts and inbound-cap
+     *  warnings seen live). One skip per peer per [COOLDOWN_SKIP_MIN_INTERVAL_MS] keeps the fast
+     *  path meaningfully faster than the full cooldown while staying bounded.
+     *
+     *  Mutates on success (records the skip) — only ever called from [canAttempt], which holds this
+     *  class's monitor, so it needs no separate synchronization of its own. */
+    private fun mayBypassCooldown(address: String): Boolean {
+        val lastSyncedEpoch = syncedEpoch[address]
+        val hasSomethingNewForThisPeer = lastSyncedEpoch != null && lastSyncedEpoch != currentEpoch()
+        val lastSkip = lastCooldownSkipAt[address]
+        val rateLimited = lastSkip != null && now() - lastSkip < COOLDOWN_SKIP_MIN_INTERVAL_MS
+        if (!hasSomethingNewForThisPeer || rateLimited) return false
+        lastCooldownSkipAt[address] = now()
+        return true
     }
 
     /** Call once the caller has actually initiated `connectGatt()`. */
@@ -113,6 +146,15 @@ class ConnectionAttemptTracker(
     @Synchronized
     fun isStuck(address: String): Boolean = address in connecting && address !in callbackReceived
 
+    /** True while [address] is still counted as an in-flight connection, whether or not it has ever
+     *  called back. Distinct from [isStuck] on purpose: [isStuck] only catches the *pre-callback*
+     *  failure, so it goes false the moment `STATE_CONNECTED` arrives. A connection that connects
+     *  and then goes silent without ever firing `STATE_DISCONNECTED` is invisible to [isStuck] but
+     *  still occupies a [maxConcurrent] slot forever — see MeshGattClient's hard-deadline watchdog,
+     *  which uses this to reclaim it. */
+    @Synchronized
+    fun isTracked(address: String): Boolean = address in connecting
+
     /** Call on a real disconnect, or to force-clean a [isStuck] attempt. Starts the reconnect
      *  cooldown either way — a peer that just failed shouldn't be retried immediately.
      *  [synced] should be true only when the connection got far enough to actually push our
@@ -132,5 +174,10 @@ class ConnectionAttemptTracker(
     private companion object {
         const val DEFAULT_MAP_CAPACITY = 16
         const val DEFAULT_MAP_LOAD_FACTOR = 0.75f
+
+        // See canAttempt's rate-limit comment. Well under the 45s full cooldown (so the fast path
+        // stays worth having) but far above the few-seconds cadence positions change at (so it
+        // can't degenerate into "no cooldown at all").
+        const val COOLDOWN_SKIP_MIN_INTERVAL_MS = 10_000L
     }
 }

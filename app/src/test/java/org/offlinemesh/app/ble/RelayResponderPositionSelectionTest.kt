@@ -61,4 +61,43 @@ class RelayResponderPositionSelectionTest {
         assertEquals(12, result.size)
         assertFalse(result.map { it.first }.contains("peer12")) // the 13th-nearest must not survive
     }
+
+    // ---------- split horizon (the distance-vector loop guard) ----------
+
+    @Test
+    fun `a position learned from a peer is never advertised back to that same peer`() {
+        // Measured loop this prevents: with 3 phones, one sender's position circulated the triangle
+        // and arrived back at hop 0, 1, 2 AND 3 — 121 of 267 receipts in one session were hop-3
+        // copies that existed only to be discarded.
+        val positions = mapOf("peer" to record(hop = 1).copy(viaPeer = "AA:BB:CC"))
+        val result = RelayResponder.selectPositionsToRelay(
+            positions, selfId = "me", maxHops = 4, toPeer = "AA:BB:CC"
+        )
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `the same position is still advertised to every OTHER peer`() {
+        val positions = mapOf("peer" to record(hop = 1).copy(viaPeer = "AA:BB:CC"))
+        val result = RelayResponder.selectPositionsToRelay(
+            positions, selfId = "me", maxHops = 4, toPeer = "DD:EE:FF"
+        )
+        assertEquals(listOf("peer"), result.map { it.first })
+    }
+
+    @Test
+    fun `our own fix has no source peer and is relayable to everyone`() {
+        val positions = mapOf("peer" to record(hop = 0)) // viaPeer defaults to null
+        val result = RelayResponder.selectPositionsToRelay(
+            positions, selfId = "me", maxHops = 4, toPeer = "AA:BB:CC"
+        )
+        assertEquals(listOf("peer"), result.map { it.first })
+    }
+
+    @Test
+    fun `with no target peer given, nothing is filtered by split horizon`() {
+        val positions = mapOf("peer" to record(hop = 1).copy(viaPeer = "AA:BB:CC"))
+        val result = RelayResponder.selectPositionsToRelay(positions, selfId = "me", maxHops = 4)
+        assertEquals(listOf("peer"), result.map { it.first })
+    }
 }

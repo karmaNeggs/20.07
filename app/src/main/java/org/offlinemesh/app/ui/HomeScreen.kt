@@ -1,6 +1,10 @@
 package org.offlinemesh.app.ui
 
 import android.Manifest
+import android.net.Uri
+import org.offlinemesh.app.BuildConfig
+import android.content.Intent
+import android.widget.Toast
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -8,6 +12,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -17,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.BluetoothDisabled
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Speed
@@ -37,8 +44,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
 
@@ -164,6 +173,7 @@ fun HomeScreen(
                         QuickToggleTiles(meshService, onGeneralSos)
                         Spacer(Modifier.height(10.dp))
                         WifiDirectRow()
+                        DiagnosticsExportRow()
                         Spacer(Modifier.height(20.dp))
                     }
                 }
@@ -455,5 +465,71 @@ private fun handleWifiDirectToggle(
     } else {
         WifiDirectSettings.setEnabled(context, true)
         setEnabled(true)
+    }
+}
+
+/** Debug-only "export the mesh event log" affordance — invisible in release builds, where
+ *  [DiagnosticsLog] is a no-op and writes nothing (see its class doc: a durable log on disk would
+ *  undercut this app's "nothing persisted to find on a seized phone" property, so it exists only
+ *  behind the same debug boundary LeakCanary already sits behind). Shares via the FileProvider
+ *  already used for evidence files, so the log can go straight to Drive/email with no cable.
+ *  Long-press clears it. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun DiagnosticsExportRow() {
+    if (!BuildConfig.DEBUG) return
+    val context = LocalContext.current
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(AppColors.Surface)
+            .combinedClickable(
+                onClick = {
+                    val file = DiagnosticsLog.exportFile(context)
+                    if (file == null) {
+                        Toast.makeText(context, "No diagnostics recorded yet", Toast.LENGTH_SHORT).show()
+                    } else {
+                        shareDiagnostics(context, file)
+                    }
+                },
+                onLongClick = {
+                    DiagnosticsLog.clear(context)
+                    Toast.makeText(context, "Diagnostics cleared", Toast.LENGTH_SHORT).show()
+                }
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Filled.BugReport, contentDescription = null, tint = AppColors.OnSurfaceMuted)
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text("Export diagnostics", color = AppColors.OnSurface, style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "debug build only \u2022 long-press to clear",
+                color = AppColors.OnSurfaceMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+// Broad catch: the share chooser can fail with ActivityNotFound, Security, or IllegalArgument
+// depending on what the user has installed and how the OEM handles FileProvider grants — all of
+// them mean the same thing here ("couldn't hand the file off"), and none should crash the app.
+@Suppress("TooGenericExceptionCaught")
+private fun shareDiagnostics(context: android.content.Context, file: java.io.File) {
+    try {
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_STREAM, uri)
+            putExtra(Intent.EXTRA_SUBJECT, "20.07 mesh diagnostics")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "Send diagnostics"))
+    } catch (e: Exception) {
+        Toast.makeText(context, "Couldn't share diagnostics: ${e.message}", Toast.LENGTH_SHORT).show()
     }
 }

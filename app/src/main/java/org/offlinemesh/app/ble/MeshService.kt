@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.data.EvidenceEntity
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
@@ -179,6 +180,7 @@ class MeshService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        DiagnosticsLog.init(applicationContext)
         repo = GroupRepository(applicationContext)
         relay = RelayEngine(applicationContext, repo)
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
@@ -292,7 +294,21 @@ class MeshService : Service() {
             .setSmallIcon(decoyIconRes())
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
-        startForeground(1, notification)
+        // Explicit serviceType (Q+) rather than relying on the manifest's foregroundServiceType
+        // alone — with two types declared there ("connectedDevice|location"), Android 14+ wants
+        // this call to confirm which of them are actually active for this particular
+        // startForeground(), not just assume all declared types apply. Both are, for as long as
+        // this service runs. Pre-Q has no such parameter; the manifest attribute alone covers it.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                1,
+                notification,
+                android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+            )
+        } else {
+            startForeground(1, notification)
+        }
     }
 
     // A small library of plain, generic-utility-looking status icons — one is picked at random the

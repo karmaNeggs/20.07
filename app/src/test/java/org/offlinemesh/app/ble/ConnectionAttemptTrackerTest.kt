@@ -210,4 +210,43 @@ class ConnectionAttemptTrackerTest {
         assertFalse(t.canAttempt("A")) // still cooling down — its entry survived
         assertTrue(t.canAttempt("B")) // evicted, so cooldown is gone
     }
+
+    // ---------- cooldown-skip rate limit (see canAttempt's comment: the epoch signal now includes
+    // live positions, which change constantly, so unlimited skipping = no cooldown at all) ----------
+
+    @Test
+    fun `a moved epoch skips the cooldown once, as before`() {
+        val t = tracker()
+        t.attemptStarted("A")
+        t.connectionEnded("A", synced = true)
+        assertFalse("still cooling down with nothing new", t.canAttempt("A"))
+        epoch++
+        assertTrue("something new for this peer — skip the cooldown", t.canAttempt("A"))
+    }
+
+    @Test
+    fun `a constantly-moving epoch cannot skip the cooldown repeatedly within the rate limit`() {
+        // The reconnect-storm case: positions keep bumping the global epoch every few seconds, so
+        // without a floor between skips every scan result would re-attempt every peer forever.
+        val t = tracker()
+        t.attemptStarted("A")
+        t.connectionEnded("A", synced = true)
+        epoch++
+        assertTrue(t.canAttempt("A")) // first skip allowed
+        clock += 5_000
+        epoch++
+        assertFalse("inside the rate limit — must not skip again", t.canAttempt("A"))
+    }
+
+    @Test
+    fun `a moved epoch can skip the cooldown again once the rate limit has elapsed`() {
+        val t = tracker()
+        t.attemptStarted("A")
+        t.connectionEnded("A", synced = true)
+        epoch++
+        assertTrue(t.canAttempt("A"))
+        clock += 10_001
+        epoch++
+        assertTrue("past the rate limit — a genuinely new change may skip again", t.canAttempt("A"))
+    }
 }

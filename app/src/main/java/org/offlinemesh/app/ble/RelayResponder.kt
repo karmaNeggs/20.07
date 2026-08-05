@@ -10,6 +10,7 @@ import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.PeerKeyEntity
 import org.offlinemesh.app.data.SosEntity
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.sensors.LocationTracker
 import org.offlinemesh.app.transport.wifidirect.WifiDirectHandoffCoordinator
 import org.offlinemesh.app.transport.wifidirect.WifiDirectTuning
@@ -48,15 +49,32 @@ class RelayResponder(
 ) {
     private val maxPositionRelayHops = 4
 
+    // Blind-relay custody for frames belonging to groups we hold no key for — see
+    // OpaqueFrameRelay's class doc for why positions and presence both needed this while content
+    // never did. Two stores, not one, purely so each can be reasoned about (and counted) separately.
+    private val opaquePositions = OpaqueFrameRelay()
+    // Presence gets a shorter carry window than positions: a receiver's skew gate is
+    // PRESENCE_MAX_SKEW_MS plus per-hop slack, so holding a heartbeat longer than the base skew
+    // window just spends airtime on frames the far end will reject as replays.
+    private val opaquePresence = OpaqueFrameRelay(maxAgeMillis = PRESENCE_MAX_SKEW_MS)
+
     // See framesToPushOnConnect's doc for what this default is for. 517 matches the MTU every
     // connection actually requests (MeshGattClient.onConnectionStateChange's requestMtu(517)) —
     // i.e. "assume negotiation succeeds," not a conservative floor.
     private val defaultMaxFrameBytes = ASSUMED_NEGOTIATED_MTU - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
 
-    /** Forwarded from [RelayEngine.catalogEpoch] — see [ConnectionAttemptTracker]'s `currentEpoch`
-     *  param for what this is used for. Kept as a passthrough rather than handing `relay` itself
-     *  to [MeshGattClient]/[MeshGattServer], which only ever depend on [RelayResponder]. */
-    val catalogEpoch: Int get() = relay.catalogEpoch
+    /** Combines [RelayEngine.catalogEpoch] (new SOS/evidence/nickname content) with
+     *  [PositionTracker.positionEpoch] (a fresher position accepted for someone) into the one
+     *  signal [ConnectionAttemptTracker]'s `currentEpoch` param actually needs: "has ANYTHING
+     *  worth reconnecting early for changed since I last fully synced with this peer." Originally
+     *  content-only — live testing found a relayed position had no equivalent fast path at all,
+     *  sitting out the full, un-skippable cooldown no matter how quickly it was actually received,
+     *  while content relayed almost immediately. Both are monotonically-increasing counters, so
+     *  summing them is a safe combined "did anything change" signal for [canAttempt]'s simple
+     *  inequality check — it can never coincidentally return to an earlier value. Kept as a
+     *  passthrough rather than handing `relay`/`positionTracker` themselves to
+     *  [MeshGattClient]/[MeshGattServer], which only ever depend on [RelayResponder]. */
+    val catalogEpoch: Int get() = relay.catalogEpoch + positionTracker.positionEpoch
 
     // Per-connection cap on *responses* to a manifest (i.e. novel chunks actually pushed).
     // Keeps one busy item from starving the rotation through other peers.
@@ -108,15 +126,30 @@ class RelayResponder(
         return CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput()), mac)
     }
 
-    /** Result of [checkSenderKeyPin] — see that function's doc. */
-    internal enum class SenderKeyPinResult { OK, MISMATCH }
+    /** [FIRST_SIGHT]/[UNCHANGED] are both "nothing to worry about". [CHANGED] means this sender is
+     *  presenting a different key than the one already pinned for them — see [pinOrCheckSenderKey]
+     *  for why that is a warning that re-pins, and NOT a reason to drop traffic. */
+    internal enum class SenderKeyPinResult { FIRST_SIGHT, UNCHANGED, CHANGED }
 
     /** The ONLY place a sender's Ed25519 public key gets pinned — from the presence
      *  heartbeat's [MeshFrameCodec.Frame.Presence.senderPublicKey], never inferred from a signed
-     *  content frame. Looks up any existing pin, defers the actual OK/MISMATCH decision to
-     *  [checkSenderKeyPin] (kept pure/`internal` so it's directly unit-testable without a DAO —
-     *  same reasoning as [presenceWithinSkew]/[selectPositionsToRelay] below), and persists a new
-     *  pin on first sight. */
+     *  content frame. Looks up any existing pin, defers the pure comparison to [checkSenderKeyPin]
+     *  (kept `internal` so it's directly unit-testable without a DAO — same reasoning as
+     *  [presenceWithinSkew]/[selectPositionsToRelay] below), and writes the pin on first sight OR
+     *  when it has changed.
+     *
+     *  **Why a changed key re-pins instead of rejecting.** It originally hard-rejected the whole
+     *  frame, on the reasoning that a changed key is indistinguishable from impersonation (SSH's
+     *  trust-on-first-use model). Live testing showed why that's the wrong tradeoff here: a pin
+     *  outlives the keypair that created it (pins are in Room, keypairs in EncryptedSharedPreferences
+     *  — a reinstall, a Keystore reset, or an APK upgrade can leave the two out of step), and once
+     *  stale, it silently dropped EVERY signed frame from that peer forever — presence, SOS, and
+     *  positions all gone, while beacon-derived hop count kept working. That reads to a user as
+     *  "connected, 1 hop away, but nothing arrives", with no way to recover short of clearing app
+     *  data on both phones. A key change now re-pins and logs a warning; the frame still has to pass
+     *  the group-key HMAC ([authOk]) to be accepted at all, so a non-member still can't inject
+     *  anything. What's given up is detection of a *member* swapping their own identity mid-group —
+     *  worth surfacing (and it is, loudly), but not worth silently breaking the app over. */
     private suspend fun pinOrCheckSenderKey(
         groupId: String,
         senderId: String,
@@ -124,7 +157,9 @@ class RelayResponder(
     ): SenderKeyPinResult {
         val existing = repo.peerKeyDao.get(groupId, senderId)
         val result = checkSenderKeyPin(existing?.publicKey, publicKey)
-        if (result == SenderKeyPinResult.OK && existing == null && publicKey != null) {
+        val isNewOrChanged =
+            result == SenderKeyPinResult.FIRST_SIGHT || result == SenderKeyPinResult.CHANGED
+        if (publicKey != null && isNewOrChanged) {
             repo.peerKeyDao.insert(PeerKeyEntity(groupId, senderId, publicKey, System.currentTimeMillis()))
         }
         return result
@@ -215,7 +250,10 @@ class RelayResponder(
      * the real tracked value. Real production callers ([MeshGattClient]/[MeshGattServer]) always
      * pass their actual negotiated MTU for this connection.
      */
-    suspend fun framesToPushOnConnect(maxFrameBytes: Int = defaultMaxFrameBytes): List<ByteArray> {
+    suspend fun framesToPushOnConnect(
+        maxFrameBytes: Int = defaultMaxFrameBytes,
+        toPeer: String? = null,
+    ): List<ByteArray> {
         val frames = mutableListOf<ByteArray>()
         val keys = currentCatalogKeys()
         val filter = CatalogFilter.build(keys)
@@ -266,7 +304,23 @@ class RelayResponder(
                     senderPublicKey = identity?.publicKey, signingPrivateKey = identity?.privateKey
                 )
             }
-            frames += positionFramesToPush(g.id)
+            frames += positionFramesToPush(g.id, toPeer)
+        }
+        // Positions we're carrying for groups we aren't in. Outside the per-group loop above on
+        // purpose: these belong to groups absent from getActiveGroups() precisely because we're not
+        // a member, so that loop would never reach them.
+        // Budgeted, like every other relay path here (MAX_RELAYED_POSITIONS_PER_GROUP for member
+        // positions, MAX_CATALOG_ITEMS_PER_SESSION for content). This one previously wasn't: two
+        // 200-entry stores could emit up to 400 frames, unbudgeted, at the FRONT of the push — and
+        // since every frame is a serialised GATT write inside a 15-20s connection, a phone carrying
+        // for several strangers' groups could spend its entire connection on their traffic and
+        // never reach the evidence manifests below, or answer the peer's catalog filter. Blind
+        // carriage must not outrank the mesh's own delivery.
+        val carried = opaquePositions.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
+            opaquePresence.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION)
+        if (carried.isNotEmpty()) {
+            frames += carried
+            DiagnosticsLog.event("relay", "forwarding ${carried.size} opaque frame(s)")
         }
         for (meta in relay.relayableEvidenceMeta()) {
             // Always sent — this bitset changes as chunks arrive, so it has to keep flowing every
@@ -281,7 +335,7 @@ class RelayResponder(
      *  doc for why). Every frame is AES-GCM-sealed under the group key, so this is safe to push
      *  even to a peer that turns out not to be a member — they receive opaque bytes, not our
      *  members' GPS. */
-    private fun positionFramesToPush(groupId: String): List<ByteArray> {
+    private fun positionFramesToPush(groupId: String, toPeer: String? = null): List<ByteArray> {
         val key = repo.getGroupKey(groupId) ?: return emptyList()
         val frames = mutableListOf<ByteArray>()
         val myLoc = locationTracker.location.value
@@ -304,12 +358,29 @@ class RelayResponder(
         // multi-hop position provenance turns out to matter in practice; the receiver's own
         // pin-on-first-sight check still applies to a DIRECT neighbor's own position frame either
         // way, which is this feature's primary target.
-        val toRelay = selectPositionsToRelay(positionTracker.forGroup(groupId), repo.deviceId, maxPositionRelayHops)
+        val toRelay = selectPositionsToRelay(
+            positionTracker.forGroup(groupId), repo.deviceId, maxPositionRelayHops, toPeer
+        )
         for ((senderId, record) in toRelay) {
+            // Forward the ORIGINAL ciphertext rather than re-sealing it. Re-encrypting produced a
+            // fresh nonce every push (MeshFrameCodec.positionNonce), so the same position looked
+            // like a brand-new frame to every downstream blind relay's ciphertext dedup — one
+            // position could occupy 4-18 slots of a neighbour's 200-entry store and be re-pushed to
+            // everyone, evicting genuinely distinct frames. Forwarding verbatim makes the ciphertext
+            // stable end-to-end, so dedup works at every hop, AND preserves the sender's Ed25519
+            // signature inside the seal, which re-encryption silently dropped (relayed positions
+            // were previously unsigned and unverifiable).
+            val sealed = record.sealed
             frames.add(
-                MeshFrameCodec.encodePosition(
-                    groupId, key, senderId, record.lat, record.lon, record.accuracyM, record.timestampSec, record.hop + 1
-                )
+                if (sealed != null) {
+                    MeshFrameCodec.reframePositionForRelay(groupId, record.hop + 1, sealed)
+                } else {
+                    // No original bytes (a record predating this, or our own fix) — seal it ourselves.
+                    MeshFrameCodec.encodePosition(
+                        groupId, key, senderId, record.lat, record.lon,
+                        record.accuracyM, record.timestampSec, record.hop + 1
+                    )
+                }
             )
         }
         return frames
@@ -365,11 +436,22 @@ class RelayResponder(
         }
         val isMember = repo.getGroupKey(frame.sos.groupId) != null
         val isNew = relay.ingestSos(frame.sos)
+        // The receive half of relay. Without this the diagnostics log only showed what we PUSHED,
+        // which made it impossible to tell "relay isn't happening" from "relay happened and we
+        // simply had nothing new to offer" — the two look identical from the push side alone.
+        // hop is TTL-derived, so hop>1 here is direct evidence a frame arrived via a relay.
         // Hop-tracking runs on every receipt, not gated behind ingestSos's dedup return — a shorter
         // path found on a later sighting of the same sos.id must still improve our estimate;
         // considerDirectHop keeps it only if better. Hop is derived from TTL consumed, not
         // hardcoded (that would mark every relayer as the origin).
         val hopsFromOrigin = RelayEngine.DEFAULT_TTL - frame.sos.ttl + 1
+        if (isNew) {
+            DiagnosticsLog.event(
+                "recv",
+                "NEW sos from ${frame.sos.senderId.take(SENDER_ID_LOG_CHARS)} " +
+                    "hop=$hopsFromOrigin member=$isMember"
+            )
+        }
         hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, peerAddress)
         // Only notify for groups we're actually in — a blind carrier ingests and relays SOS for
         // groups it isn't a member of too, but has no business alerting on them.
@@ -408,11 +490,63 @@ class RelayResponder(
         relay.ingestChunk(EvidenceChunkEntity(frame.chunk.evidenceId, frame.chunk.chunkIndex, frame.chunk.data))
     }
 
+    /** Carries a position for a group we hold no key for — see [OpaquePositionRelay]'s class doc.
+     *  Split out of [handlePositionSealed] purely to keep that function's return count within
+     *  detekt's limit. */
+    private fun takeOpaqueCustody(frame: MeshFrameCodec.Frame.PositionSealed, peerAddress: String) {
+        // Dedup on the ciphertext itself: encodePosition gives every frame a unique nonce, so
+        // identical sealed bytes mean the identical original frame coming back around a triangle.
+        val accepted = opaquePositions.offer(
+            dedupKey = OpaqueFrameRelay.dedupKey(frame.sealed),
+            hop = frame.hop,
+            maxHops = maxPositionRelayHops,
+            viaPeer = peerAddress,
+        ) { MeshFrameCodec.reframePositionForRelay(frame.groupId, frame.hop + 1, frame.sealed) }
+        if (accepted) {
+            DiagnosticsLog.event("relay", "carrying opaque position hop=${frame.hop} (not a member)")
+        }
+    }
+
+    /** Presence for a group we hold no key for. Same custody pattern as [takeOpaqueCustody], and the
+     *  piece that makes a GPS-less member visible past a non-member relay: they push no position for
+     *  the position path to piggyback on, so this is the only thing that carries them outward. */
+    private fun takeOpaquePresenceCustody(frame: MeshFrameCodec.Frame.Presence, peerAddress: String) {
+        // (groupId, senderId, timestamp) identifies one presence heartbeat exactly — the sender
+        // stamps a fresh timestamp per connection, and the mac is a pure function of these three.
+        val accepted = opaquePresence.offer(
+            dedupKey = OpaqueFrameRelay.dedupKey(
+                frame.groupId.toByteArray(), frame.senderId.toByteArray(), frame.timestamp.toString().toByteArray()
+            ),
+            hop = frame.hop,
+            maxHops = maxPositionRelayHops,
+            viaPeer = peerAddress,
+        ) { MeshFrameCodec.reframePresenceForRelay(frame, frame.hop + 1) }
+        if (accepted) {
+            DiagnosticsLog.event("relay", "carrying opaque presence hop=${frame.hop} (not a member)")
+        }
+    }
+
     private suspend fun handlePositionSealed(frame: MeshFrameCodec.Frame.PositionSealed, peerAddress: String) {
-        // Positions only ever propagate member-to-member; a non-member has no key to open this
-        // and doesn't relay it, so live GPS never travels in the clear.
-        val key = repo.getGroupKey(frame.groupId) ?: return
+        // No key for this group: we cannot read this position and never will — but we CAN carry it,
+        // and until this branch existed we simply dropped it, which is what made a member behind a
+        // non-member relay invisible on the radar (see OpaquePositionRelay's class doc). The
+        // ciphertext is moved verbatim; only the envelope's hop byte changes.
+        val key = repo.getGroupKey(frame.groupId)
+        if (key == null) {
+            takeOpaqueCustody(frame, peerAddress)
+            return
+        }
         val body = MeshFrameCodec.openPosition(frame.sealed, key) ?: return
+        ingestOpenedPosition(frame, body, peerAddress)
+    }
+
+    /** The member path for a position we could actually open. Split from [handlePositionSealed] to
+     *  keep both functions' return counts within detekt's limit. */
+    private suspend fun ingestOpenedPosition(
+        frame: MeshFrameCodec.Frame.PositionSealed,
+        body: MeshFrameCodec.PositionBody,
+        peerAddress: String,
+    ) {
         if (!verifySignatureIfPinned(frame.groupId, body.senderId, body.signature, body.signedBytes)) {
             Log.w(
                 "RelayResponder",
@@ -424,9 +558,23 @@ class RelayResponder(
             // Receiving an authenticated position over GATT is itself proof this member is
             // reachable — feed presence from it too (its hop, so a relayed position also extends
             // presence outward), not just from the beacon path.
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", body.hop, peerAddress)
-            if (body.hop < maxPositionRelayHops) {
-                positionTracker.offer(frame.groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, body.hop)
+            // frame.hop (envelope), not body.hop (sealed): the envelope's is the one every relay on
+            // the path actually incremented, including relays that couldn't open the body at all.
+            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, peerAddress)
+            if (frame.hop < maxPositionRelayHops) {
+                positionTracker.offer(
+                    frame.groupId, body.senderId, body.lat, body.lon,
+                    body.accuracyM, body.timestampSec, frame.hop,
+                    viaPeer = peerAddress, sealed = frame.sealed
+                )
+                // hop>0 is a RELAYED position — the single clearest signal that multi-hop actually
+                // worked, and the thing the radar's far-phone dot depends on. Never logs the
+                // coordinates themselves (see DiagnosticsLog's class doc).
+                DiagnosticsLog.event(
+                    "recv",
+                    "position from ${body.senderId.take(SENDER_ID_LOG_CHARS)} " +
+                        "hop=${frame.hop}" + if (frame.hop > 0) " (RELAYED)" else ""
+                )
             }
         }
     }
@@ -439,20 +587,32 @@ class RelayResponder(
         // "1 hop away" reading is exactly the thing this app's core promise ("are my people near
         // me") depends on being live, not a stale capture. See presenceWithinSkew's doc for the
         // tolerance chosen.
-        if (!presenceWithinSkew(frame.timestamp)) {
+        if (!presenceWithinSkew(frame.timestamp, hop = frame.hop)) {
             Log.w("RelayResponder", "presence frame outside skew window — dropping (replay?)")
             return
         }
-        // Direct-neighbor heartbeat: not stored, not relayed. Only meaningful for a group we're a
-        // member of, and must authenticate (a non-member can't fake co-membership).
-        val key = repo.getGroupKey(frame.groupId) ?: return
-        val macInput = MeshFrameCodec.presenceMacInput(frame.groupId, frame.senderId, frame.timestamp)
-        val ok = CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)
-        if (!ok) return
-        if (!presencePassesSenderIdentityChecks(frame, macInput)) return
-        if (frame.senderId != repo.deviceId) {
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", 0, peerAddress)
+        // No key: we can't verify this and never will — but we can carry it, which is what makes a
+        // GPS-less member reachable past a stranger's phone (see takeOpaquePresenceCustody).
+        val key = repo.getGroupKey(frame.groupId)
+        if (key == null) {
+            takeOpaquePresenceCustody(frame, peerAddress)
+            return
         }
+        if (!presenceIsAuthentic(frame, key)) return
+        if (frame.senderId != repo.deviceId) {
+            // frame.hop, not a hardcoded 0: a presence that crossed relays (including relays that
+            // couldn't verify it) must report the distance it actually travelled, or a member two
+            // hops out reads as a direct neighbour.
+            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, peerAddress)
+        }
+    }
+
+    /** Group-key MAC plus the sender-identity pin/signature checks, in that order. Folded into one
+     *  function so [handlePresence] keeps its return count within detekt's limit. */
+    private suspend fun presenceIsAuthentic(frame: MeshFrameCodec.Frame.Presence, key: ByteArray): Boolean {
+        val macInput = MeshFrameCodec.presenceMacInput(frame.groupId, frame.senderId, frame.timestamp)
+        val macOk = CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)
+        return macOk && presencePassesSenderIdentityChecks(frame, macInput)
     }
 
     /** The sender-identity pin/signature checks specific to presence, split out of [handlePresence]
@@ -464,18 +624,27 @@ class RelayResponder(
         frame: MeshFrameCodec.Frame.Presence,
         macInput: ByteArray,
     ): Boolean {
-        if (pinOrCheckSenderKey(frame.groupId, frame.senderId, frame.senderPublicKey) == SenderKeyPinResult.MISMATCH) {
+        val pin = pinOrCheckSenderKey(frame.groupId, frame.senderId, frame.senderPublicKey)
+        if (pin == SenderKeyPinResult.CHANGED) {
+            // Re-pinned, not dropped — see pinOrCheckSenderKey's doc. Logged loudly because the
+            // benign explanation (peer reinstalled / Keystore reset) and the hostile one (a member
+            // swapped identity) look identical from here, and only the user can tell them apart.
             Log.w(
                 "RelayResponder",
-                "presence carried a public key different from the one already pinned for this sender — dropping"
+                "sender ${frame.senderId.take(SENDER_ID_LOG_CHARS)} presented a NEW public key for " +
+                    "group ${frame.groupId.take(SENDER_ID_LOG_CHARS)} — re-pinned (benign after a " +
+                    "reinstall; otherwise possible impersonation)"
             )
-            return false
+            DiagnosticsLog.event("identity", "re-pinned key for ${frame.senderId.take(SENDER_ID_LOG_CHARS)}")
+            // Deliberately falls through: the frame still had to pass authOk's group-key HMAC, and
+            // its own signature is checked below against the key we just accepted.
         }
         if (!verifySignatureIfPinned(frame.groupId, frame.senderId, frame.signature, macInput)) {
             Log.w(
                 "RelayResponder",
-                "presence signature failed verification for a pinned sender — dropping (possible impersonation)"
+                "presence signature failed verification under the pinned key — dropping (possible impersonation)"
             )
+            DiagnosticsLog.event("reject", "presence signature failed for ${frame.senderId.take(SENDER_ID_LOG_CHARS)}")
             return false
         }
         return true
@@ -545,6 +714,10 @@ class RelayResponder(
             "RelayResponder",
             "catalog filter from $peerAddress: pushed $pushed, filter-skipped $filterSkipped" +
                 if (budgetSkipped > 0) ", budget-skipped $budgetSkipped (retries next connection)" else ""
+        )
+        DiagnosticsLog.event(
+            "sync",
+            "peer ${peerAddress.take(SENDER_ID_LOG_CHARS)}: pushed=$pushed skipped=$filterSkipped budget=$budgetSkipped"
         )
     }
 
@@ -652,8 +825,18 @@ class RelayResponder(
     }
 
     companion object {
+        // How much of a sender/group id may appear in a log line — enough to tell peers apart
+        // while never writing a full identifier to disk (see DiagnosticsLog's class doc).
+        internal const val SENDER_ID_LOG_CHARS = 8
+
         private const val MAX_TRACKED_WFD_PEERS = 200
         private const val MAX_CATALOG_ITEMS_PER_SESSION = 200
+
+        /** Per-connection cap on blind-carried frames, per store. Deliberately close to
+         *  MAX_RELAYED_POSITIONS_PER_GROUP (12): carrying a stranger's group should cost about what
+         *  serving one of our own does, not 16x more. OpaqueFrameRelay rotates its window, so a
+         *  full 200-entry store still drains completely over successive connections. */
+        private const val MAX_OPAQUE_FRAMES_PER_SESSION = 16
         private const val WFD_PEER_MAP_INITIAL_CAPACITY = 16
         private const val WFD_PEER_MAP_LOAD_FACTOR = 0.75f
 
@@ -669,6 +852,15 @@ class RelayResponder(
         // now," not "you were reachable at some point."
         private const val PRESENCE_MAX_SKEW_MS = 120_000L
 
+        // Per-hop slack on top of the skew window, mirroring HopTracker/PositionTracker's own
+        // per-hop model (same 45s reconnect-cooldown unit). Without it, the flat 120s gate applied
+        // to a RELAYED heartbeat too — but each relay hop costs at least one full reconnect cycle
+        // (~45s) because presence only moves in framesToPushOnConnect, never mid-connection. So a
+        // 2-hop presence needed ~90-135s to arrive and was then rejected as a replay, which
+        // silently defeated the whole blind-presence-relay path. Replay protection at hop 0 is
+        // unchanged at 120s; a relayed heartbeat gets exactly the budget its path actually costs.
+        private const val PRESENCE_PER_HOP_SLACK_MS = 45_000L
+
         /** Pure — no [GroupRepository]/key access, deliberately, so this can be checked (and unit-
          *  tested) before ever touching the group key. See the `Frame.Presence` case above for why
          *  the ordering matters: the MAC already covers [timestamp], so an attacker can't forge a
@@ -676,8 +868,11 @@ class RelayResponder(
          *  of one captured frame verified as authentic forever. `internal` so it's directly
          *  unit-testable without a Robolectric `Context` (this class's other tests need one only
          *  because [RelayEngine]/[GroupRepository] do; this function needs neither). */
-        internal fun presenceWithinSkew(timestamp: Long, now: Long = System.currentTimeMillis()): Boolean =
-            kotlin.math.abs(now - timestamp) <= PRESENCE_MAX_SKEW_MS
+        internal fun presenceWithinSkew(
+            timestamp: Long,
+            now: Long = System.currentTimeMillis(),
+            hop: Int = 0,
+        ): Boolean = kotlin.math.abs(now - timestamp) <= PRESENCE_MAX_SKEW_MS + hop * PRESENCE_PER_HOP_SLACK_MS
 
         /** Pure decision behind [pinOrCheckSenderKey] — given whatever's already pinned
          *  for a (groupId, senderId) and the key this frame just carried, decide OK vs. MISMATCH.
@@ -699,11 +894,12 @@ class RelayResponder(
             existingPublicKey: ByteArray?,
             incomingPublicKey: ByteArray?,
         ): SenderKeyPinResult {
-            if (incomingPublicKey == null || existingPublicKey == null) return SenderKeyPinResult.OK
+            if (incomingPublicKey == null) return SenderKeyPinResult.UNCHANGED // nothing offered, nothing to do
+            if (existingPublicKey == null) return SenderKeyPinResult.FIRST_SIGHT
             return if (existingPublicKey.contentEquals(incomingPublicKey)) {
-                SenderKeyPinResult.OK
+                SenderKeyPinResult.UNCHANGED
             } else {
-                SenderKeyPinResult.MISMATCH
+                SenderKeyPinResult.CHANGED
             }
         }
 
@@ -750,11 +946,19 @@ class RelayResponder(
             positions: Map<String, PositionTracker.Record>,
             selfId: String,
             maxHops: Int,
+            toPeer: String? = null,
             limit: Int = MAX_RELAYED_POSITIONS_PER_GROUP,
         ): List<Pair<String, PositionTracker.Record>> =
             positions.entries
                 .asSequence()
-                .filter { (senderId, record) -> senderId != selfId && record.hop + 1 < maxHops }
+                .filter { (senderId, record) ->
+                    // Split horizon: never advertise a route back toward whoever taught it to us.
+                    // The textbook distance-vector loop guard, and needed here for exactly the
+                    // textbook reason — see PositionTracker.Record.viaPeer's doc for the measured
+                    // loop it eliminates. A null viaPeer is our own fix, always relayable.
+                    val learnedFromThisPeer = toPeer != null && record.viaPeer == toPeer
+                    senderId != selfId && record.hop + 1 < maxHops && !learnedFromThisPeer
+                }
                 .map { it.key to it.value }
                 .sortedBy { it.second.hop }
                 .take(limit)

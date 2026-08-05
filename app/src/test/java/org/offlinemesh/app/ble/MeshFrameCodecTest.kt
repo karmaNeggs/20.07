@@ -457,4 +457,59 @@ class MeshFrameCodecTest {
         check(decoded is MeshFrameCodec.Frame.Sos)
         assertEquals(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES, decoded.sos.message.length)
     }
+
+    @Test
+    fun `position frame carries its hop in the cleartext envelope, readable without any key`() {
+        // The property blind relaying depends on: a phone with no group key must still be able to
+        // read and increment the hop. If this ever moves back inside the seal, non-member relays
+        // silently stop forwarding positions again (see Frame.PositionSealed's doc).
+        val key = randomKey()
+        val frame = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 2)
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.PositionSealed)
+        assertEquals(2, decoded.hop)
+    }
+
+    @Test
+    fun `reframePositionForRelay changes only the hop, never the sealed bytes`() {
+        val key = randomKey()
+        val original = MeshFrameCodec.decode(
+            MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 0)
+        ) as MeshFrameCodec.Frame.PositionSealed
+
+        val relayed = MeshFrameCodec.decode(
+            MeshFrameCodec.reframePositionForRelay(original.groupId, original.hop + 1, original.sealed)
+        ) as MeshFrameCodec.Frame.PositionSealed
+
+        assertEquals(1, relayed.hop)
+        assertTrue(original.sealed.contentEquals(relayed.sealed))
+        // And it still opens correctly for an actual member, unchanged by the relay hop.
+        val body = MeshFrameCodec.openPosition(relayed.sealed, key)
+        checkNotNull(body)
+        assertEquals("sender-1", body.senderId)
+    }
+
+    @Test
+    fun `presence carries an envelope hop and reframes for relay without any key`() {
+        // The GPS-less member case: presence is the ONLY thing that can carry them outward, so a
+        // relay holding no group key must be able to advance its hop. Nothing but the hop may change
+        // — the mac a real member verifies has to survive the relay byte-for-byte.
+        val key = randomKey()
+        val original = MeshFrameCodec.decode(
+            MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key)
+        ) as MeshFrameCodec.Frame.Presence
+        assertEquals(0, original.hop)
+
+        val relayed = MeshFrameCodec.decode(
+            MeshFrameCodec.reframePresenceForRelay(original, original.hop + 1)
+        ) as MeshFrameCodec.Frame.Presence
+
+        assertEquals(1, relayed.hop)
+        assertEquals(original.senderId, relayed.senderId)
+        assertEquals(original.timestamp, relayed.timestamp)
+        assertArrayEquals(original.mac, relayed.mac)
+        // And the mac still verifies for an actual member, unaffected by having been relayed.
+        val macInput = MeshFrameCodec.presenceMacInput("group-1", "sender-1", 1_700_000_000_000L)
+        assertTrue(CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), relayed.mac))
+    }
 }

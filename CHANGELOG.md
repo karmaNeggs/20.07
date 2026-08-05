@@ -1,5 +1,86 @@
 # Changelog
 
+## [0.4.0] — positions and presence are now blind-relayable, and the hop count actually moves
+
+The headline bug this release finally root-causes: on a live 3-phone A-B-C topology, the group row
+had read "1 hop(s) away" through every prior build and content relayed fine while the radar never
+showed the far phone. Root cause was three compounding bugs, not one, all found and fixed this pass
+via repeated live 3-phone capture-and-audit (real numbers cited below, not estimates). Bumps
+`MeshFrameCodec.VERSION` 2→3 (position frame's `hop` moved from inside the sealed body to the
+cleartext envelope — a relay that can't decrypt a position can't increment a hop it can't see).
+`AppDatabase.version` unchanged at 6 — no schema change, this is all wire/logic. 247 tests, up from
+203, still detekt-clean; `assembleRelease` (R8-minified) also verified green. Full reasoning for
+every item below is in `docs/DECISIONS.md`, decisions 8-13.
+
+**Positions and presence can now cross a non-member phone (decision 10):**
+- Three captured sessions showed 627 positions received, every single one at hop 0 — a non-member
+  phone was refusing to carry a sealed position at all, so the exact test topology this app is built
+  for (member, stranger, member) could never deliver a radar dot. A non-member now takes custody of
+  the sealed ciphertext and forwards it verbatim, never opening or re-encrypting it — the original
+  privacy guarantee is unchanged, it just no longer also (wrongly) blocked relay.
+- Presence gets the same fix, needed separately: relaying positions alone only fixes presence for a
+  member who currently has a GPS fix, so anyone indoors or on a cold fix still read as absent rather
+  than distant.
+
+**The relay loop this immediately exposed, fixed with split horizon (decision 12):**
+- The first working blind-relay session showed a textbook distance-vector loop: one member received
+  267 positions from a single sender, arriving at hop 0, 1, 2 *and* 3 — one position circulating the
+  three-phone triangle at escalating hops, invisible at 2 phones and only appearing at 3. Fixed the
+  standard way: never advertise a route back toward the peer that taught it to you.
+
+**The hop count itself was frozen, not broken (decision 13):**
+- `HopTracker` refreshed its "last updated" timestamp on every report *including rejected ones*, so
+  any traffic on a group — even a 3-hop frame from a stranger — kept a previously-recorded "1 hop"
+  permanently fresh and unable to ever rise. This, not a relay failure, is why the group row never
+  moved. Fixed: recency now only refreshes on a report that improves or confirms the current value.
+- Two of this fix's own neighbours broke as a direct result of the decision-10/12 changes and are
+  fixed in the same pass: presence's replay-skew check didn't account for relay hop latency and
+  rejected legitimately-relayed heartbeats as replays; the member relay path was re-encrypting every
+  forwarded position, defeating downstream ciphertext dedup and silently dropping the sender's
+  signature.
+
+**Advertise churn root-caused and fixed twice over (decisions 8-9):**
+- A phone in 2+ groups was restarting its BLE advertiser every ~3.1 seconds continuously for a full
+  19-minute session (343 of 526 captured log lines were this one event) — round-robin group
+  switching looked like a payload change on every tick, so the "only restart if payload changed"
+  guard could never short-circuit. A first fix (dwell 60s per group) stopped the churn but broke
+  same-room discovery for any 2-group phone outright; reverted the same day. Second, adaptive fix:
+  dwell 0 (rotate every check) while blind to any group's presence, 10s once presence is established
+  — cuts restarts ~3x without starving discovery.
+- Root fix, found after both tuning attempts: `AdvertisingSet.setAdvertisingData()` updates the
+  beacon payload in place, with no radio restart at all, making the whole churn-vs-latency tradeoff
+  moot. The adaptive dwell stays in place but is now largely redundant.
+- The experimental long-range (BT5 Coded PHY) advertiser was failing every attempt on real hardware
+  and retrying every 2-4s for an 18-minute session with zero successes — now gives up after 3
+  consecutive failures per session instead of retrying forever.
+- A position-driven fast-path bypass of the reconnect cooldown had no rate limit, so continuously
+  changing GPS meant it fired on nearly every scan result — a reconnect storm through only 3 client
+  slots. Rate-limited to one bypass per peer per 10s.
+
+**Radar staleness window widened, and its cost made visible (decision 11):**
+- Measured (not guessed) across three ~110-minute sessions: refresh p90 was 36-52s against a 90s
+  staleness window — only ~1.8x headroom, so ordinary tail latency blanked the dot in 5-8% of gaps.
+  Window widened 90s → 180s in both `PositionTracker` and `HopTracker` (kept equal on purpose).
+  Paid for explicitly: the stale-dot fade now spans the full 180s instead of stopping at 90s, so an
+  old dot reads as a fading ghost rather than either vanishing or looking current.
+
+**Also this pass:**
+- On-device diagnostics log (debug builds only, same precedent as LeakCanary) — event types, counts,
+  reject reasons, truncated peer IDs only, never positions or message bodies. Exported via the
+  existing `FileProvider`; `capture_debug_log.sh` added for pulling the full logcat stream during a
+  live test.
+- A stale Ed25519 sender-key pin no longer hard-blocks all future traffic from that peer — a changed
+  key in a presence heartbeat now re-pins and warns instead of permanently poisoning the pair; a
+  signature that fails under the *current* pin still rejects.
+- A connection stuck past `CONNECTED` with the radio gone silent (no `DISCONNECTED` ever fires) no
+  longer leaks that peer's slot forever — a second, connection-lifecycle timeout now catches it.
+- Blind carriage of other groups' opaque frames (SOS/evidence-header/nickname) is now capped and
+  rotated per connection, so a phone carrying heavily for strangers can't starve pushing its own
+  group's content.
+- Background location permission requested once, after core setup, never at launch — live testing
+  found GPS fixes going sparse within seconds of screen-off regardless of foreground-service state;
+  declining it leaves everything else working, just with staler positions in that one situation.
+
 ## [0.3.0] — groups are ephemeral by design, sender identity, and a security/efficiency pass
 
 The framing shift behind this release: groups in 20.07 are ad hoc and short-lived (2-3 days
