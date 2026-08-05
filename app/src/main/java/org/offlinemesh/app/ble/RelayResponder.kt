@@ -40,6 +40,10 @@ class RelayResponder(
     // MeshGattClient reads it to key ConnectionAttemptTracker on the stable senderId once known,
     // instead of the BLE address, which rotates roughly every 15 minutes.
     private val peerIdentity: PeerIdentityResolver,
+    // Shared with MeshGattClient/MeshGattServer (PLAN-v2.md P1 §5.3) — this side READS it to learn
+    // the current open-link count (ForwardingPolicy's degree signal) and to push a flood-forward
+    // to every other currently-open link. See ConnectionRegistry's class doc.
+    private val connectionRegistry: ConnectionRegistry,
     // Optional, default-null — so nothing that constructs a RelayResponder outside MeshService
     // (e.g. a future test) needs to change. See the WifiDirectCap/WifiDirectHandoff/
     // WifiDirectAccept cases in handleIncoming and the Frame.Manifest case's WFD trigger for how
@@ -465,12 +469,19 @@ class RelayResponder(
         // The receive half of relay. Without this the diagnostics log only showed what we PUSHED,
         // which made it impossible to tell "relay isn't happening" from "relay happened and we
         // simply had nothing new to offer" — the two look identical from the push side alone.
-        // hop is TTL-derived, so hop>1 here is direct evidence a frame arrived via a relay.
+        // hop>1 here is direct evidence a frame arrived via a relay.
         // Hop-tracking runs on every receipt, not gated behind ingestSos's dedup return — a shorter
         // path found on a later sighting of the same sos.id must still improve our estimate;
-        // considerDirectHop keeps it only if better. Hop is derived from TTL consumed, not
-        // hardcoded (that would mark every relayer as the origin).
-        val hopsFromOrigin = RelayEngine.DEFAULT_TTL - frame.sos.ttl + 1
+        // considerDirectHop keeps it only if better.
+        // frame.sos.hop + 1, NOT ttl-derived (PLAN-v2.md P1 / docs/DECISIONS.md decision 16): a
+        // degree-aware relay may drop ttl by more than 1 in a single hop for flood control, which
+        // would silently corrupt a ttl-derived hop count. hop is a dedicated cleartext envelope
+        // field, incremented by exactly +1 on every RelayEngine.ingestSos, immune to that.
+        // frame.sos.hop AS RECEIVED is the SENDER's own distance from origin (their stored, already-
+        // incremented value) — mine is exactly one more, the same "+1" the old ttl formula baked in
+        // (DEFAULT_TTL - ttl + 1) and what RelayEngine.ingestSos's `hop = sos.hop + 1` also stores,
+        // so the value shown here and the value persisted for this SOS's own next relay agree.
+        val hopsFromOrigin = frame.sos.hop + 1
         if (isNew) {
             DiagnosticsLog.event(
                 "recv",
@@ -491,6 +502,39 @@ class RelayResponder(
             val groupName = repo.groupDao.getGroup(frame.sos.groupId)?.name ?: frame.sos.groupId
             onSosReceived(frame.sos, groupName)
         }
+        // PLAN-v2.md P1 §5.3: immediate forward across every OTHER currently-open link, instead of
+        // waiting for that link's own next catalogue-sync — see floodForwardSos's doc. Gated on
+        // isNew alone (relay.ingestSos's DB-backed dedup, not a separate in-memory layer — see
+        // docs/DECISIONS.md decision 18 for why DedupCache stays unwired here for now): a
+        // duplicate has nothing new to flood.
+        if (isNew) floodForwardSos(frame, hopsFromOrigin, peerAddress)
+    }
+
+    /** Forwards [frame] (re-stamped with [hopsFromOrigin] and a degree-clamped TTL) to a fanout
+     *  subset of every currently-open link EXCEPT the one it arrived on, after a degree-scaled
+     *  jitter — all via the real [ForwardingPolicy], exactly as gated in the P0a/P1 simulator
+     *  (`ForwardingPlaneEngine`) before this was trusted with production wiring. */
+    private suspend fun floodForwardSos(
+        frame: MeshFrameCodec.Frame.Sos, hopsFromOrigin: Int, arrivedFromAddress: String,
+    ) {
+        val openLinkCount = connectionRegistry.openLinkCount()
+        val forwardedTtl = ForwardingPolicy.forwardedTtl(frame.sos.ttl, openLinkCount)
+        if (forwardedTtl <= 0) return
+        // Best-effort split horizon: resolves to whatever learnPeerIdentity just taught the
+        // resolver, which may not exactly match the key this connection originally registered
+        // under if identity resolution changed mid-connection (see ConnectionRegistry's
+        // registeredKey/activeTrackerKey docs). Worst case is a redundant echo back to the sender,
+        // which their own ingestSos dedup silently absorbs — not a correctness bug.
+        val excludeKey = peerIdentity.resolve(arrivedFromAddress)
+        val candidates = connectionRegistry.others(excludeKey).keys.toList()
+        if (candidates.isEmpty()) return
+        val targets = ForwardingPolicy.linksToForwardOn(
+            candidates, messageIdSeed = frame.sos.id.hashCode().toLong(), openLinkCount = openLinkCount,
+        )
+        val outgoing = MeshFrameCodec.encodeSos(frame.sos.copy(hop = hopsFromOrigin, ttl = forwardedTtl))
+        delay(ForwardingPolicy.pickJitterMs(openLinkCount))
+        val liveTargets = connectionRegistry.others(excludeKey)
+        for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)
     }
 
     private suspend fun handleEvidMeta(frame: MeshFrameCodec.Frame.EvidMeta, respond: suspend (ByteArray) -> Unit) {

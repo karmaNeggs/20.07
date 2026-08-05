@@ -47,7 +47,8 @@ class RelayResponderTest {
     @Before
     fun setUp() {
         responder = RelayResponder(
-            repo, relay, HopTracker(), PositionTracker(), LocationTracker(context), PeerIdentityResolver(),
+            repo, relay, HopTracker(), PositionTracker(), LocationTracker(context),
+            PeerIdentityResolver(), ConnectionRegistry(),
         )
         // AppDatabase.get() is a real process-wide singleton (by design — one device, one DB in
         // production), which under Robolectric means it survives across @Test methods within the

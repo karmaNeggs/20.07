@@ -31,7 +31,7 @@ class MeshFrameCodecTest {
     fun `sos frame round-trips`() {
         val sos = SosEntity(
             id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "need help at the north gate", timestamp = 1_700_000_000_000L, ttl = 8,
+            message = "need help at the north gate", timestamp = 1_700_000_000_000L, ttl = 8, hop = 2,
             mac = ByteArray(16) { it.toByte() }
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
@@ -42,8 +42,23 @@ class MeshFrameCodecTest {
         assertEquals(sos.message, decoded.sos.message)
         assertEquals(sos.timestamp, decoded.sos.timestamp)
         assertEquals(sos.ttl, decoded.sos.ttl)
+        // hop must round-trip independently of ttl (docs/DECISIONS.md decision 16 — the whole
+        // point of adding it was decoupling hop-from-origin from a ttl a degree-aware relay may
+        // clamp by more than 1 in a single hop).
+        assertEquals(sos.hop, decoded.sos.hop)
         assertArrayEquals(sos.mac, decoded.sos.mac)
         assertEquals(false, decoded.sos.senderIsMe) // always false on the receiving side, by design
+    }
+
+    @Test
+    fun `sos frame with default hop (0, an origin-authored SOS) round-trips`() {
+        val sos = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16),
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertEquals(0, decoded.sos.hop)
     }
 
     @Test

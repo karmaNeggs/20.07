@@ -80,7 +80,9 @@ object MeshFrameCodec {
     // Not private — a test that needs to hand-construct a raw frame (to exercise a malformed field
     // encode() itself would never produce, e.g. a hostile totalChunks) must reference this directly
     // rather than duplicate the literal, which is exactly what silently went stale across this bump.
-    const val VERSION: Int = 3
+    // v4: SOS frames gained a cleartext envelope hop byte (see SosEntity.hop's doc) — same
+    // treatment as v3's position hop move, and for the same reason (docs/DECISIONS.md decision 16).
+    const val VERSION: Int = 4
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
@@ -249,6 +251,9 @@ object MeshFrameCodec {
         d.writeStr(sos.id); d.writeStr(sos.groupId); d.writeStr(sos.senderId)
         d.writeByte(sos.ttl.coerceIn(0, 255)); d.writeLong(sos.timestamp)
         d.writeSosMessage(sos.message); d.writeBlob(sos.mac); d.writeBlob(sos.signature)
+        // Cleartext envelope byte, same treatment as PositionSealed.hop — see SosEntity.hop's doc
+        // for why this must never be derived from ttl.
+        d.writeByte(sos.hop.coerceIn(0, 255))
     }
 
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
@@ -459,7 +464,8 @@ object MeshFrameCodec {
                     if (message.toByteArray(UTF8).size > MAX_SOS_MESSAGE_BYTES) return null
                     val mac = buf.readBlob()
                     val signature = buf.readBlob()
-                    Frame.Sos(SosEntity(id, groupId, senderId, false, message, timestamp, ttl, mac, signature))
+                    val hop = buf.get().toInt() and 0xFF
+                    Frame.Sos(SosEntity(id, groupId, senderId, false, message, timestamp, ttl, hop, mac, signature))
                 }
                 FRAME_EVID_META -> {
                     val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()

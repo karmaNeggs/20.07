@@ -641,3 +641,121 @@ one frame arrived on) is next — this is the largest, most invasive change in t
 touching exactly the subsystem responsible for the most historical regressions (decisions 1, 2, 5,
 8, 9, A2 all live here). Not started this pass; see NEXT_STEPS/PLAN-v2.md for the concrete checklist.
 
+## 18. SOS wire format grows an explicit hop field, and immediate forward lands — deliberately scoped to SOS only
+
+First production wiring of PLAN-v2 P1 (§5.3), after decisions 16-17 proved the mechanism in the
+simulator. Three pieces, landed as separate, individually-verified steps rather than one large edit
+— the same discipline as every hardware-adjacent change in this project since decision 1.
+
+**Wire format (MeshFrameCodec.VERSION 3->4, AppDatabase v6->v7).** `SosEntity` gains `hop: Int = 0`,
+a cleartext envelope byte (same treatment as `PositionSealed.hop`, added v0.4.0/decision 8),
+incremented by exactly +1 on every `RelayEngine.ingestSos` — independent of `ttl`, which a future
+degree-aware relay can drop by more than 1 in a single hop. This is the fix for the exact risk
+decision 16 flagged before any of this was implemented.
+Tracing through the actual ingest code (`RelayEngine.ingestSos` stores `ttl = sos.ttl - 1` and now
+also `hop = sos.hop + 1`) caught a real off-by-one before it shipped: the old formula
+(`DEFAULT_TTL - ttl + 1`) has a "+1" baked in because a device's OWN hop-from-origin is always one
+more than what it RECEIVED on the wire — `RelayResponder.handleSos` must compute
+`hopsFromOrigin = frame.sos.hop + 1`, not `frame.sos.hop` directly. Caught by hand-tracing the
+value through three hops before writing any test, not by a test catching it after the fact — worth
+remembering as a general lesson: an off-by-one in a *replacement* formula for existing behaviour is
+exactly the class of bug that a fresh test suite (which encodes the NEW author's assumptions) won't
+catch, only comparing against the OLD formula's actual traced behaviour will.
+Testing note: `RelayResponderTest`'s own class doc already documents that `Frame.Sos`/`Frame.EvidMeta`
+handling can't be exercised end-to-end under Robolectric (`authOk` touches `GroupRepository.
+getGroupKey` -> Android Keystore, unavailable there) — so the hop fix is covered at the two testable
+layers instead (`MeshFrameCodecTest`'s wire round-trip, `RelayEngineTest`'s ingest-time increment),
+not by a full `handleIncoming` integration test. The one-line arithmetic connecting them
+(`frame.sos.hop + 1` in `RelayResponder.handleSos`) stays inline, documented, uncovered directly —
+not extracted into its own `internal` testable function, since (unlike `checkSenderKeyPin`/
+`signatureCheckPasses`/etc.) there's no real decision logic here worth isolating, just one
+now-well-commented expression.
+
+**New `ConnectionRegistry`** (`ble/`, tracks live connections from BOTH GATT roles). Neither
+`MeshGattClient` nor `MeshGattServer` had ever needed to know about the other's connections before
+— this is the first shared view. Keyed consistently with `PeerIdentityResolver`/
+`ConnectionAttemptTracker`'s existing "resolve once at connect time, reuse for the whole attempt's
+lifecycle" pattern (decision 15) — `MeshGattServer` needed its own small `registeredKey` map to get
+the same guarantee `MeshGattClient`'s `activeTrackerKey` already provided, since re-resolving at
+disconnect time risks unregistering the wrong key if identity got learned mid-connection.
+
+**Immediate forward, SOS only (`RelayResponder.floodForwardSos`).** On a genuinely new SOS
+(`isNew` from `relay.ingestSos`, not a separate check), forward to a fanout subset of every OTHER
+currently-open link (split horizon via `ConnectionRegistry.others`) after a degree-scaled jitter,
+with the real `ForwardingPolicy` computing both the jitter and a degree-clamped TTL for the
+forwarded copy. Deliberately NOT wiring `DedupCache` here: `RelayEngine.ingestSos`'s existing
+`isNew` is already DB-backed (via `seenDao`, itself a short-lived hot cache in front of the main
+SOS table) and already authoritative — a second in-memory dedup layer on top would be genuinely
+redundant for THIS gate, not wrong, just unneeded complexity. `DedupCache` stays a real, tested,
+production-ready class, unwired — if DB-query latency on the flood path ever proves to matter on
+real hardware (a synchronous SQLite round-trip on every hop, working against the whole point of a
+10-220ms jitter budget), it's ready to drop in as a fast-path layer without redesigning anything.
+Evidence-header and nickname flood-forward are the same mechanical pattern, deliberately deferred to
+keep this change reviewable — not built this pass.
+
+## 19. Persistent links (P3) — the highest-risk change in the project, and three bugs it would have shipped with
+
+Wired PLAN-v2 P3 into production immediately after decision 18, per the user's explicit sequencing
+call (decisions 16-17): P1's flood-forward is only as good as how often a link is actually open when
+it's needed, and P3 is what makes that "usually," not "one window in three."
+
+**What changed.** `MeshGattClient` no longer disconnects a healthy connection on a fixed idle/max
+timer. A connection reaching `heldConnections` (past CCCD-ready) stays open until: (a) `LinkSelector`
+decides — only once every `maxConcurrentClientConnections` slot is already held — that a newly-heard
+candidate's RSSI is diverse enough over the current held set to evict the most redundant one for
+(§5.4/§9.2 item 2's "first-heard clusters on whoever's nearest" fix); (b) it fails on its own; or
+(c) it hits `BleTuning.Profile.connectionBackstopMs`, a distant safety net renamed and bumped from
+the old `connectionMaxMs` (~20s) to minutes (10 ACTIVE / 20 RELAY) — a backstop against a bug in the
+eviction path monopolising a slot forever, not a normal way for a link to end anymore.
+`connectionIdleMs` is gone entirely, along with the `lastActivity`/`touch()` machinery that only
+ever fed it — dead code once nothing reads it, deleted rather than left in place.
+RSSI is a real measurement (`ScanResult.rssi`, threaded through `BeaconRadio.onDeviceSeen` ->
+`MeshGattClient.maybeConnect`, both signatures changed), not the simulator's synthetic 1D "position"
+stand-in — `LinkSelector`'s own class doc already anticipated this exact swap.
+
+**Three real bugs found while implementing this, before any of them shipped:**
+1. **The hard-deadline watchdog would have killed every healthy persistent link after 60s.** It
+   existed to catch a connection stuck in SETUP (decision 5's class of bug) and checked
+   `attemptTracker.isTracked(trackerKey)` — true from `attemptStarted` until `connectionEnded`,
+   which for a NOW-persistent link never fires just because time passed. The watchdog would have
+   found every successful connection "still tracked" 60s after it started and force-disconnected it,
+   turning P3 into a no-op that silently reintroduced the old ~20s-ish cycle via a different code
+   path. Fixed by also requiring `trackerKey !in heldConnections` — the watchdog now only fires for
+   a connection that never made it to a genuinely held state, which is what it was always meant to
+   catch; how long a HELD connection may then live is `connectionBackstopMs`'s question entirely,
+   not this watchdog's.
+2. **`setMeshActive(false)` and `onDestroy` would have leaked every held connection.** Both
+   previously relied on connections idling themselves out within the old ~20s cap — a documented,
+   accepted "known, small, bounded residual." With `connectionBackstopMs` now minutes, that residual
+   would have become minutes long, and `onDestroy`'s `serviceScope.cancel()` doesn't itself call
+   `gatt.disconnect()`/`close()` on anything a cancelled coroutine was holding. Fixed with a new
+   `MeshGattClient.disconnectAll()`, called from both paths — the exact same gap-found-while-
+   reviewing-an-adjacent-comment pattern this file's `onDestroy` doc already recorded once for WFD
+   teardown; this is its second occurrence in the same method.
+3. **`trackerKey in heldConnections` compiled to `containsValue`, not `containsKey`.** A
+   `ConcurrentHashMap<String, HeldConnection>` inherits Java's legacy `contains(Object)` (a
+   `Hashtable`-era values check), and Kotlin's `in` operator resolves to it over the `Map` extension
+   `containsKey` for this specific type — a known Kotlin/Java interop gotcha (KT-18053). Since
+   `HeldConnection` can never equal a `String`, both the "already held, just refresh RSSI" fast path
+   and the fixed watchdog's exclusion check would have silently evaluated to `false`/`true` -flipped
+   from what the code obviously intends, in every case, permanently — not a rare-timing bug like the
+   other two, a constant one. Caught by the Kotlin compiler itself (a hard error, not a lint
+   warning, in this project's configuration) before a single test ran. Fixed with explicit
+   `.containsKey(...)` calls. Worth a general note: this exact gotcha can recur anywhere a
+   `ConcurrentHashMap`'s VALUE type could plausibly be mistaken for able to equal its KEY type by a
+   reader skimming quickly — always prefer explicit `containsKey`/`containsValue` on
+   `ConcurrentHashMap` over `in`, full stop, rather than re-deriving per call site whether it's safe.
+
+**Tuning constants not derived from measurement.** `MeshGattClient.MIN_RSSI_SEPARATION` (15 dB) and
+`BleTuning`'s new `connectionBackstopMs` values are reasoned defaults, not fit to real hardware data
+— no BLE hardware is available in this environment (same standing constraint as every other
+production pass here). Flagged explicitly for tuning once this is on real phones, same as
+`MIN_RSSI_SEPARATION`'s own doc comment already says.
+
+**Not yet hardware-confirmed.** Compiles clean, 304 tests green, detekt clean, `assembleRelease`
+(R8-minified) green. This is the single highest-risk change in the project's history by its own
+class doc's admission — touching the subsystem behind decisions 1, 2, 5, 8, 9, A2 — and needs a
+sustained multi-hour real 3-phone session (P3's own stated hardware gate) before any of the three
+bug fixes above, or the mechanism as a whole, should be trusted the way the rest of this codebase's
+hardware-verified passes are.
+

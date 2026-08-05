@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.6.0-dev] — P1 forwarding + P3 persistent links land in production
+
+First production wiring of PLAN-v2 P1 (forwarding plane) and P3 (persistent links), built together
+after the P1+P3 simulator (0.5.0-dev) found P1 alone doesn't deliver its own headline latency claim
+without P3 supplying links that are actually open when needed. Landed as separately-verified steps,
+not one large change. 304 tests, detekt clean, both build variants (incl. R8-minified release)
+green. Bumps `MeshFrameCodec.VERSION` 3→4 (SOS gains a cleartext hop byte) and `AppDatabase.version`
+6→7 (`SosEntity.hop`). Full reasoning in `docs/DECISIONS.md`, decisions 18-19.
+**NOT hardware-confirmed — this is the single highest-risk change in the project's history**,
+touching the connection-lifecycle subsystem behind the most historical regressions (decisions 1, 2,
+5, 8, 9, A2). Needs a sustained multi-hour real 3-phone session before any of it is trusted the way
+the rest of this codebase's hardware-verified passes are.
+
+**P1 — immediate forward, SOS only:**
+- `SosEntity` gains an explicit `hop` field, incremented by exactly +1 on every ingest, decoupled
+  from `ttl` (which a degree-aware relay may now drop by more than 1 in one hop) — closes the risk
+  flagged before any of this was built. Caught and fixed a real off-by-one while wiring it: a
+  device's own hop-from-origin is `frame.sos.hop + 1`, not `frame.sos.hop` directly (the old
+  ttl-derived formula had a "+1" baked in that the naive replacement missed).
+- New `ConnectionRegistry` gives `RelayResponder` a shared view of every currently-open connection
+  from BOTH GATT roles, for the first time — needed to flood-forward across links other than the
+  one a frame arrived on.
+- `RelayResponder.handleSos` now immediately forwards a genuinely new SOS to a fanout subset of
+  every other open link (real `ForwardingPolicy`: jitter, degree-clamped TTL, fanout subset),
+  instead of waiting for each link's own next catalogue-sync. Evidence-header/nickname forwarding is
+  the same pattern, deliberately deferred to keep this change reviewable.
+- `DedupCache` (built alongside `ForwardingPolicy` in the simulator work) is deliberately NOT wired
+  in — the existing DB-backed `ingestSos` dedup already serves the same purpose; adding a second
+  layer now would be redundant complexity with no current benefit, not a missing piece.
+
+**P3 — persistent links:**
+- `MeshGattClient` no longer disconnects a healthy connection on a fixed idle/max timer
+  (`connectionIdleMs` is gone entirely). A connection stays open until diversity-evicted, fails on
+  its own, or hits a distant safety-net backstop (`BleTuning.Profile.connectionBackstopMs`, minutes
+  now instead of the old ~20s `connectionMaxMs`).
+- Real RSSI (`ScanResult.rssi`, not the simulator's synthetic stand-in) feeds a new
+  `LinkSelector`-based eviction check — only considered once every concurrent-connection slot is
+  already held — so a node can still discover better-spread peers instead of permanently locking
+  onto whichever three happened to connect first.
+- Found and fixed three real bugs while implementing this, before any shipped: (1) the existing
+  hard-deadline watchdog would have force-disconnected every healthy persistent link after 60s,
+  silently undoing P3 entirely; (2) `setMeshActive(false)`/`onDestroy` would have leaked every held
+  connection past the old ~20s residual they were designed around; (3) a `ConcurrentHashMap`
+  `in`-operator gotcha (resolves to `containsValue`, not `containsKey` — KT-18053) that would have
+  made two safety checks silently no-ops in every case, caught by the Kotlin compiler as a hard
+  error before any test ran. Full detail on all three in decision 19.
+
 ## [0.5.0-dev] — v2 scaling plan begins: a crowd-scale test rig, and peer state stops being keyed on a rotating address
 
 First implementation work on `PLAN-v2.md` (the scaling plan, source of truth over `NEXT_STEPS.md`

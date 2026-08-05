@@ -66,6 +66,9 @@ class MeshService : Service() {
     // Shared between RelayResponder (writes) and MeshGattClient (reads) — see its class doc /
     // PLAN-v2.md §5.2 (P0b).
     private val peerIdentity = PeerIdentityResolver()
+    // Shared between MeshGattClient, MeshGattServer (both write) and RelayResponder (reads) — see
+    // its class doc / PLAN-v2.md P1 §5.3.
+    private val connectionRegistry = ConnectionRegistry()
     lateinit var locationTracker: LocationTracker
         private set
     lateinit var compassTracker: CompassTracker
@@ -109,11 +112,13 @@ class MeshService : Service() {
     val meshActive: StateFlow<Boolean> = _meshActive
 
     /** Safe to call repeatedly / toggle back and forth — every stop()/start() this delegates to is
-     *  already idempotent and already exercised once each by onCreate/onDestroy. A GATT connection
-     *  that's already open at the moment of going offline isn't force-closed here; it idles out on
-     *  its own existing connectionIdleMs/connectionMaxMs schedule (max ~20s) — a known, small,
-     *  bounded residual rather than an instant hard stop, and not worth the extra surface of
-     *  reaching into MeshGattClient's connection bookkeeping just to shave off that last ~20s. */
+     *  already idempotent and already exercised once each by onCreate/onDestroy.
+     *
+     *  Client-role GATT connections are now explicitly closed here ([MeshGattClient.disconnectAll]),
+     *  not left to idle out — PLAN-v2.md P3 made links persistent (`BleTuning.Profile.
+     *  connectionBackstopMs` is now minutes, not the old ~20s `connectionMaxMs`), so the previous
+     *  "it'll idle-close itself shortly" assumption behind toggling this off no longer holds; a
+     *  held link left alone here could keep running for as long as the backstop allows. */
     fun setMeshActive(active: Boolean) {
         if (active == _meshActive.value) return
         if (active) {
@@ -125,6 +130,7 @@ class MeshService : Service() {
             startForegroundNotification()
         } else {
             beaconRadio.stop()
+            gattClient.disconnectAll()
             gattServer.stop()
             locationTracker.stop()
             compassTracker.stop()
@@ -204,13 +210,16 @@ class MeshService : Service() {
             capabilityCheck = { WifiDirectCapabilities.supported(applicationContext) },
         )
         responder = RelayResponder(
-            repo, relay, hopTracker, positionTracker, locationTracker, peerIdentity, wifiDirectCoordinator
+            repo, relay, hopTracker, positionTracker, locationTracker, peerIdentity, connectionRegistry,
+            wifiDirectCoordinator,
         ) { sos, groupName -> notifySos(sos, groupName) }
 
-        gattServer = MeshGattServer(this, bluetoothManager, responder, serviceScope).also { it.start() }
-        gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity)
-        beaconRadio = BeaconRadio(bluetoothManager, repo, hopTracker, serviceScope, ::currentTier) { device ->
-            gattClient.maybeConnect(device)
+        gattServer = MeshGattServer(
+            this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity,
+        ).also { it.start() }
+        gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry)
+        beaconRadio = BeaconRadio(bluetoothManager, repo, hopTracker, serviceScope, ::currentTier) { device, rssi ->
+            gattClient.maybeConnect(device, rssi)
         }
 
         startForegroundNotification()
@@ -249,6 +258,11 @@ class MeshService : Service() {
         radarTickJob?.cancel()
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
         beaconRadio.stop()
+        // Same reasoning as the WFD abort two lines down, and the same gap it was already fixed
+        // for: serviceScope.cancel() below stops the coroutines holding P3's persistent links open
+        // but does not itself call gatt.disconnect()/close() on them — without this, process
+        // teardown would leak every currently-held client connection past the service's lifetime.
+        gattClient.disconnectAll()
         gattServer.stop()
         locationTracker.stop()
         compassTracker.stop()

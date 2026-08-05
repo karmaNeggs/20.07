@@ -26,13 +26,16 @@ import java.util.concurrent.ConcurrentHashMap
  * decision 2, for the live-tested asymmetry ("I can see them but can't send") that not having this
  * produced.
  *
- * Connection duration is activity-based, not a fixed timer: a connection stays open while writes
- * or notifications are still happening on it, and closes once it's been idle for
- * [BleTuning.Profile.connectionIdleMs] or hit the [BleTuning.Profile.connectionMaxMs] hard cap —
- * whichever comes first, so two stationary phones mid-transfer aren't cut off just because a fixed
- * timer expired. RelayResponder's own per-session chunk budget (`maxChunksPerSession`) is what
- * keeps one busy peer from starving the rotation through others even with a longer-lived
- * connection.
+ * **Links are now PERSISTENT (PLAN-v2.md P3, docs/DECISIONS.md decision 19).** A connection that
+ * reaches [heldConnections] stays open — no fixed idle/max timer cuts it — until either
+ * [LinkSelector] decides a newly-heard candidate is diverse enough to evict it for (only considered
+ * once every [maxConcurrentClientConnections] slot is already in use), it fails on its own, or it
+ * hits [BleTuning.Profile.connectionBackstopMs], a distant safety net (minutes, not seconds) against
+ * a bug in the eviction path monopolising a slot forever. This is what lets
+ * [RelayResponder]'s P1 flood-forward (§5.3) actually use an open link the moment new content
+ * arrives, instead of that content waiting for the link's own next reconnect cycle — see the P1+P3
+ * simulator finding (decisions 16-17) that a link only being open ~15-20s of every ~60-65s cycle,
+ * not P1's own forwarding logic, was the real bottleneck.
  */
 class MeshGattClient(
     private val context: Context,
@@ -42,6 +45,9 @@ class MeshGattClient(
     // Same shared instance RelayResponder writes to (PLAN-v2.md §5.2 / P0b) — see
     // PeerIdentityResolver's class doc. Read only here.
     private val peerIdentity: PeerIdentityResolver,
+    // Shared with MeshGattServer and RelayResponder (PLAN-v2.md P1 §5.3) — see
+    // ConnectionRegistry's class doc.
+    private val connectionRegistry: ConnectionRegistry,
 ) {
     private val writeQueue = GattOperationQueue()
     private val maxConcurrentClientConnections = 3
@@ -54,10 +60,11 @@ class MeshGattClient(
     // picked independently.
     private val syncedReconnectCooldownMs = reconnectCooldownMs
     private val connectTimeoutMs = 15_000L
-    // Absolute ceiling on how long one connection may stay tracked before it's reclaimed as hung —
-    // see the second watchdog in maybeConnect. Comfortably above BleTuning's connectionMaxMs (the
-    // longest a healthy connection is allowed to run, ~20s) plus MTU/discovery/CCCD setup, so it
-    // never cuts a working transfer short.
+    // Absolute ceiling on how long a connection may stay stuck in SETUP (not yet in
+    // heldConnections) before it's reclaimed as hung — see the second watchdog in maybeConnect.
+    // Comfortably above real MTU/discovery/CCCD setup time; unrelated to how long a connection is
+    // allowed to stay HELD once it gets there (BleTuning.Profile.connectionBackstopMs, now minutes
+    // — see decision 19), which the watchdog explicitly excludes via the heldConnections check.
     private val connectionHardDeadlineMs = CONNECTION_HARD_DEADLINE_MS
     // The connection-attempt state machine itself lives in ConnectionAttemptTracker (unit-tested in
     // isolation there) — this class only owns the real connectGatt() call, the real timeout delay,
@@ -66,9 +73,6 @@ class MeshGattClient(
         maxConcurrentClientConnections, reconnectCooldownMs, syncedReconnectCooldownMs,
         currentEpoch = { responder.catalogEpoch }
     )
-    // Last write/notify time per peer address — drives the idle-based disconnect below.
-    private val lastActivity = ConcurrentHashMap<String, Long>()
-    private fun touch(address: String) { lastActivity[address] = System.currentTimeMillis() }
     // Negotiated MTU per peer address, recorded in onMtuChanged — see pushOnConnect's use of it to
     // size RelayResponder.framesToPushOnConnect's catalog-filter-vs-eager-push decision to what
     // this specific connection can actually carry in one write. Cleared on disconnect alongside
@@ -99,12 +103,38 @@ class MeshGattClient(
     // or connected), cleaned up on every path that ends an attempt below.
     private val activeTrackerKey = ConcurrentHashMap<String, String>()
 
+    // A connection past CCCD-ready, held persistently — the actual "is this slot in use" truth
+    // for eviction purposes (see maybeConnect/considerEvicting). Keyed the same as everywhere
+    // else: the resolved identity once known, the raw address otherwise.
+    private data class HeldConnection(val gatt: BluetoothGatt, val characteristic: BluetoothGattCharacteristic)
+    private val heldConnections = ConcurrentHashMap<String, HeldConnection>()
+    // Most recently heard RSSI per held peer — refreshed on every BeaconRadio sighting even while
+    // already connected (see the early-return at the top of maybeConnect below), so a diversity
+    // decision always uses a fresh reading, not whatever the signal happened to be at connect time.
+    private val heldRssi = ConcurrentHashMap<String, Int>()
+
     @Synchronized
     @SuppressLint("MissingPermission")
-    fun maybeConnect(device: BluetoothDevice) {
+    fun maybeConnect(device: BluetoothDevice, rssi: Int) {
         val addr = device.address
         val trackerKey = peerIdentity.resolve(addr)
-        if (!attemptTracker.canAttempt(trackerKey)) return
+
+        // Already holding this peer — refresh its RSSI for future diversity decisions, don't
+        // re-attempt (attemptTracker.canAttempt would also refuse it, via the `connecting` set
+        // never clearing for a persistent link, but checking heldConnections directly here is the
+        // actual truth this class owns, not an implicit side effect of that).
+        if (heldConnections.containsKey(trackerKey)) {
+            heldRssi[trackerKey] = rssi
+            return
+        }
+
+        if (!attemptTracker.canAttempt(trackerKey)) {
+            // Not admittable right now — either in cooldown (nothing to do about that) or every
+            // slot is held. Only the "every slot held" case is worth a diversity check; a cooldown
+            // means "we just tried this peer," not "our held set could be better."
+            if (heldConnections.size >= maxConcurrentClientConnections) considerEvicting(device, trackerKey, rssi)
+            return
+        }
         attemptTracker.attemptStarted(trackerKey)
         activeTrackerKey[addr] = trackerKey
         val generation = attemptCounter.incrementAndGet()
@@ -132,22 +162,79 @@ class MeshGattClient(
             // class of BLE failure as decision 5, just one stage later) keeps its
             // maxConcurrentClientConnections slot AND its writeQueue entries indefinitely, and that
             // peer can never be reconnected to. With only 3 client slots, a few of these strand the
-            // client role entirely. Deadline is far beyond any legitimate connection
-            // (connectionMaxMs caps a real one at ~20s), so this can only ever catch a hung one.
+            // client role entirely. Deadline bounds SETUP time only (MTU/discovery/CCCD) — how long
+            // a link may then stay HELD is a completely separate question (BleTuning's
+            // connectionBackstopMs, now minutes) since P3, so this can only ever catch a connection
+            // that never made it to heldConnections at all, never a legitimately long-lived one.
             delay(connectionHardDeadlineMs - connectTimeoutMs)
             if (attemptGeneration[addr] != generation) return@launch // superseded by a newer attempt
-            if (attemptTracker.isTracked(trackerKey)) {
+            if (attemptTracker.isTracked(trackerKey) && !heldConnections.containsKey(trackerKey)) {
                 Log.w("MeshGattClient", "connection to $addr hung past its hard deadline — forcing cleanup")
                 DiagnosticsLog.event("conn", "hung past deadline: ${addr.take(PEER_ID_LOG_CHARS)}")
                 try { gatt.disconnect() } catch (_: Exception) {}
                 try { gatt.close() } catch (_: Exception) {}
                 writeQueue.clear(addr)
-                lastActivity.remove(addr)
                 negotiatedMtu.remove(addr)
                 attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(addr))
+                // Defensive, not expected: this branch already requires trackerKey NOT in
+                // heldConnections, and registration/heldConnections-insertion happen together (see
+                // onServicesDiscovered) — but a race between this check and that insertion isn't
+                // provably impossible across coroutines, and unregister/remove on an absent key is
+                // a harmless no-op either way.
+                connectionRegistry.unregister(trackerKey)
+                heldConnections.remove(trackerKey)
+                heldRssi.remove(trackerKey)
                 activeTrackerKey.remove(addr)
             }
         }
+    }
+
+    /** Every client slot is held — decide via the real [LinkSelector] whether [candidateRssi] is
+     *  diverse enough over the current held set to be worth evicting the most redundant one for.
+     *  PLAN-v2.md P3/§5.4: without this, a node would permanently lock onto whichever
+     *  [maxConcurrentClientConnections] peers happened to connect first, the "first-heard clusters
+     *  on whoever's nearest" failure mode §9.2 item 2 names — now that links no longer cycle every
+     *  ~60s on their own, there is no other way for a held set to ever change. */
+    @Synchronized
+    private fun considerEvicting(candidate: BluetoothDevice, candidateKey: String, candidateRssi: Int) {
+        val heldKeys = heldConnections.keys.toList()
+        val heldRssiValues = heldKeys.map { (heldRssi[it] ?: return).toDouble() }
+        val evictIndex = LinkSelector.evictionCandidate(heldRssiValues, candidateRssi.toDouble(), MIN_RSSI_SEPARATION)
+            ?: return
+        val evictKey = heldKeys[evictIndex]
+        Log.i(
+            "MeshGattClient",
+            "evicting a held link for diversity: ${evictKey.take(PEER_ID_LOG_CHARS)} -> " +
+                "${candidateKey.take(PEER_ID_LOG_CHARS)} (candidate RSSI ${candidateRssi}dBm)",
+        )
+        DiagnosticsLog.event("conn", "diversity evict: ${evictKey.take(PEER_ID_LOG_CHARS)}")
+        disconnectHeld(evictKey)
+        maybeConnect(candidate, candidateRssi) // slot is free now — retry immediately
+    }
+
+    /** Proactively tears down a held connection (full cleanup done here, not left to
+     *  onConnectionStateChange — same defensive-cleanup precedent as the hard-deadline watchdog,
+     *  since a `disconnect()` call is not guaranteed to fire its callback promptly, or at all). */
+    @SuppressLint("MissingPermission")
+    private fun disconnectHeld(trackerKey: String) {
+        val held = heldConnections.remove(trackerKey) ?: return
+        heldRssi.remove(trackerKey)
+        connectionRegistry.unregister(trackerKey)
+        try { held.gatt.disconnect() } catch (_: Exception) {}
+        try { held.gatt.close() } catch (_: Exception) {}
+        writeQueue.clear(held.gatt.device.address)
+        negotiatedMtu.remove(held.gatt.device.address)
+        activeTrackerKey.remove(held.gatt.device.address)
+        attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(held.gatt.device.address))
+    }
+
+    /** Tears down every currently held connection — called when the mesh is toggled off
+     *  (`MeshService.setMeshActive(false)`). Before P3, a connection this old assumption relied on
+     *  ("it'll idle out within ~[BleTuning.Profile.connectionBackstopMs]'s old ~20s value on its
+     *  own") is no longer true — a persistent link can now live for minutes, so toggling off needs
+     *  to actively close what's open rather than wait it out. */
+    fun disconnectAll() {
+        for (key in heldConnections.keys.toList()) disconnectHeld(key)
     }
 
     @SuppressLint("MissingPermission")
@@ -177,18 +264,11 @@ class MeshGattClient(
         DiagnosticsLog.event("conn", "synced ok: ${address.take(PEER_ID_LOG_CHARS)}")
     }
 
-    /** Waits until either the connection has been idle for [BleTuning.Profile.connectionIdleMs] or
-     *  has run for [BleTuning.Profile.connectionMaxMs] total, whichever comes first. */
-    private suspend fun awaitIdleOrCap(address: String) {
-        val profile = BleTuning.forTier(currentTier())
-        val start = System.currentTimeMillis()
-        while (true) {
-            val now = System.currentTimeMillis()
-            if (now - start >= profile.connectionMaxMs) return
-            val idleFor = now - (lastActivity[address] ?: start)
-            if (idleFor >= profile.connectionIdleMs) return
-            delay(500)
-        }
+    /** The distant safety-net backstop only — see [BleTuning.Profile.connectionBackstopMs]'s doc.
+     *  A healthy persistent link is expected to still be held when this returns; the caller
+     *  disconnects unconditionally, same as it always did at the old (much shorter) cap. */
+    private suspend fun awaitBackstop() {
+        delay(BleTuning.forTier(currentTier()).connectionBackstopMs)
     }
 
     @SuppressLint("MissingPermission")
@@ -205,9 +285,11 @@ class MeshGattClient(
                 gatt.requestMtu(517)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(address))
+                connectionRegistry.unregister(trackerKey) // same key register() used — see its call site
+                heldConnections.remove(trackerKey)
+                heldRssi.remove(trackerKey)
                 activeTrackerKey.remove(address)
                 writeQueue.clear(address)
-                lastActivity.remove(address)
                 negotiatedMtu.remove(address)
                 gatt.close()
             }
@@ -234,26 +316,35 @@ class MeshGattClient(
                     // class doc above for the bug this fixes.
                     writeDescriptor(gatt, cccd)
                 }
-                touch(gatt.device.address)
+                // Registered/held as soon as the link can actually accept a write — see
+                // ConnectionRegistry's class doc. Reuses activeTrackerKey (captured once at
+                // attemptStarted, see that field's doc) rather than a fresh peerIdentity.resolve()
+                // here — the same "resolve once, reuse for this attempt's whole lifecycle" reason:
+                // if identity gets learned between attempt-start and this point, a fresh resolve
+                // here would register under a DIFFERENT key than onConnectionStateChange's
+                // disconnect branch would later try to unregister, leaking the entry.
+                val registryKey = activeTrackerKey[gatt.device.address] ?: gatt.device.address
+                heldConnections[registryKey] = HeldConnection(gatt, characteristic)
+                connectionRegistry.register(registryKey) { bytes -> write(gatt, characteristic, bytes) }
                 pushOnConnect(gatt, characteristic)
-                awaitIdleOrCap(gatt.device.address)
+                // From here the link is persistent (see class doc) — this suspends until the
+                // distant backstop, not an idle timer; disconnectHeld/considerEvicting are what
+                // normally end a healthy link before that, from outside this coroutine entirely.
+                awaitBackstop()
                 try { gatt.disconnect() } catch (_: Exception) {}
             }
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            touch(gatt.device.address)
             writeQueue.complete(gatt.device.address, status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            touch(gatt.device.address)
             writeQueue.complete(gatt.device.address, status == BluetoothGatt.GATT_SUCCESS)
         }
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val address = gatt.device.address
-            touch(address)
             serviceScope.launch {
                 responder.handleIncoming(characteristic.value, address) { respBytes -> write(gatt, characteristic, respBytes) }
             }
@@ -267,5 +358,13 @@ class MeshGattClient(
 
         // See connectionHardDeadlineMs above for what this bounds and why it's this far out.
         const val CONNECTION_HARD_DEADLINE_MS = 60_000L
+
+        // How far apart (dBm) a candidate's RSSI must be from EVERY currently-held link's before
+        // it's considered a real diversity gain worth evicting for — see considerEvicting. RSSI
+        // in real BLE hardware is noisy sample to sample; too small a threshold would evict/re-
+        // admit the same pair of peers back and forth on measurement noise alone. 15 dB is a
+        // conservative, clearly-distinct-signal-band gap, not derived from live measurement (no
+        // hardware available in this environment) — a real 3-phone/crowd pass should tune this.
+        const val MIN_RSSI_SEPARATION = 15.0
     }
 }

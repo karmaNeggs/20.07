@@ -46,9 +46,17 @@ data class SosEntity(
     val message: String,
     val timestamp: Long,
     val ttl: Int,
-    // HMAC(group_key) over the immutable fields (everything but ttl). A member verifies this before
-    // ever showing or acting on the SOS, so a phone without the key can't inject a fake emergency.
-    // Stored (not just recomputed) so a non-member blind carrier can relay it onward byte-for-byte.
+    // Distance from the origin in relay hops, incremented by exactly +1 on every ingest
+    // (RelayEngine.ingestSos) — deliberately independent of [ttl], which a busy relay may drop by
+    // MORE than 1 in one hop (PLAN-v2.md P1's degree-based flood-control clamp,
+    // ForwardingPolicy.forwardedTtl). Mirrors the cleartext-envelope hop field positions already
+    // carry (see MeshFrameCodec.Frame.PositionSealed.hop, added v0.4.0/decision 8) — HopTracker
+    // must never derive a hop count from ttl consumed again; see docs/DECISIONS.md decision 16.
+    val hop: Int = 0,
+    // HMAC(group_key) over the immutable fields (everything but ttl/hop). A member verifies this
+    // before ever showing or acting on the SOS, so a phone without the key can't inject a fake
+    // emergency. Stored (not just recomputed) so a non-member blind carrier can relay it onward
+    // byte-for-byte.
     val mac: ByteArray? = null,
     // Ed25519 sender-identity signature over the exact same bytes [mac] covers, under
     // this sender's per-group keypair — additive, not a replacement: [mac] alone still proves
@@ -58,7 +66,7 @@ data class SosEntity(
     // treated differently.
     val signature: ByteArray? = null
 ) {
-    private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl)
+    private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl, hop)
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

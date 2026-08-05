@@ -46,14 +46,14 @@ object BleTuning {
         val advertiseMode: Int,
         /** android.bluetooth.le.AdvertiseSettings.ADVERTISE_TX_POWER_* */
         val advertiseTxPower: Int,
-        /** A GATT client connection disconnects once no write/notify has happened for this long —
-         *  i.e. once there's genuinely nothing left to exchange right now — rather than always
-         *  cutting at a fixed duration regardless of whether a transfer was still making progress. */
-        val connectionIdleMs: Long,
-        /** Hard cap on total connection duration regardless of activity, so one busy peer can't
-         *  monopolize a limited concurrent-connection slot forever in a dense crowd. RelayResponder's
-         *  own per-session chunk budget is the primary fairness mechanism; this is the backstop. */
-        val connectionMaxMs: Long,
+        /** PLAN-v2.md P3: links are now PERSISTENT — kept open, not cycled on a fixed idle/max
+         *  timer (see docs/DECISIONS.md decision 19 for the full reasoning and what this replaced).
+         *  This is a distant safety-net backstop only: if a held connection somehow never gets
+         *  evicted by [LinkSelector]'s diversity logic and never fails on its own, force a refresh
+         *  after this long anyway, so a bug in the eviction path can't monopolize a slot forever.
+         *  Deliberately minutes, not seconds — the whole point of P3 is that a link surviving past
+         *  the old ~20s ceiling is normal, not a leak. */
+        val connectionBackstopMs: Long,
     )
 
     /** On-screen: check for payload changes more often (faster group round-robin / SOS-hop pickup),
@@ -65,8 +65,7 @@ object BleTuning {
         // historically didn't leave enough margin and silently transmitted nothing on some chipsets.
         advertiseMode = AdvertiseSettings.ADVERTISE_MODE_BALANCED,
         advertiseTxPower = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
-        connectionIdleMs = 3000L,
-        connectionMaxMs = 20_000L,
+        connectionBackstopMs = 10 * 60_000L,
     )
 
     /** Backgrounded / power-saver: check less often — pure CPU/DB-query saving, since the radio
@@ -76,8 +75,7 @@ object BleTuning {
         scanMode = ScanSettings.SCAN_MODE_BALANCED,
         advertiseMode = AdvertiseSettings.ADVERTISE_MODE_BALANCED,
         advertiseTxPower = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
-        connectionIdleMs = 4000L,
-        connectionMaxMs = 15_000L,
+        connectionBackstopMs = 20 * 60_000L,
     )
 
     fun forTier(tier: MeshService.PowerTier): Profile =

@@ -17,7 +17,9 @@ import androidx.room.RoomDatabase
     ],
     // v6: added PeerKeyEntity (pinned per-sender Ed25519 public keys) and SosEntity/EvidenceEntity/
     // NicknameEntity.signature (Ed25519 sender identity).
-    version = 6,
+    // v7: added SosEntity.hop (PLAN-v2.md P1 — decouples hop-from-origin from ttl, which a
+    // degree-aware relay may now drop by more than 1 per hop; see docs/DECISIONS.md decision 16).
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

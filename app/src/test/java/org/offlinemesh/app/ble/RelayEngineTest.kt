@@ -3,6 +3,7 @@ package org.offlinemesh.app.ble
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -72,6 +73,18 @@ class RelayEngineTest {
                 "(this is what used to re-fire the SOS alarm notification for old content)",
             relay.ingestSos(sos)
         )
+    }
+
+    @Test
+    fun `ingestSos increments hop by exactly 1, independent of ttl`() = runTest {
+        // docs/DECISIONS.md decision 16 / PLAN-v2.md P1: hop must be a dedicated, always-plus-1
+        // counter, never derived from (or coupled to) however much ttl a degree-aware relay clamp
+        // decides to drop in a single hop.
+        val received = sosFixture().copy(ttl = 5, hop = 2) // "arrived here having already gone 2 hops"
+        relay.ingestSos(received)
+        val stored = relay.relayableSos().single { it.id == received.id }
+        assertEquals(3, stored.hop)
+        assertEquals(4, stored.ttl)
     }
 
     @Test

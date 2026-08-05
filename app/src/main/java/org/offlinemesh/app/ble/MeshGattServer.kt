@@ -45,6 +45,12 @@ class MeshGattServer(
     private val bluetoothManager: BluetoothManager,
     private val responder: RelayResponder,
     private val serviceScope: CoroutineScope,
+    // Shared with MeshGattClient and RelayResponder (PLAN-v2.md P1 §5.3) — see
+    // ConnectionRegistry's class doc.
+    private val connectionRegistry: ConnectionRegistry,
+    // Same shared instance RelayResponder writes to (PLAN-v2.md §5.2 / P0b). Read only here, to
+    // resolve a registry key consistent with every other peer-keyed view in this app.
+    private val peerIdentity: PeerIdentityResolver,
 ) {
     private var gattServer: BluetoothGattServer? = null
     private val subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>() // mutated from BLE callback threads
@@ -66,6 +72,13 @@ class MeshGattServer(
     // Negotiated MTU per peer address — same purpose and same disconnect-time cleanup reasoning as
     // MeshGattClient's identical field; see pushOnConnect's use of it below.
     private val negotiatedMtu = ConcurrentHashMap<String, Int>()
+
+    // The ConnectionRegistry key used for THIS connection's registration — captured once, at
+    // registration time, and reused at unregister time. Same reasoning as MeshGattClient's
+    // activeTrackerKey: peerIdentity.resolve() can start returning a different value mid-
+    // connection once a presence frame teaches it who this address actually is, and re-resolving
+    // at disconnect time would then unregister the wrong key, leaking the real one forever.
+    private val registeredKey = ConcurrentHashMap<String, String>()
 
     // Only ever acquired on pre-API-33 devices (see notify's doc and the class-level "cross-peer
     // notify race" note) — API 33+ never touches shared characteristic state, so there's nothing
@@ -148,6 +161,16 @@ class MeshGattServer(
             subscribedDevices.add(device)
             if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
             responder.resetSessionBudget(device.address)
+            // Registered as soon as the link can actually accept a notify — see
+            // ConnectionRegistry's class doc and registeredKey's doc on why the key is captured
+            // once here, not re-resolved at unregister time.
+            val key = peerIdentity.resolve(device.address)
+            registeredKey[device.address] = key
+            connectionRegistry.register(key) { bytes ->
+                val characteristic = gattServer?.getService(MeshProtocol.SERVICE_UUID)
+                    ?.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: return@register false
+                notify(device, characteristic, bytes)
+            }
             serviceScope.launch { pushOnConnect(device) }
         }
 
@@ -188,6 +211,10 @@ class MeshGattServer(
                 subscribedDevices.remove(device)
                 writeQueue.clear(device.address)
                 negotiatedMtu.remove(device.address)
+                // Same key register() used, never a fresh resolve — see registeredKey's doc. A
+                // connection that disconnects before ever subscribing (no CCCD write, so never
+                // registered) has no entry here, and unregister on an absent key is a no-op.
+                registeredKey.remove(device.address)?.let { connectionRegistry.unregister(it) }
             }
         }
     }

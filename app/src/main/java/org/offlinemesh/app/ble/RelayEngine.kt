@@ -196,7 +196,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun ingestSos(sos: SosEntity): Boolean {
         if (seenDao.find(sos.id) != null) return false
         seenDao.insert(SeenMessageEntity(sos.id, System.currentTimeMillis()))
-        val rowId = sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1))
+        // hop always +1, unconditionally — ttl may drop by more than 1 under a future degree-aware
+        // relay clamp (PLAN-v2.md P1), but hop must stay an honest, uniform distance counter
+        // regardless of what ttl does. See SosEntity.hop's doc / docs/DECISIONS.md decision 16.
+        val rowId = sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1, hop = sos.hop + 1))
         val isNew = rowId != -1L
         if (isNew) epoch.incrementAndGet()
         return isNew

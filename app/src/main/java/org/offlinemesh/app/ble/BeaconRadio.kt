@@ -59,7 +59,10 @@ class BeaconRadio(
     private val hopTracker: HopTracker,
     private val serviceScope: CoroutineScope,
     private val currentTier: () -> MeshService.PowerTier,
-    private val onDeviceSeen: (BluetoothDevice) -> Unit,
+    // rssi: PLAN-v2.md P3's real diversity signal (LinkSelector, via MeshGattClient's
+    // considerEvicting) — a synthetic 1D "position" stood in for it in the simulator; this is the
+    // actual measurement, straight from ScanResult, with no processing of our own.
+    private val onDeviceSeen: (device: BluetoothDevice, rssi: Int) -> Unit,
 ) {
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
@@ -592,7 +595,7 @@ class BeaconRadio(
             }
             // Blind-carrier policy: connect to every mesh phone heard, member or not — see
             // MeshGattClient/RelayResponder (relaying opaque bytes for groups we can't decrypt).
-            onDeviceSeen(result.device)
+            onDeviceSeen(result.device, result.rssi)
         }
     }
 
