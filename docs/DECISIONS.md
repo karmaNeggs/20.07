@@ -541,3 +541,103 @@ shows a stable `distinct=` peer count instead of growing with address churn — 
 tested on real hardware first; see PLAN-v2.md Part 7's preamble for the (now explicit) async
 verification workflow this and every future phase uses.
 
+## 16. P1's sim gate reveals it can't deliver its own headline claim alone — found before touching the wire
+
+Built P1's forwarding plane in the simulator first (per decision 14's own discipline — nothing
+production-risky lands before its sim gate passes), reusing two new pure production classes:
+`DedupCache` (in-memory hot-layer dedup, LRU+time bounded, sized per §9.2 item 6's derivation —
+3000 entries, since only SOS/evidence-headers/nicknames enter the flood, not presence/position) and
+`ForwardingPolicy` (jitter/TTL-clamp/fanout-subset, all gated on currently-OPEN link count — a
+deliberately narrower "degree" than §5.4's general table, matching what §5.3's own bullet literally
+measures against). New `ForwardingPlaneEngine` in the sim layers immediate-forward-on-open-links
+over the SAME connection-establishment mechanism `CatalogSyncEngine` already uses (a separate
+engine, not a modification — per that class's own doc), with catalogue-sync demoted to pure
+backfill (no longer itself triggering onward flooding), exactly as §5.3 specifies.
+
+**The measured result does not support the plan's own P1 hardware-gate claim** ("3 phones in a
+line — a relayed SOS arrives in seconds, not the current ~45s/hop"). Real numbers from the sim,
+D=3, fully connected mesh averaged over 30 injected items: forwarding-plane mean convergence
+31.7s vs the v1-baseline `CatalogSyncEngine`'s 36.0s — real, but ~12%, not the order-of-magnitude
+the plan's prose implies. The literal "3 phones in a line" topology (the exact hardware-gate
+scenario) measured 52s for a 2-hop SOS relay — better than v1's ~90s (2×45s) worst case, but not
+"seconds."
+
+**Root cause, and why it's structural, not a bug to fix within P1's own scope:** flood-forwarding
+can only use a link that is ALREADY OPEN at the moment a packet needs to cross it. Under the
+CURRENT connection lifecycle — still connect/sync/disconnect; P3 ("persistent links") is what
+retires that — any specific link is open for roughly
+`connectionSessionMs / (connectionSessionMs + reconnectCooldownMs)` of the time, ballpark 15-20s of
+every ~60-65s cycle, REGARDLESS of density (the 45s cooldown applies even at D=3 with zero slot
+contention forcing it). So roughly 70% of the time, a link a packet needs simply isn't there yet,
+and the packet has to wait out that link's own reconnect cycle before flood can even attempt it —
+at that point P1's improvement over v1 is real (once the link IS open, delivery is near-instant
+across it and any other currently-open links) but bounded by how often "already open" actually
+holds, not by anything §5.3's own mechanism controls.
+
+**This means P1 and P3 are more coupled than PLAN-v2's phase ordering (P1 before P2 before P3)
+implies.** The plan treats P3 as amplification on top of an already-working P1; the sim says P3's
+"retire the 45s cooldown regime" is closer to a CO-REQUISITE for P1's own headline claim to hold,
+at least at low degree where fanout/TTL-clamp/dedup (P1's actual novel machinery) are all identity-
+functions anyway per §5.4 — meaning at D=3 specifically, P1's whole measurable contribution IS
+"use a link if it's already open," and that's gated by link *lifetime*, which is P3's problem, not
+P1's. At D=400 the picture may differ (more simultaneous links per node makes "already open"
+likelier at any given instant even under the same per-link duty cycle) — the D=400 sim run this
+pass measured 100% delivery (50/50 injected items) within a 20-minute window, but did not measure
+LATENCY distribution at that density the way the D=3 tests did; that's a gap for whoever picks this
+up next, not a claim resolved here.
+
+**Deliberately not yet wired into production.** `MeshFrameCodec` (wire format), `RelayResponder`
+(the receive/forward path), and the GATT layer are untouched this pass — P1's own class docs
+already flag the specific wire-format risk that must be resolved before any of that lands: a
+unified packet header needs its OWN explicit hop field (the pattern positions already use, post-
+v0.4.0/decision 8), because `ForwardingPolicy.forwardedTtl`'s degree-based clamp can drop TTL by
+more than 1 in a single high-degree hop, which would silently corrupt `HopTracker`'s current
+`DEFAULT_TTL - ttl + 1` hop-from-TTL derivation for SOS if the two were ever allowed to share a
+value. Given the finding above, committing to that wire-format surgery before deciding how P1 and
+P3 should actually be sequenced together would risk building the wrong shape twice.
+
+## 17. P3 (persistent links), sim-first — and it's what actually closes P1's gap
+
+User's explicit call after decision 16's finding: build P3 next, then measure P1+P3 TOGETHER before
+touching production. New `LinkSelector` (pure, ble/, unit-tested): given a node's currently-held
+links' diversity values and a new candidate's, decides which held link (if any) is redundant enough
+to evict in favour of the candidate — §5.4/P3's "select for diversity, evict redundant links, not
+the oldest." New `PersistentForwardingEngine` in the sim replaces `ForwardingPlaneEngine`'s fixed
+`connectionSessionMs` disconnect with a genuinely persistent link (stays open until diversity-
+evicted), periodic backfill sync while open (§5.3's literal "~15s exchange on already-open links"),
+and reuses P1's `ForwardingPolicy`/`DedupCache` unchanged for the flood itself.
+
+**Result: dramatic, not modest.** Re-running decision 16's exact 3-phone-line topology (the literal
+hardware-gate scenario) under the combined engine: **48ms**, down from P1-alone's 52,000ms — a
+~1000x improvement, because both links are already open and idle by the time the SOS is injected,
+so flood-forward crosses both hops within one jitter window instead of waiting out a single
+`reconnectCooldownMs` cycle. This confirms decision 16's diagnosis exactly: P1's own machinery
+(TTL clamp, fanout subset, dedup) was never the bottleneck at low degree — link *availability* was,
+and P3 is what actually supplies it. **P1 and P3 should be wired into production together**, not
+sequentially as PLAN-v2's phase order implies; shipping P1 alone (as decision 16 flagged as an
+option) would have shipped a mechanism that can't demonstrate its own headline claim on hardware.
+
+**P3's own sim gate ("diversity beats first-heard on reachability") needed a spatial topology to
+mean anything, and needed a second bug fixed before it was trustworthy.** `randomRegular` (P0a's
+existing topology, uniform-random neighbour picks) has no spatial locality at all, so "first-heard"
+there is already as diverse as anything — nothing for a diversity rule to fix. New
+`SimNetwork.spatialRing` places nodes on a ring and connects everyone within a radius, the genuine
+"physically-clustered neighbours" shape §9.2 item 2 describes. First pass at the gate then measured
+a razor-thin, seed-fragile margin (0.067 vs 0.066 average held-link spread) — traced to a real bug
+in the TEST, not the mechanism: the default `minDiversitySeparation` (0.1) was larger than the
+entire neighbourhood diameter at the radius used (2×0.05 = 0.1), so `LinkSelector`'s
+`candidateAddsCoverage` check was almost never true and diversity mode was silently behaving
+identically to first-heard. Scaling the separation to the neighbourhood size (radius/2.5) produced
+the real signal: 0.094 vs 0.066, a genuine, non-fragile margin. Worth remembering: a threshold
+parameter needs to be sized relative to the SPACE it's being compared against, not picked as a
+fixed absolute — the same class of mistake as P0a's own dedup-LRU sizing needing to be derived, not
+copied (§9.2 item 6).
+
+**Still sim-only.** 295 tests (up from 288), detekt clean, both variants green. Production wiring
+(MeshFrameCodec wire format, MeshGattClient/MeshGattServer connection-lifecycle rewrite for
+persistence, BeaconRadio RSSI capture for `LinkSelector`'s real diversity signal, a connection
+registry so RelayResponder can flood-forward across every currently-open link rather than just the
+one frame arrived on) is next — this is the largest, most invasive change in the project's history,
+touching exactly the subsystem responsible for the most historical regressions (decisions 1, 2, 5,
+8, 9, A2 all live here). Not started this pass; see NEXT_STEPS/PLAN-v2.md for the concrete checklist.
+

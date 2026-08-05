@@ -38,6 +38,30 @@ class SimNetwork(
             return SimNetwork(nodes, random) { map }
         }
 
+        /** Nodes placed on a ring at [positions] (0.0-1.0, wrapping), edges between any pair within
+         *  [radius] of each other — a genuine SPATIAL topology, unlike [randomRegular]'s uniform
+         *  random picks. This is what makes P3's diversity-vs-first-heard gate meaningful at all:
+         *  in a uniformly random graph every neighbour is already "diverse" by construction, so
+         *  there's no clustering-on-whoever's-nearest failure mode for diversity selection to fix.
+         *  On a ring, every candidate within radius is spatially close to every OTHER candidate
+         *  within radius, which is exactly the real-crowd shape §9.2 item 2 describes. */
+        fun spatialRing(
+            nodes: List<SimNode>,
+            positions: Map<String, Double>,
+            radius: Double,
+            random: Random = Random(SEED),
+        ): SimNetwork {
+            fun ringDistance(a: Double, b: Double): Double {
+                val d = kotlin.math.abs(a - b)
+                return minOf(d, 1.0 - d)
+            }
+            val map = nodes.associate { node ->
+                val pos = positions.getValue(node.id)
+                node.id to nodes.filter { it.id != node.id && ringDistance(pos, positions.getValue(it.id)) <= radius }
+            }
+            return SimNetwork(nodes, random) { map }
+        }
+
         /** Linear ramp of [subject]'s degree between two static regimes over [DegreeRampSpec] —
          *  S4 "walking in" (low -> high) and S3 "walking out" (high -> low) are the same shape
          *  with the endpoints swapped. The rest of [nodes] form a static crowd [subject] moves

@@ -63,6 +63,48 @@ ships in no APK):
   §1.3 lists these among the "keyed on a value that churns" concern, but the actual fix for a
   per-connection-scoped value is bounding it (done, above), not re-keying it.
 
+### P1 forwarding-plane simulator work (sim-only, no APK change, same 0.5.0-dev cycle)
+
+Built P1 (PLAN-v2.md §5.3, "the change that matters") in the simulator, per the same discipline as
+P0a/P0b: nothing production-risky until its sim gate passes. Two new pure classes — `DedupCache`
+(in-memory hot-layer dedup, 3000 entries per §9.2 item 6's derivation) and `ForwardingPolicy`
+(jitter/TTL-clamp/fanout-subset, gated on currently-open link count) — plus `ForwardingPlaneEngine`
+in the sim, layering immediate-forward-on-open-links over the same connection lifecycle
+`CatalogSyncEngine` already models. 288 tests (up from 270), detekt clean, both variants green.
+
+**Real finding, not a positive result to gloss over:** measured against the sim, P1 alone does NOT
+deliver its own hardware-gate headline claim ("3 phones in a line — a relayed SOS arrives in
+seconds, not the current ~45s/hop"). The literal 3-phone-line topology measured 52s (vs v1's ~90s
+worst case); D=3 average convergence measured 31.7s vs the v1-baseline engine's 36.0s — real, but
+~12%, not order-of-magnitude. Root cause: flood can only use a link that's already open, and under
+the still-connect/sync/disconnect lifecycle (P3 "persistent links" not yet built) a link is open
+only ~15-20s of every ~60-65s cycle regardless of density. Full reasoning and the D=400 result
+(100% delivery, 50/50 items, latency distribution unmeasured) in `docs/DECISIONS.md` decision 16.
+Deliberately NOT wired into production (`MeshFrameCodec`/`RelayResponder`/GATT layer untouched) —
+the wire-format work (a packet header needing its own explicit hop field, decoupled from TTL) is
+real and scoped, but committing to it before resolving how P1 and P3 should actually be sequenced
+together risks building the wrong shape twice.
+
+### P3 link-management simulator work (sim-only, no APK change, same 0.5.0-dev cycle)
+
+Built P3 (persistent links) in the simulator immediately after P1, per the user's explicit
+sequencing call following P1's own finding above: measure P1+P3 together before touching
+production. New `LinkSelector` (pure, ble/) makes the diversity-vs-first-heard eviction decision;
+new `PersistentForwardingEngine` in the sim replaces the fixed-session connection lifecycle with a
+genuinely persistent one, reusing P1's `ForwardingPolicy`/`DedupCache` unchanged. 295 tests (up
+from 288), detekt clean, both variants green.
+
+**Result: P3 closes P1's gap, dramatically.** Re-running P1's own 3-phone-line hardware-gate
+scenario under the combined engine measured **48ms**, down from P1-alone's 52,000ms — because both
+links are already open by the time the SOS is injected, so the flood crosses both hops in one
+jitter window instead of waiting out a reconnect cycle. Confirms P1 and P3 need to land together,
+not sequentially. Full reasoning, plus a real test bug found and fixed along the way (a diversity
+threshold not scaled to the neighbourhood size it was being compared against), in
+`docs/DECISIONS.md` decision 17.
+
+Still sim-only — production wiring (wire format, GATT connection-lifecycle rewrite, RSSI capture,
+a connection registry) is the next, largest piece of work, not started this pass.
+
 ## [0.4.0] — positions and presence are now blind-relayable, and the hop count actually moves
 
 The headline bug this release finally root-causes: on a live 3-phone A-B-C topology, the group row
