@@ -84,6 +84,16 @@ class MeshGattClient(
     // disconnect branch to pick which of the two cooldowns above applies, then cleared either way.
     private val syncedThisSession = ConcurrentHashMap.newKeySet<String>()
 
+    // Guards onServicesDiscovered's setup (registration + pushOnConnect + periodicRefresh) against
+    // running more than once for the same connection. Some Android BLE stacks re-fire onMtuChanged
+    // (which unconditionally calls discoverServices()) without an intervening disconnect, so
+    // onServicesDiscovered itself can fire two or three times a second or so apart for one physical
+    // link — harmless when connections were short-lived (pre-P3), but now spawns duplicate
+    // periodicRefresh loops that live and independently re-push frames for the connection's entire
+    // persistent lifetime. Identity-keyed (add() is atomic — exactly "run this once per gatt");
+    // cleaned up on disconnect below since a BluetoothGatt object isn't reused across reconnects.
+    private val handledGatts = ConcurrentHashMap.newKeySet<BluetoothGatt>()
+
     // Which attempt is currently the live one for each address. Both watchdogs below capture the
     // value at launch and bail if it has moved on — without that, a watchdog scheduled by an
     // EARLIER attempt to the same address fires while a LATER, perfectly healthy connection is in
@@ -264,6 +274,24 @@ class MeshGattClient(
         DiagnosticsLog.event("conn", "synced ok: ${address.take(PEER_ID_LOG_CHARS)}")
     }
 
+    /** Re-pushes presence/position every [BleTuning.Profile.presenceRefreshIntervalMs] for as
+     *  long as [registryKey] stays in [heldConnections] — see `RelayResponder.refreshFramesToPush`
+     *  / docs/DECISIONS.md decision 20. Loop, not a fixed count: a persistent link's actual
+     *  lifetime is open-ended (diversity-evicted, fails, or the distant backstop), so this simply
+     *  stops on its own the moment the link is no longer held, checked at the top of every
+     *  iteration rather than assumed from how long [awaitBackstop] happens to run. */
+    private suspend fun periodicRefresh(
+        gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, registryKey: String,
+    ) {
+        while (heldConnections.containsKey(registryKey)) {
+            delay(BleTuning.forTier(currentTier()).presenceRefreshIntervalMs)
+            if (!heldConnections.containsKey(registryKey)) return
+            for (bytes in responder.refreshFramesToPush(registryKey)) {
+                write(gatt, characteristic, bytes)
+            }
+        }
+    }
+
     /** The distant safety-net backstop only — see [BleTuning.Profile.connectionBackstopMs]'s doc.
      *  A healthy persistent link is expected to still be held when this returns; the caller
      *  disconnects unconditionally, same as it always did at the old (much shorter) cap. */
@@ -291,6 +319,7 @@ class MeshGattClient(
                 activeTrackerKey.remove(address)
                 writeQueue.clear(address)
                 negotiatedMtu.remove(address)
+                handledGatts.remove(gatt)
                 gatt.close()
             }
         }
@@ -304,6 +333,10 @@ class MeshGattClient(
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            // Some stacks re-fire this (via a duplicate onMtuChanged) without a real disconnect in
+            // between — see handledGatts' doc. Second and later firings for the same link are a
+            // no-op here.
+            if (!handledGatts.add(gatt)) return
             val characteristic = gatt.getService(MeshProtocol.SERVICE_UUID)
                 ?.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: run { gatt.disconnect(); return }
             gatt.setCharacteristicNotification(characteristic, true)
@@ -327,6 +360,7 @@ class MeshGattClient(
                 heldConnections[registryKey] = HeldConnection(gatt, characteristic)
                 connectionRegistry.register(registryKey) { bytes -> write(gatt, characteristic, bytes) }
                 pushOnConnect(gatt, characteristic)
+                serviceScope.launch { periodicRefresh(gatt, characteristic, registryKey) }
                 // From here the link is persistent (see class doc) — this suspends until the
                 // distant backstop, not an idle timer; disconnectHeld/considerEvicting are what
                 // normally end a healthy link before that, from outside this coroutine entirely.

@@ -54,6 +54,13 @@ object BleTuning {
          *  Deliberately minutes, not seconds — the whole point of P3 is that a link surviving past
          *  the old ~20s ceiling is normal, not a leak. */
         val connectionBackstopMs: Long,
+        /** How often a HELD (persistent) link re-pushes presence/position (§5.3's "~15s exchange
+         *  on already-open links") — see `RelayResponder.refreshFramesToPush`/decision 20. Without
+         *  this, presence/position only ever crossed a link once, at connection start; P3 keeping
+         *  links open for minutes turned that into radar data going stale for the link's entire
+         *  life, confirmed live 2026-08-05. Catalogue content (SOS) doesn't need this cadence — it
+         *  has its own event-driven flood-forward (P1) that fires the moment something new exists. */
+        val presenceRefreshIntervalMs: Long,
     )
 
     /** On-screen: check for payload changes more often (faster group round-robin / SOS-hop pickup),
@@ -66,6 +73,7 @@ object BleTuning {
         advertiseMode = AdvertiseSettings.ADVERTISE_MODE_BALANCED,
         advertiseTxPower = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
         connectionBackstopMs = 10 * 60_000L,
+        presenceRefreshIntervalMs = 15_000L,
     )
 
     /** Backgrounded / power-saver: check less often — pure CPU/DB-query saving, since the radio
@@ -76,6 +84,7 @@ object BleTuning {
         advertiseMode = AdvertiseSettings.ADVERTISE_MODE_BALANCED,
         advertiseTxPower = AdvertiseSettings.ADVERTISE_TX_POWER_HIGH,
         connectionBackstopMs = 20 * 60_000L,
+        presenceRefreshIntervalMs = 30_000L,
     )
 
     fun forTier(tier: MeshService.PowerTier): Profile =

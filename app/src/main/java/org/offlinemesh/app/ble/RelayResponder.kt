@@ -322,6 +322,25 @@ class RelayResponder(
         if (wifiDirectCoordinator?.capabilityAdvertisable() == true) {
             frames += MeshFrameCodec.encodeWifiDirectCap(version = 1)
         }
+        frames += presenceAndPositionFrames(toPeer)
+        for (meta in relay.relayableEvidenceMeta()) {
+            // Always sent — this bitset changes as chunks arrive, so it has to keep flowing every
+            // connection until the transfer completes on both ends, same as before this change.
+            frames += MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
+        }
+        return frames
+    }
+
+    /** Presence + position — own, relayed for other members, and blind-carried for groups we
+     *  aren't in — the LIVE, time-sensitive subset of [framesToPushOnConnect]'s full set. Called
+     *  once as part of that (connection start) AND periodically thereafter on an already-open
+     *  link (see [refreshFramesToPush] / `MeshGattClient`'s periodic-refresh loop, PLAN-v2.md P3 /
+     *  docs/DECISIONS.md decision 20): everything else `framesToPushOnConnect` sends (the catalog
+     *  filter, WFD cap, evidence manifests) either doesn't need this cadence of refreshing or is
+     *  already handled by P1's event-driven flood-forward — only presence/position go stale purely
+     *  from TIME passing on a link that's no longer cycling every ~45-60s the way v1's did. */
+    private suspend fun presenceAndPositionFrames(toPeer: String?): List<ByteArray> {
+        val frames = mutableListOf<ByteArray>()
         for (g in repo.groupDao.getActiveGroups()) {
             // A tiny authenticated "I'm a member of this group, on this connection" heartbeat, sent
             // first for every group we're in. This is what makes presence work when beacon discovery
@@ -336,29 +355,32 @@ class RelayResponder(
             }
             frames += positionFramesToPush(g.id, toPeer)
         }
-        // Positions we're carrying for groups we aren't in. Outside the per-group loop above on
-        // purpose: these belong to groups absent from getActiveGroups() precisely because we're not
-        // a member, so that loop would never reach them.
+        // Positions/presence we're carrying for groups we aren't in. Outside the per-group loop
+        // above on purpose: these belong to groups absent from getActiveGroups() precisely because
+        // we're not a member, so that loop would never reach them.
         // Budgeted, like every other relay path here (MAX_RELAYED_POSITIONS_PER_GROUP for member
         // positions, MAX_CATALOG_ITEMS_PER_SESSION for content). This one previously wasn't: two
         // 200-entry stores could emit up to 400 frames, unbudgeted, at the FRONT of the push — and
-        // since every frame is a serialised GATT write inside a 15-20s connection, a phone carrying
-        // for several strangers' groups could spend its entire connection on their traffic and
-        // never reach the evidence manifests below, or answer the peer's catalog filter. Blind
-        // carriage must not outrank the mesh's own delivery.
+        // since every frame is a serialised GATT write, a phone carrying for several strangers'
+        // groups could spend an entire push on their traffic. Blind carriage must not outrank the
+        // mesh's own delivery.
         val carried = opaquePositions.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
             opaquePresence.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION)
         if (carried.isNotEmpty()) {
             frames += carried
             DiagnosticsLog.event("relay", "forwarding ${carried.size} opaque frame(s)")
         }
-        for (meta in relay.relayableEvidenceMeta()) {
-            // Always sent — this bitset changes as chunks arrive, so it has to keep flowing every
-            // connection until the transfer completes on both ends, same as before this change.
-            frames += MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
-        }
         return frames
     }
+
+    /** Call periodically (~15-20s, see `MeshGattClient`'s refresh loop) on an already-open,
+     *  persistent link — PLAN-v2.md P3 kept links open far past the moment
+     *  [framesToPushOnConnect] used to be the only chance presence/position ever had to cross one.
+     *  Confirmed live (2026-08-05, docs/DECISIONS.md decision 20): without this, a peer's radar
+     *  dot only ever refreshed when a connection happened to drop and reopen, which — now that
+     *  links can stay up for 10-20 minutes — read as "the radar doesn't work" for the entire
+     *  life of a healthy link. */
+    suspend fun refreshFramesToPush(toPeer: String?): List<ByteArray> = presenceAndPositionFrames(toPeer)
 
     /** My own fix, plus whatever I'm holding on behalf of other group members, one hop further out
      *  — capped to the nearest [MAX_RELAYED_POSITIONS_PER_GROUP] (see [selectPositionsToRelay]'s
@@ -507,31 +529,42 @@ class RelayResponder(
         // isNew alone (relay.ingestSos's DB-backed dedup, not a separate in-memory layer — see
         // docs/DECISIONS.md decision 18 for why DedupCache stays unwired here for now): a
         // duplicate has nothing new to flood.
-        if (isNew) floodForwardSos(frame, hopsFromOrigin, peerAddress)
+        // excludeKey is best-effort split horizon: resolves to whatever learnPeerIdentity just
+        // taught the resolver above, which may not exactly match the key this connection
+        // originally registered under if identity resolution changed mid-connection (see
+        // ConnectionRegistry's registeredKey/activeTrackerKey docs). Worst case is a redundant
+        // echo back to the sender, which their own ingestSos dedup silently absorbs — not a
+        // correctness bug.
+        if (isNew) floodForwardSos(frame.sos, hopsFromOrigin, excludeKey = peerIdentity.resolve(peerAddress))
     }
 
-    /** Forwards [frame] (re-stamped with [hopsFromOrigin] and a degree-clamped TTL) to a fanout
-     *  subset of every currently-open link EXCEPT the one it arrived on, after a degree-scaled
-     *  jitter — all via the real [ForwardingPolicy], exactly as gated in the P0a/P1 simulator
-     *  (`ForwardingPlaneEngine`) before this was trusted with production wiring. */
-    private suspend fun floodForwardSos(
-        frame: MeshFrameCodec.Frame.Sos, hopsFromOrigin: Int, arrivedFromAddress: String,
-    ) {
+    /** Call right after [RelayEngine.createSos] succeeds for a message THIS device originated —
+     *  see `MeshService.sendSos`. Without this, a freshly-authored message only ever left the
+     *  device via `framesToPushOnConnect`'s one-shot push at the START of a connection; now that
+     *  P3 keeps links open far past that moment (decision 19), an already-open link at the time of
+     *  sending would otherwise never carry it at all until that link eventually drops and a new
+     *  one forms. This is what closes that gap: the origin's own copy gets the exact same
+     *  immediate flood-forward a received frame gets in [handleSos], just with no arrival peer to
+     *  exclude and hop 0 (it's already the origin's own value — see `SosEntity.hop`'s doc). */
+    suspend fun floodForwardLocalSos(sos: SosEntity) {
+        floodForwardSos(sos, hopsFromOrigin = sos.hop, excludeKey = null)
+    }
+
+    /** Forwards [sos] (re-stamped with [hopsFromOrigin] and a degree-clamped TTL) to a fanout
+     *  subset of every currently-open link EXCEPT [excludeKey] (null = no exclusion, the local-
+     *  origin case), after a degree-scaled jitter — all via the real [ForwardingPolicy], exactly
+     *  as gated in the P0a/P1 simulator (`ForwardingPlaneEngine`) before this was trusted with
+     *  production wiring. */
+    private suspend fun floodForwardSos(sos: SosEntity, hopsFromOrigin: Int, excludeKey: String?) {
         val openLinkCount = connectionRegistry.openLinkCount()
-        val forwardedTtl = ForwardingPolicy.forwardedTtl(frame.sos.ttl, openLinkCount)
+        val forwardedTtl = ForwardingPolicy.forwardedTtl(sos.ttl, openLinkCount)
         if (forwardedTtl <= 0) return
-        // Best-effort split horizon: resolves to whatever learnPeerIdentity just taught the
-        // resolver, which may not exactly match the key this connection originally registered
-        // under if identity resolution changed mid-connection (see ConnectionRegistry's
-        // registeredKey/activeTrackerKey docs). Worst case is a redundant echo back to the sender,
-        // which their own ingestSos dedup silently absorbs — not a correctness bug.
-        val excludeKey = peerIdentity.resolve(arrivedFromAddress)
         val candidates = connectionRegistry.others(excludeKey).keys.toList()
         if (candidates.isEmpty()) return
         val targets = ForwardingPolicy.linksToForwardOn(
-            candidates, messageIdSeed = frame.sos.id.hashCode().toLong(), openLinkCount = openLinkCount,
+            candidates, messageIdSeed = sos.id.hashCode().toLong(), openLinkCount = openLinkCount,
         )
-        val outgoing = MeshFrameCodec.encodeSos(frame.sos.copy(hop = hopsFromOrigin, ttl = forwardedTtl))
+        val outgoing = MeshFrameCodec.encodeSos(sos.copy(hop = hopsFromOrigin, ttl = forwardedTtl))
         delay(ForwardingPolicy.pickJitterMs(openLinkCount))
         val liveTargets = connectionRegistry.others(excludeKey)
         for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)

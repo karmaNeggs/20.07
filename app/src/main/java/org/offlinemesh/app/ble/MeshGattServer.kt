@@ -15,6 +15,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -40,6 +41,9 @@ import java.util.concurrent.ConcurrentHashMap
  * peer's notify until this one has actually completed at the controller level, not just been
  * issued.
  */
+@Suppress("LongParameterList") // one collaborator per constructor param, same shape RelayResponder
+// and MeshGattClient already use elsewhere in this file — not a candidate for a params-object
+// without adding an abstraction this codebase doesn't otherwise use.
 class MeshGattServer(
     private val context: Context,
     private val bluetoothManager: BluetoothManager,
@@ -51,6 +55,9 @@ class MeshGattServer(
     // Same shared instance RelayResponder writes to (PLAN-v2.md §5.2 / P0b). Read only here, to
     // resolve a registry key consistent with every other peer-keyed view in this app.
     private val peerIdentity: PeerIdentityResolver,
+    // Drives BleTuning.Profile.presenceRefreshIntervalMs for the periodic presence/position
+    // refresh on held connections — see periodicRefresh's doc / decision 20.
+    private val currentTier: () -> MeshService.PowerTier,
 ) {
     private var gattServer: BluetoothGattServer? = null
     private val subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>() // mutated from BLE callback threads
@@ -152,14 +159,40 @@ class MeshGattServer(
         }
     }
 
+    /** Server-role counterpart to `MeshGattClient.periodicRefresh` — same reasoning (decision 20):
+     *  presence/position must not go stale for a persistent link's entire lifetime just because
+     *  [pushOnConnect] only ever fires once, at connection start. Loops for as long as [device]
+     *  stays in [connectedDevices], checked at the top of every iteration. */
+    private suspend fun periodicRefresh(device: BluetoothDevice, registryKey: String) {
+        while (connectedDevices.contains(device.address)) {
+            delay(BleTuning.forTier(currentTier()).presenceRefreshIntervalMs)
+            if (!connectedDevices.contains(device.address)) return
+            pushRefresh(device, registryKey)
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun pushRefresh(device: BluetoothDevice, registryKey: String) {
+        val server = gattServer ?: return
+        val characteristic = server.getService(MeshProtocol.SERVICE_UUID)
+            ?.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: return
+        for (bytes in responder.refreshFramesToPush(registryKey)) {
+            notify(device, characteristic, bytes)
+        }
+    }
+
     @SuppressLint("MissingPermission")
     private val callback = object : BluetoothGattServerCallback() {
         override fun onDescriptorWriteRequest(
             device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray
         ) {
-            subscribedDevices.add(device)
             if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            // add() is atomic and returns false if this device was already subscribed — a client
+            // whose own onServicesDiscovered re-fires (see MeshGattClient's handledGatts doc) issues
+            // a second CCCD write for the same still-open link; without this guard that would spawn
+            // a second periodicRefresh loop here that lives for the connection's whole lifetime.
+            if (!subscribedDevices.add(device)) return
             responder.resetSessionBudget(device.address)
             // Registered as soon as the link can actually accept a notify — see
             // ConnectionRegistry's class doc and registeredKey's doc on why the key is captured
@@ -172,6 +205,7 @@ class MeshGattServer(
                 notify(device, characteristic, bytes)
             }
             serviceScope.launch { pushOnConnect(device) }
+            serviceScope.launch { periodicRefresh(device, key) }
         }
 
         override fun onCharacteristicWriteRequest(

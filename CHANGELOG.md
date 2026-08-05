@@ -1,5 +1,83 @@
 # Changelog
 
+## [0.6.3-dev] — Bluetooth off/on no longer strands the mesh
+
+Third live test round, same overall 3-phone session (2026-08-05): messages instant, radar tracked
+correctly at 1-2 hops. Two hop-count questions turned out to be expected behavior, not bugs (see
+`docs/DECISIONS.md` decision 22 for the full reasoning): asymmetric hop readings between two phones
+are normal — `HopTracker` is per-device/per-observer, not a shared value — and an observed "4 hops"
+on a 3-phone setup is a rare, self-correcting artifact of position updates being deliberately
+undeduplicated, made to look worse than it is by staleness grace *growing* with hop count.
+
+One real bug found: toggling Bluetooth off then back on (manual toggle, airplane mode, some battery
+savers) left the mesh permanently stranded — confirmed in this same test round, only recovered by
+manually tapping the app's own offline/online toggle. Root cause: `MeshService`'s
+`ACTION_STATE_CHANGED` receiver only ever updated a UI-facing flag; it never actually restarted the
+radios. `setMeshActive(true)`/`(false)` already had the correct stop/restart sequence — it just
+wasn't wired to the real Bluetooth-adapter event, only to the manual toggle.
+
+- `MeshService`: `setMeshActive`'s radio-handling split into `startRadios()`/`stopRadios()`. The
+  Bluetooth-adapter receiver now calls these on a genuine off→on or on→off transition, gated on the
+  mesh actually being meant to be active (`_meshActive.value`) so it never fights a deliberate
+  manual "offline" toggle. New `DiagnosticsLog` events (`bluetooth back on - restarting radios` /
+  `bluetooth off - stopping radios`) so a future log review doesn't need this round's guesswork to
+  tell whether an adapter cycle happened.
+
+304 tests, detekt clean, both variants green. NOT yet hardware-confirmed — this is new this pass.
+
+## [0.6.2-dev] — second live test confirms the 0.6.1-dev fix; finds a duplicate-callback leak
+
+Second hardware test, this time of 0.6.1-dev (3 phones, `DiagnosticsLog` exports from all three
+reviewed). Both symptoms from the first test are confirmed fixed by log evidence: position updates
+now arrive in a continuous ~15s cadence for the entire session (previously one-shot, then stale)
+and a chat message was delivered on an already-open connection with no new connect event anywhere
+nearby (previously stuck until a fresh connection formed). The one new symptom reported — "radar
+error, said waiting for GPS fix" on one phone, not the others — was a per-device location-accuracy
+setting, not a mesh bug; resolved by the user and confirmed working after.
+
+Investigating the logs for unrelated anomalies found one real bug: the same peer address logging
+`synced ok` two or three times within about a second — far too fast to be a genuine disconnect and
+reconnect. Root cause: some Android BLE stacks re-fire `onMtuChanged` (which unconditionally calls
+`discoverServices()`) without an intervening disconnect, so `onServicesDiscovered` fires more than
+once for one physical link. Before P3 this was harmless (a short-lived connection just ran
+`pushOnConnect` twice in the same few seconds); now it silently spawns a second, independent
+`periodicRefresh` loop that lives and keeps re-pushing frames for the connection's entire persistent
+lifetime (minutes) — wasted radio/battery, not a correctness bug (dedup already absorbs the
+duplicate frames on the receiving end).
+
+- `MeshGattClient`: new `handledGatts` identity-set guards `onServicesDiscovered`'s setup
+  (registration, `pushOnConnect`, `periodicRefresh`) to run at most once per connection; cleaned up
+  on disconnect.
+- `MeshGattServer`: `onDescriptorWriteRequest`'s existing (previously unused) `subscribedDevices.add`
+  return value now gates the same setup, for the symmetric case where a client's duplicate CCCD
+  write reaches the server side.
+
+304 tests, detekt clean, both variants green. NOT yet hardware-confirmed itself — this specific fix
+is new this pass; the message/radar fixes it sits on top of ARE hardware-confirmed as of this
+round.
+
+## [0.6.1-dev] — first live P1+P3 test finds and fixes two "only received content moves" gaps
+
+First hardware test of 0.6.0-dev (2 of 3 phones' `DiagnosticsLog` exports reviewed). Reported: a
+message between two already-connected phones sat delayed; the radar didn't update; both resolved
+the moment a third phone joined — "like a relay happened." Root cause, both symptoms: P1's flood-
+forward and the one-shot connect-time push both only ever moved content that either just *arrived*
+or that existed at the *moment a connection opened* — nothing told an already-open, now-persistent
+link about content *originated locally* mid-session. Full diagnosis in `docs/DECISIONS.md`
+decision 20.
+
+- `MeshService.sendSos` now calls the same flood-forward a received SOS gets, immediately after
+  creating it — a message no longer waits for the next connection to form.
+- New periodic presence/position refresh (`RelayResponder.refreshFramesToPush`, run every 15-30s by
+  both `MeshGattClient` and `MeshGattServer` on every held connection) — without this, a radar dot
+  only ever refreshed once, at connection start, and then went stale for the *entire* life of a
+  persistent link (now minutes), the opposite of what P3 was for.
+- Evidence-header/nickname content still only moves via the one-shot connect-time push — same shape
+  of gap, deliberately not revisited this pass (smaller blast radius than SOS/radar).
+
+304 tests, detekt clean, both variants green. Hardware-confirmed in the 0.6.2-dev round above: both
+fixes hold under a second live 3-phone test.
+
 ## [0.6.0-dev] — P1 forwarding + P3 persistent links land in production
 
 First production wiring of PLAN-v2 P1 (forwarding plane) and P3 (persistent links), built together

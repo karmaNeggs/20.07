@@ -124,20 +124,31 @@ class MeshService : Service() {
         if (active) {
             locationTracker.start()
             compassTracker.start()
-            gattServer.start()
-            beaconRadio.startAdvertising()
-            beaconRadio.startScanning()
+            startRadios()
             startForegroundNotification()
         } else {
-            beaconRadio.stop()
-            gattClient.disconnectAll()
-            gattServer.stop()
+            stopRadios()
             locationTracker.stop()
             compassTracker.stop()
             wifiDirectAccelerator.abortCurrent()
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
         _meshActive.value = active
+    }
+
+    // Split out of setMeshActive so the Bluetooth-adapter receiver below can restart just the
+    // radio-dependent pieces (not location/compass/the notification, which have nothing to do with
+    // Bluetooth) when the OS toggles the adapter off then back on underneath a still-active mesh.
+    private fun startRadios() {
+        gattServer.start()
+        beaconRadio.startAdvertising()
+        beaconRadio.startScanning()
+    }
+
+    private fun stopRadios() {
+        beaconRadio.stop()
+        gattClient.disconnectAll()
+        gattServer.stop()
     }
 
     /** Replaces three near-identical `while(true)`/`try`/`catch`/`delay(1000)` polling loops that
@@ -180,10 +191,35 @@ class MeshService : Service() {
     // in and out of "Bluetooth is off" together instead of drifting independently.
     private val _bluetoothEnabled = MutableStateFlow(true)
     val bluetoothEnabled: StateFlow<Boolean> = _bluetoothEnabled
+    // Before this, an OS-level Bluetooth off->on cycle (manual toggle, airplane mode, some OEM
+    // battery savers) left the mesh permanently stranded: this receiver only ever updated
+    // [_bluetoothEnabled] for the radar screens' display, never actually restarted anything, so the
+    // only working recovery was the user manually tapping the app's own offline/online toggle,
+    // which happens to run [stopRadios]/[startRadios] for an unrelated reason. Live-tested finding
+    // (2026-08-05): a 3-phone session where one phone's Bluetooth was toggled off then on needed
+    // exactly that manual workaround to come back — nothing here did it on its own.
     private val bluetoothStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val state = intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
-            _bluetoothEnabled.value = state == BluetoothAdapter.STATE_ON
+            val wasEnabled = _bluetoothEnabled.value
+            val nowEnabled = state == BluetoothAdapter.STATE_ON
+            _bluetoothEnabled.value = nowEnabled
+            // The user's own offline toggle already stopped the radios and means it on purpose —
+            // don't fight that by restarting anything behind it.
+            if (!_meshActive.value) return
+            if (nowEnabled && !wasEnabled) {
+                DiagnosticsLog.event("mesh", "bluetooth back on - restarting radios")
+                // Defensive stop first: our own connection-side state (heldConnections,
+                // subscribedDevices, ConnectionRegistry entries) still thinks links are open even
+                // though the adapter died under them — same "clean slate before restart" reasoning
+                // as every other defensive-cleanup path in this codebase (see MeshGattClient's hard-
+                // deadline watchdog doc). stop() is idempotent even if there's nothing real to stop.
+                stopRadios()
+                startRadios()
+            } else if (!nowEnabled && wasEnabled) {
+                DiagnosticsLog.event("mesh", "bluetooth off - stopping radios")
+                stopRadios()
+            }
         }
     }
 
@@ -215,7 +251,7 @@ class MeshService : Service() {
         ) { sos, groupName -> notifySos(sos, groupName) }
 
         gattServer = MeshGattServer(
-            this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity,
+            this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity, ::currentTier,
         ).also { it.start() }
         gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry)
         beaconRadio = BeaconRadio(bluetoothManager, repo, hopTracker, serviceScope, ::currentTier) { device, rssi ->
@@ -282,6 +318,14 @@ class MeshService : Service() {
     suspend fun sendSos(groupId: String, text: String): SosEntity {
         val sos = relay.createSos(groupId, text)
         hopTracker.markSosOrigin(groupId, sos.id)
+        // PLAN-v2.md P1 §5.3 / docs/DECISIONS.md decision 20: without this, a freshly-authored
+        // message only ever left the device via framesToPushOnConnect's one-shot push at the
+        // START of a connection — now that P3 keeps links open far past that moment, an
+        // already-open link at send time would otherwise never carry it until that link happens
+        // to drop and a new one forms. Confirmed live: exactly this symptom (a message between
+        // two already-connected phones sitting undelivered until a third phone's arrival forced
+        // fresh connections).
+        responder.floodForwardLocalSos(sos)
         return sos
     }
 

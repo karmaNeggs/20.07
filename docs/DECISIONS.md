@@ -759,3 +759,172 @@ sustained multi-hour real 3-phone session (P3's own stated hardware gate) before
 bug fixes above, or the mechanism as a whole, should be trusted the way the rest of this codebase's
 hardware-verified passes are.
 
+## 20. First live P1+P3 hardware test finds two real gaps — both "only received content moves"
+
+3-phone live test, 2026-08-05, the day after decisions 18-19 shipped. Symptom reported: a message
+sent between two ALREADY-CONNECTED phones sat undelivered with a real delay; the radar didn't
+update; both resolved themselves the moment a third phone joined the group — "like a relay
+happened." Diagnostics logs from two of the three phones (exported via the existing debug-only
+`DiagnosticsLog`, the async hardware-verification workflow PLAN-v2.md Part 7 documents) confirmed
+two clean ~8.5min and ~4.3min gaps with zero connection activity on both phones, then a burst the
+moment the third phone's connections came up.
+
+**Root cause, both gaps: everything P1/P3 built only reacts to content already on the wire.**
+`RelayResponder.floodForwardSos` (decision 18) fires from `handleSos` — i.e. only when a frame
+*arrives*. `framesToPushOnConnect` fires once, at the moment a connection first opens. Neither path
+covers content this device *originates itself*, mid-session, on a link that's already open and now
+(decision 19) stays open for minutes. `MeshService.sendSos` just called `RelayEngine.createSos` and
+returned — nothing told any open link a new message existed. It only ever left the device when a
+NEW connection happened to form and hit the one-shot `framesToPushOnConnect` path, which is exactly
+what the third phone joining did (fresh connections → fresh one-shot pushes → the stuck messages
+rode out on those). Position/presence had the identical shape but a worse consequence: with no
+event that fires "position changed" the way SOS creation does, a peer's radar dot was going stale
+for the ENTIRE life of a persistent link, not just until the next message — the app's headline
+feature effectively broken for as long as a link stayed healthy, the opposite of what P3 intended.
+
+**Fixes, both additive, no behaviour removed:**
+- `RelayResponder.floodForwardLocalSos(sos)` — the SAME flood-forward `handleSos` already does for
+  received frames, called from `MeshService.sendSos` right after `RelayEngine.createSos` succeeds.
+  `hopsFromOrigin = sos.hop` (already 0 for a freshly authored entity) and no `excludeKey` (nothing
+  to exclude — this device IS the origin). `floodForwardSos` was refactored to take the `SosEntity`
+  directly instead of a received `Frame.Sos`, so both call sites share one implementation.
+- New `RelayResponder.refreshFramesToPush(toPeer)` / `presenceAndPositionFrames` (extracted from
+  `framesToPushOnConnect`, which now just calls it): presence + own/relayed/blind-carried position,
+  the live, time-sensitive subset — deliberately NOT the catalog filter, WFD cap, or evidence
+  manifests, which either don't need this cadence or are already event-driven via P1. Both
+  `MeshGattClient` and `MeshGattServer` now run a `periodicRefresh` loop per held connection
+  (`BleTuning.Profile.presenceRefreshIntervalMs`, new field — 15s ACTIVE / 30s RELAY, matching
+  §5.3's own "~15s exchange on already-open links"), looping for as long as the link stays held and
+  stopping itself the moment it's evicted or disconnects — checked fresh at the top of every
+  iteration, not assumed from any other loop's lifetime.
+- `MeshGattServer` gained a `currentTier: () -> MeshService.PowerTier` constructor param (didn't
+  have one before — server-role connection handling never needed tier-driven timing until now).
+
+**What this does NOT fix, and is worth stating plainly:** evidence-header and nickname content
+still only move via the one-shot connect-time push — decision 18 already deferred flood-forwarding
+them, and this pass didn't revisit that. They have the SAME "stuck until a new connection forms"
+exposure SOS had before this fix, now that links persist. Flagged, not resolved — same shape of gap,
+smaller blast radius (evidence/nicknames aren't the app's time-critical path the way SOS/radar are).
+
+**Hardware-confirmed as of decision 21's second test round** — both (1) and (2) below hold under a
+live 3-phone session: (1) a message sent on an already-open link arrives without waiting for a new
+connection, (2) a radar dot keeps refreshing for the full lifetime of a persistent link, not just at
+connection start.
+
+## 21. Second live test confirms decision 20's fix; finds a duplicate-`onServicesDiscovered` leak
+
+3-phone live test, 2026-08-05, re-testing 0.6.1-dev (decision 20's fix). `DiagnosticsLog` exports
+from all three phones reviewed. User reported one new, unrelated symptom this round — "radar error,
+said waiting for GPS fix" on one phone only — traced to that phone's own location-accuracy setting
+(the "Waiting for GPS fix…" text in `HomeScreen.kt`/`NavigateScreen.kt` is the app's normal
+no-location-yet state, not a mesh fault); the user fixed it locally and confirmed the radar then
+worked on all three. No code change for this one.
+
+Confirming decision 20's fix from the logs: `[recv] position` events for a session's whole duration
+now cluster in a clean, unbroken ~15s cadence (matching `presenceRefreshIntervalMs`) from first
+connection to last log line — the exact opposite of the single-then-stale pattern decision 20 fixed.
+A chat message (`[recv] NEW sos ... member=true`) was delivered with the nearest `[conn] synced ok`
+tens of seconds earlier and no connection event anywhere near the delivery itself — confirms
+delivery is happening on an already-open link, not gated behind a fresh connection forming.
+
+**New finding, unrelated to decision 20's fix, found by auditing the logs for anything else
+unusual:** the same peer address logged `[conn] synced ok` two or three times within about a
+second — far too fast to be a real disconnect-then-reconnect (a full BLE reconnect cycle, scan +
+connect + MTU + service discovery + CCCD, does not complete in under a second). Root cause: several
+Android BLE stacks are known to re-fire `onMtuChanged` — which `MeshGattClient`'s callback
+unconditionally answers by calling `gatt.discoverServices()` — without an intervening disconnect,
+so `onServicesDiscovered` itself fires two or three times for one physical link. Before decision 19
+(persistent links) this only meant `pushOnConnect` ran redundantly within the same few seconds a
+short-lived connection was open anyway — wasteful but self-limiting. Since decision 19, the exact
+same duplicate firing spawns an EXTRA, fully independent `periodicRefresh` loop (decision 20) per
+duplicate — each one living and re-pushing frames on its own 15-30s cycle for the connection's
+entire persistent lifetime (now minutes), not just the setup window. Purely a radio/battery-waste
+bug, not a correctness one: `RelayEngine`'s existing `seenDao`-based dedup already absorbs whatever
+duplicate frames the extra loops produce, so nothing here explains any user-visible symptom from
+either test round — found by auditing, not by a reported symptom.
+
+**Fix, both GATT roles, matching the existing idiom each file already used for exactly this kind of
+guard (`syncedThisSession`, `subscribedDevices`):**
+- `MeshGattClient`: new `handledGatts: ConcurrentHashMap.newKeySet<BluetoothGatt>()`. `add()` is
+  atomic — `onServicesDiscovered` checks it first and returns immediately on a repeat callback for a
+  gatt already handled; removed on disconnect (`BluetoothGatt` instances aren't reused across
+  reconnects, so no unbounded growth to guard against).
+- `MeshGattServer`: `onDescriptorWriteRequest` already called `subscribedDevices.add(device)`
+  unconditionally with the return value unused — now gates the same setup (registration,
+  `pushOnConnect`, `periodicRefresh`) on that return value, covering the symmetric case where a
+  peer's own duplicate `onServicesDiscovered` sends a second CCCD write for a link the server
+  already has open. The GATT-level `sendResponse` ack still happens unconditionally either way —
+  Android expects one regardless of what the app does with a repeat write.
+
+304 tests, detekt clean, both variants green. This specific fix is new this pass and NOT yet
+hardware-confirmed itself (nothing currently shows it changing user-visible behavior — it removes
+waste, not a symptom); the message/radar fixes it sits on top of ARE hardware-confirmed as of this
+same round. Per standing instruction, this stays uncommitted until the user re-tests or explicitly
+asks to commit.
+
+## 22. Third live test: two hop-count questions explained (not bugs), one real Bluetooth-recovery bug fixed
+
+Third round of the same overall 3-phone live session (2026-08-05), this time spread across real
+distance (balcony / hall / far corridor). Reported: messages instant, radar tracking worked at 1-2
+hops as expected — genuinely positive result, better than any prior round. Three specific questions
+raised, answered by reading `HopTracker`/`PositionTracker` (`MeshProtocol.kt`) directly rather than
+from logs:
+
+**Asymmetric hop count (phone 1 sees phone 3 at 2 hops, phone 3 sees phone 1 at 1 hop) — normal, not
+a bug.** `HopTracker` is per-device and per-observer by construction: each phone's `table`/
+`lastSource`/`lastUpdated` maps track "the best path *this device* has personally heard reported,"
+never a value shared or reconciled across phones. `updateHop`'s acceptance rule (a report that
+improves the tracked value is always accepted; a report that doesn't is only accepted from the
+route's own current owner) means two phones with different actual open links to each other, or
+different report timing, can legitimately and simultaneously disagree — nothing here assumes or
+requires symmetry.
+
+**"4 hops" observed on a 3-phone setup, radar blank at the time, traced by the user to that phone's
+Bluetooth being off — plausible, and here's the mechanism.** Steady-state, 3 physical nodes can never
+legitimately need more than 2 hops (direct, or via the third). A `4` requires the FIRST report ever
+recorded for that (groupId, target) key to itself be an inflated, bounced value — position frames are
+deliberately not deduplicated (unlike SOS/messages), so during the chaotic multi-link connection-
+churn phase a relayed copy of a peer's own position can plausibly reach a device before the direct
+copy does. A later, better report immediately corrects it (`candidate < current` always wins,
+regardless of source) — this is normally invisible and self-healing within seconds. The part worth
+flagging: `effectiveStaleMs`/`effectiveMaxAgeSeconds` (`HopTracker`/`PositionTracker` companions) both
+GROW staleness grace by 45s per hop beyond the first — a deliberate, previously-justified design
+(protects legitimate multi-hop propagation delay from flickering; see `HopTracker.staleMs`'s own
+doc comment for the live-tested reasoning behind it). Side effect: a bad `4`
+reading, once recorded, is trusted for `180s + 3*45s` ≈ 5.25 minutes — LONGER grace than a correct
+`1` reading gets (180s flat) — so if nothing ever corrects it (exactly what happened here: that
+peer's Bluetooth went off before a better report could arrive), the wrong value outlives a correct
+one would. Self-correcting under normal traffic, cosmetic, NOT fixed this pass — logged as backlog,
+not release-blocking, since the app's actual group size (3-8, PLAN-v2 §5.5) keeps the worst case
+small and rare.
+
+**Real bug, fixed: OS-level Bluetooth off→on did not self-heal the mesh.** Live-confirmed this same
+round: toggling Bluetooth off then back on left presence/radar/messaging dead until the user found,
+by trial, that manually tapping the app's own offline/online toggle fixed it. Root cause:
+`MeshService`'s `bluetoothStateReceiver` (registered on `ACTION_STATE_CHANGED`, added pre-dating this
+decisions log as a radar-safety gate) only ever updated `_bluetoothEnabled`, the flow the three radar
+screens read to hide stale-looking dots — it never called into `beaconRadio`/`gattServer`/
+`gattClient` at all. `setMeshActive(true)`/`(false)` already had the correct sequence
+(`beaconRadio.stop()`+`gattClient.disconnectAll()`+`gattServer.stop()` / the mirrored start calls) —
+it simply was never invoked by the real adapter event, only by the user's manual toggle. Since
+`BeaconRadio.startAdvertising()`/`startScanning()` already re-fetch `bluetoothLeAdvertiser`/
+`bluetoothLeScanner` fresh from the adapter on every call (confirmed by reading the source — not
+cached once at construction), a plain stop-then-start on the OS event is sufficient; no deeper
+re-initialization is needed.
+
+**Fix:** `setMeshActive`'s radio-handling extracted into `startRadios()`/`stopRadios()` (no behavior
+change to `setMeshActive` itself — same calls, just named and shared). `bluetoothStateReceiver` now
+calls `stopRadios()`+`startRadios()` on a genuine OFF→ON transition, and `stopRadios()` alone on
+ON→OFF, so the app's own connection-side state (`heldConnections`, `subscribedDevices`,
+`ConnectionRegistry` entries — all still "believing" links are open when the adapter died under
+them) gets cleaned up promptly rather than sitting stale until the next manual toggle. Both branches
+are gated on `_meshActive.value` — if the user turned the mesh off deliberately via the app's own
+control, a Bluetooth adapter event must not fight that by restarting anything. New `DiagnosticsLog`
+events (`"bluetooth back on - restarting radios"` / `"bluetooth off - stopping radios"`) — this
+round's own diagnosis needed the user's manual recollection ("turns out the other phone's bluetooth
+was off") because nothing in the log said so; future rounds won't need that.
+
+304 tests, detekt clean, both variants green. NOT yet hardware-confirmed — new this pass, needs a
+live off→on Bluetooth cycle to verify against. Per standing instruction, stays uncommitted (along
+with decisions 20-21's still-uncommitted work) until the user re-tests or explicitly asks to commit.
+
