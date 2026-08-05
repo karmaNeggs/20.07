@@ -623,6 +623,14 @@ fallback and capability circuit-breaker mandatory. Hardware `ScanFilter` on the 
 degree-gated report batching land here (§9.2 item 1). **The §5.5 fail-open rule (I5) is a P2
 acceptance criterion, not a later refinement** — Trickle without it turns "walked out of the crowd"
 into "went silent."
+**STATUS (2026-08-06): Tier 1 sim started, narrow first pass (I5/fail-open only) — see
+`docs/DECISIONS.md` decision 23.** Real finding: fail-open works once degree drops meaningfully
+below the redundancy constant, but S3's own literal endpoint (D=2) sits exactly on `TrickleTimer`'s
+own default redundancy constant (also 2) and does NOT fail open there — an open decision (three
+options logged in decision 23) that needs resolving before production wiring starts, not just a
+sim curiosity. Also refines "audibly loud again within one interval of leaving" to closer to two
+intervals, measured. No production code touched. Full presence/position/SOS/hop-gradient payload
+model, degree-gated scan batching, and Tier 2/3 gates not started.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
@@ -814,3 +822,16 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    Courier envelopes at 24 h and content at 48 h may want to converge. In regime R2 this is also a
    storage question: a blind relay carrying 400 people's traffic for 48 h is a different proposition
    from carrying three people's. Interacts with item 1.
+5. **Manual relay-pattern tuning knobs, user-facing (proposed 2026-08-06, not yet built).** A
+   settings section exposing the actual §5.4/§5.1 tuning constants (Trickle intervals/redundancy
+   constant, fanout subsetting thresholds, connection counts, TTL) as user-adjustable, for someone
+   who knows their own situation is dense/sparse/indoor/outdoor better than degree-measurement can
+   react to. Sensible defaults preset, a clear "don't touch this unless you know what you're doing"
+   warning, and a matching guide in the README/site. **Sequencing matters more than the feature
+   itself**: this only makes sense to build AFTER §5.4's automatic, degree-driven adaptation (P2
+   plus the rest of §5.4) is implemented and hardware-confirmed, not before — building it earlier
+   means "presets" are just raw, untested knobs with no proven automatic baseline to preset *from*,
+   and risks a user picking the wrong manual preset and getting WORSE behaviour than the automatic
+   system would have given them for free (the whole point of §5.4's "adapt from measured degree,
+   not a fixed schedule" design). Revisit once P2 ships and the sustained-session gate (§6.4) is
+   cleared for P1+P3, not before.

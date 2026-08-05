@@ -928,3 +928,69 @@ was off") because nothing in the log said so; future rounds won't need that.
 check: toggling Bluetooth off then back on recovered the mesh on its own, no manual offline/online
 toggle needed. Committed alongside decisions 20-21's work as `de1c97e`.
 
+## 23. P2 Tier-1 sim: TrickleTimer's own default sits on the wrong side of S3's own endpoint
+
+First P2 (broadcast tier, `PLAN-v2.md` §5.1 Tier B / Part 7) sim work, 2026-08-05. Deliberately
+narrow first pass: rather than the full presence/position/SOS/hop-gradient payload model, targets
+the single riskiest claim Part 7 names as a P2 ACCEPTANCE CRITERION (not a later refinement) —
+§5.5's fail-open rule, I5, mechanised in `Invariants.checkFailOpen` since P0a but never exercised
+against real Trickle behaviour until now. New `BroadcastTierEngine.kt`/`BroadcastTierNode` wrap the
+REAL production `TrickleTimer` (same "no reimplementation" discipline as every other sim engine in
+this package), driven through S3's own scripted degree profile ("Walking out": D 300 → 2 over 60s,
+`PLAN-v2.md` §6.3) with production's real `BeaconRadio` tuning (`minIntervalMs`=5s,
+`maxIntervalMs`=60s, `redundancyConstant`=2 — none of these invented for the sim). New `P2GateTest.kt`.
+
+**Bug caught in the sim harness itself before any finding could mean anything: naive sighting
+injection.** `TrickleTimer.onSighting()` expects one call per actual neighbour broadcast heard,
+accumulated over however long the window stays open — it is not itself time-aware. The engine's
+first draft called it `degree` times on every 1s poll tick, which inflates the count by the
+poll-frequency/window-length ratio, not just degree: at a 60s backed-off window that is up to 60
+injections of `degree` each in ONE window, so even a genuinely isolated node (D=0) registered
+~18,000 sightings and stayed "suppressed" forever regardless of real degree — a bug in the harness,
+not in `TrickleTimer`. Fixed by injecting sightings only once per `sightingIntervalMs` (defaults to
+`TrickleTimer`'s own `minIntervalMs`, the fastest any real neighbour could plausibly re-announce)
+and capping the count per injection (`sightingCap`, default 5) rather than raw degree — a crowd
+should read as "clearly over the redundancy constant," not as an unbounded number. Bundled into new
+`BroadcastTierTuning` data class (detekt `LongParameterList`, same fix shape as `SimNodeConfig`).
+
+**Real finding #1 (positive): fail-open genuinely works once degree drops meaningfully below the
+redundancy constant.** At D=0 after the walk-out ramp, the node resumes transmitting well within
+`maxIntervalMs`, matching P2's own "audibly loud again within one interval of leaving" language in
+spirit. `isSuppressed()`'s level-style read (not `shouldTransmit()`'s one-shot pulse) is confirmed
+as the correct usage for a continuously-running advertising set, matching `BeaconRadio`'s existing
+long-range-channel pattern.
+
+**Real finding #2 (refines the "one interval" claim): worst case is closer to two intervals, not
+one.** Measured directly: first post-isolation touch landed ~75s after the walk-out ramp completed
+against a 60s `maxIntervalMs` — not "one interval," because `TrickleTimer`'s window boundary is not
+realigned when conditions change. Whichever window happens to be "in flight" when isolation begins
+may have started up to `maxIntervalMs` BEFORE that moment, then takes up to another `maxIntervalMs`
+to close and re-evaluate. A real, mechanised correction to file alongside `PLAN-v2.md` P2's own
+acceptance text, not a hypothetical — worth tightening that prose to "within two intervals" before
+this becomes a hardware-test expectation someone measures against the wrong number.
+
+**Real finding #3 (the one that actually matters before any production wiring): S3's own literal
+scenario endpoint sits exactly on `TrickleTimer`'s own default boundary, and does NOT fail open.**
+`PLAN-v2.md` §6.3's S3 row says "D 300 → 2," literally — not "→ 0." `TrickleTimer`'s acceptance rule
+is `sightingsThisWindow < redundancyConstant` (default 2, from `BeaconRadio`'s real tuning) —
+STRICTLY fewer than the constant. A node still hearing exactly 2 same-purpose neighbours reads as
+"still redundant" and never fails open, no matter how long it waits — directly contradicting what
+"walked out"/isolated is supposed to mean at the tail of this exact scenario. Confirmed by running
+the identical scenario at D=2 (unmodified from the plan's own numbers) vs. D=0: D=0 fails open
+cleanly (finding #1 above); D=2 never does, mechanised and reproducible, not a one-off timing
+artifact. This is a genuine open decision for whenever P2's production wiring starts, not resolved
+by this sim pass: (a) lower `redundancyConstant` for presence/position/SOS content specifically so
+2 genuinely means "clearly redundant, not borderline," (b) treat real isolation as needing to reach
+some degree below 2 before the parameter judges it as such (accepting that S3's own chosen number
+was optimistic), or (c) reconsider what "sighting" should even be scoped to before wiring this
+in — own-group-only witnessing (matching `BeaconRadio`'s current class doc, "a neighbor's own
+long-range beacon for the SAME group") vs. counting any locally-heard broadcast including other
+groups' relayed content (which would make sighting counts track swarm density, not group size, and
+changes what "D" in S2/S3/S4 even means for this specific mechanism) — flagged, not decided here.
+
+307 tests (up from 304, +3 for `P2GateTest`), detekt clean, both variants green. Sim-only — no
+production code touched this pass; `TrickleTimer.kt` itself is unchanged. Tier 2/Tier 3 gates for
+P2 (scan-storm measurement, 3-phone hardware pass) not started; per `PLAN-v2.md`'s own phase-gating
+discipline, P2 production wiring should not begin until finding #3 above has an actual decision,
+and P1+P3 has had the sustained multi-hour session it's still waiting on (see decision 22's update).
+

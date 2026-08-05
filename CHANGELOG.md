@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] — P2 Tier-1 sim: fail-open works, but not at S3's own literal endpoint
+
+First P2 (broadcast tier) sim work — sim-only, no production code touched. Targets the single
+acceptance criterion `PLAN-v2.md` Part 7 calls out by name for this phase: §5.5's fail-open rule
+(I5), using the real production `TrickleTimer` (no reimplementation) driven through S3's own
+scripted "walking out" scenario (D 300 → 2 over 60s) with production's real tuning.
+
+- New `BroadcastTierEngine.kt`/`BroadcastTierNode`/`BroadcastTierTuning`, `P2GateTest.kt`.
+- `Invariants.checkFailOpen` generalized to take a plain node id instead of a `SimNode` (P2's nodes
+  aren't `SimNode`s) — two call sites in `InvariantsTest.kt` updated.
+- **Finding**: fail-open genuinely works once degree drops meaningfully below the redundancy
+  constant (confirmed at D=0), with worst-case detection closer to *two* backed-off intervals, not
+  the "one interval" `PLAN-v2.md`'s own P2 text currently says.
+- **Bigger finding**: S3's own literal scenario endpoint (D=2) sits exactly on `TrickleTimer`'s own
+  default redundancy constant (also 2) and does NOT fail open there — a node hearing exactly 2
+  same-purpose neighbours reads as "still redundant" forever. Real, mechanised, reproducible — not
+  a hypothetical. Full reasoning and options in `docs/DECISIONS.md` decision 23. Flagged as an open
+  decision before P2 production wiring starts, not resolved by this sim pass.
+
+307 tests (up from 304), detekt clean, both variants green.
+
 ## [0.6.3-dev] — Bluetooth off/on no longer strands the mesh
 
 Third live test round, same overall 3-phone session (2026-08-05): messages instant, radar tracked

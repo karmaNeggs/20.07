@@ -61,12 +61,10 @@ class InvariantsTest {
     @Test
     fun `I5 passes when a recent radio touch exists and fails after prolonged silence`() {
         val metrics = SimMetrics()
-        val clock = SimClock()
-        val node = SimNode("n", clock, PeerKeyMode.STABLE_PUBKEY)
         metrics.recordRadioTouch("n", 5_000L)
-        Invariants.checkFailOpen(node, metrics, sinceMs = 0L, nowMs = 10_000L, maxSilenceMs = 10_000L)
+        Invariants.checkFailOpen("n", metrics, sinceMs = 0L, nowMs = 10_000L, maxSilenceMs = 10_000L)
         assertThrows(IllegalStateException::class.java) {
-            Invariants.checkFailOpen(node, metrics, sinceMs = 0L, nowMs = 100_000L, maxSilenceMs = 10_000L)
+            Invariants.checkFailOpen("n", metrics, sinceMs = 0L, nowMs = 100_000L, maxSilenceMs = 10_000L)
         }
     }
 

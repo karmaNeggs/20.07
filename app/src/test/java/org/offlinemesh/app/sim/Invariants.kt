@@ -64,13 +64,14 @@ object Invariants {
     /** I5 — no node goes silent: every suppression mechanism fails open. The node must have
      *  touched its radio at least once within [maxSilenceMs] before [nowMs] (counting from
      *  [sinceMs], so a scenario can check "silent since leaving the crowd" rather than the whole
-     *  run). */
-    fun checkFailOpen(node: SimNode, metrics: SimMetrics, sinceMs: Long, nowMs: Long, maxSilenceMs: Long) {
+     *  run). Takes a plain [nodeId] rather than a [SimNode] — this only ever needed the id, and
+     *  P2's [BroadcastTierNode] is not a [SimNode]. */
+    fun checkFailOpen(nodeId: String, metrics: SimMetrics, sinceMs: Long, nowMs: Long, maxSilenceMs: Long) {
         val lastTouch = metrics.radioTouches
-            .filter { it.first == node.id && it.second in sinceMs..nowMs }
+            .filter { it.first == nodeId && it.second in sinceMs..nowMs }
             .maxOfOrNull { it.second }
         check(lastTouch != null && nowMs - lastTouch <= maxSilenceMs) {
-            "I5 violated: node ${node.id} went silent for more than ${maxSilenceMs}ms " +
+            "I5 violated: node $nodeId went silent for more than ${maxSilenceMs}ms " +
                 "(last radio touch: $lastTouch, now: $nowMs)"
         }
     }
