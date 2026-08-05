@@ -23,7 +23,8 @@ wasn't wired to the real Bluetooth-adapter event, only to the manual toggle.
   `bluetooth off - stopping radios`) so a future log review doesn't need this round's guesswork to
   tell whether an adapter cycle happened.
 
-304 tests, detekt clean, both variants green. NOT yet hardware-confirmed — this is new this pass.
+304 tests, detekt clean, both variants green. Hardware-confirmed 2026-08-05 via a quick 2-phone
+check: Bluetooth off→on recovered the mesh on its own.
 
 ## [0.6.2-dev] — second live test confirms the 0.6.1-dev fix; finds a duplicate-callback leak
 

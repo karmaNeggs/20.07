@@ -8,13 +8,12 @@ balcony/hall/corridor) was unambiguously positive (instant messages, correct hop
 found/fixed a Bluetooth off→on recovery gap. Full detail in `docs/DECISIONS.md` decisions 14-22 and
 `CHANGELOG.md`.
 
-**RESUME HERE:** v0.6.3-dev's Bluetooth-recovery fix (decision 22) has NOT been hardware-tested yet
-— it needs one specific check: toggle Bluetooth off then back on while the mesh is running, confirm
-it recovers without the manual offline/online-toggle workaround, then export `DiagnosticsLog` (the
-new `bluetooth back on/off` events will confirm the code path actually ran) and review it. After
-that's confirmed, the biggest open item is the **sustained multi-hour 3-phone session** P3's own
-class doc calls for (§6.4) — none of the three rounds so far was longer than tens of minutes. Only
-after that should P2 (broadcast tier) start. Do not begin P2 before both of those.
+**RESUME HERE (updated 2026-08-05):** v0.6.3-dev's Bluetooth-recovery fix (decision 22) is now
+hardware-confirmed via a quick 2-phone check — toggling Bluetooth off then back on recovered the
+mesh on its own. All of decisions 20-22 committed as `de1c97e`. The remaining open item before P1+P3
+is fully trusted is the **sustained multi-hour 3-phone session** P3's own class doc calls for
+(§6.4) — none of the four rounds so far has been longer than tens of minutes. Only after that should
+P2 (broadcast tier) start. Do not begin P2 before that.
 
 **Written:** 2026-07-31, after reading bitchat's WHITEPAPER.md end-to-end and re-reading our own
 transport layer and live diagnostics 8/9/10 against it.
@@ -642,16 +641,17 @@ silently made this whole phase a no-op); setMeshActive(false)/onDestroy would ha
 held connection past the old ~20s residual they assumed; a ConcurrentHashMap `in`-operator gotcha
 (KT-18053, resolves to containsValue not containsKey) would have made two safety checks permanent
 no-ops, caught by the Kotlin compiler as a hard error before any test ran. Compile/test-verified
-(304 tests), detekt clean, both variants green. Three live 3-phone rounds (2026-08-05) confirm the
+(304 tests), detekt clean, both variants green. Four live 3-phone rounds (2026-08-05) confirm the
 core mechanism holds — persistent links stay open, deliver on demand (decision 20), diversity
 eviction fires correctly (decision 21) — and found/fixed a duplicate-`onServicesDiscovered`
 radio-waste bug (decision 21) and a Bluetooth off→on recovery gap (decision 22), both purely by
 auditing logs / probing reported behavior, not from a failure the sim gate could have predicted.
 Round 3 (real distance — balcony/hall/corridor) was unambiguously positive: instant messages, correct
 1-2 hop tracking. Two hop-count questions from round 3 turned out to be expected per-observer
-behavior, not bugs (decision 22). **None of the three rounds yet was the sustained multi-hour session
-this phase's own class doc calls for — all three were short (tens of minutes) ad hoc tests. That
-longer session is still the open bar before this is fully trusted.**
+behavior, not bugs (decision 22). Round 4 (quick 2-phone check) confirmed decision 22's Bluetooth-
+recovery fix directly. **None of the four rounds yet was the sustained multi-hour session this
+phase's own class doc calls for — all were short (tens of minutes) ad hoc tests. That longer session
+is still the open bar before this is fully trusted.**
 Persistent links replacing connect/sync/disconnect; retire the 45 s
 cooldown regime; diversity-based link selection; RSSI-gated scheduling.
 *Sim gate: at D = 400, diversity selection beats first-heard on reachability by a measurable margin.*

@@ -924,7 +924,7 @@ events (`"bluetooth back on - restarting radios"` / `"bluetooth off - stopping r
 round's own diagnosis needed the user's manual recollection ("turns out the other phone's bluetooth
 was off") because nothing in the log said so; future rounds won't need that.
 
-304 tests, detekt clean, both variants green. NOT yet hardware-confirmed — new this pass, needs a
-live off→on Bluetooth cycle to verify against. Per standing instruction, stays uncommitted (along
-with decisions 20-21's still-uncommitted work) until the user re-tests or explicitly asks to commit.
+304 tests, detekt clean, both variants green. **Hardware-confirmed 2026-08-05** via a quick 2-phone
+check: toggling Bluetooth off then back on recovered the mesh on its own, no manual offline/online
+toggle needed. Committed alongside decisions 20-21's work as `de1c97e`.
 
