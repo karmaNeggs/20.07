@@ -1,19 +1,30 @@
 # 20.07 v2 — scaling plan
 
-**Status (2026-08-05, checkpoint):** P0a, P0b, P1, P3 implemented and shipped as v0.6.0-dev through
-v0.6.3-dev, committed. Three live 3-phone hardware rounds completed this same day — round 1 found
-and fixed two "only received content moves" gaps (message delay, radar staleness), round 2 confirmed
-both fixes and found/fixed a duplicate-connection-callback radio-waste bug, round 3 (real distance:
-balcony/hall/corridor) was unambiguously positive (instant messages, correct hop tracking) and
-found/fixed a Bluetooth off→on recovery gap. Full detail in `docs/DECISIONS.md` decisions 14-22 and
-`CHANGELOG.md`.
+**RESUME HERE — current status as of 2026-08-06, end of session.** This is the single status block
+to trust; anything else in this document (including inline "STATUS" notes inside Part 7 below) is
+detail underneath this, not a competing source. If a phase's own section below ever seems to
+disagree with this block, this block is current and that section is what's stale.
 
-**RESUME HERE (updated 2026-08-05):** v0.6.3-dev's Bluetooth-recovery fix (decision 22) is now
-hardware-confirmed via a quick 2-phone check — toggling Bluetooth off then back on recovered the
-mesh on its own. All of decisions 20-22 committed as `de1c97e`. The remaining open item before P1+P3
-is fully trusted is the **sustained multi-hour 3-phone session** P3's own class doc calls for
-(§6.4) — none of the four rounds so far has been longer than tens of minutes. Only after that should
-P2 (broadcast tier) start. Do not begin P2 before that.
+- **Shipped and committed, on `main`, PUSHED to origin (public):** P0a (crowd simulator), P0b (peer
+  identity), P1 (SOS flood-forward), P3 (persistent links) — v0.6.0-dev through v0.6.3-dev.
+- **Hardware-confirmed across four live 3-phone test rounds** (2026-08-05): message-delay fix,
+  radar-staleness fix, duplicate-connection-callback fix, Bluetooth off→on recovery fix. Full detail
+  in `docs/DECISIONS.md` decisions 18-22.
+- **P2 (broadcast tier): Tier-1 SIM work only has started, NOT production wiring.** Deliberately
+  narrow first pass (§5.5's fail-open rule only) found a real, unresolved open decision — see
+  decision 23. Do not begin P2 PRODUCTION wiring until that decision is made.
+- **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
+  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`.
+- **NOT committed to git**: nothing as of this checkpoint — everything above is committed
+  (`a0d45e1` is the latest commit). If you find uncommitted changes when resuming, they're from a
+  session after this one.
+- **The one thing still genuinely missing before P1+P3 is fully trusted**: a **sustained multi-hour
+  3-phone session** — all four rounds so far were short (tens of minutes) ad hoc tests, not the
+  longer session §6.4 calls for.
+- **Next planned test**: user is running a full-day session across up to 10 devices, date TBD from
+  their side — will bring back logs afterward for review. This is a bigger test than anything done
+  so far (device count and duration both); treat its findings as the most current information
+  available, ahead of everything summarized above.
 
 **Written:** 2026-07-31, after reading bitchat's WHITEPAPER.md end-to-end and re-reading our own
 transport layer and live diagnostics 8/9/10 against it.

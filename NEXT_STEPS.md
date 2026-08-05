@@ -3,11 +3,13 @@
 **Superseded by `PLAN-v2.md` for scaling work (2026-08-05):** where the two disagree, PLAN-v2.md is
 now the source of truth (explicit user decision) — e.g. its P0a crowd simulator is IN scope despite
 this file's own "Dropped" section below, which predates that decision. This file's narrower 3-phone-
-reliability items below are still real and still tracked here; PLAN-v2.md's phases (P0a-P1-P3 now
-shipped as v0.6.0-dev through v0.6.3-dev, three hardware rounds done — see PLAN-v2.md's own
-"RESUME HERE" note and `docs/DECISIONS.md` decisions 14-22) are tracked there. **This file's own
-next step is stale as of this checkpoint** — the live items below (E1/E2) predate this session's
-P1/P3 work and should be re-read against decisions 20-22 before acting on them, not executed as-is.
+reliability items below are still real and still tracked here; PLAN-v2.md's phases (P0a-P1-P3 shipped
+as v0.6.0-dev through v0.6.3-dev, hardware-confirmed across four live rounds, pushed to origin; P2
+Tier-1 sim started — see PLAN-v2.md's own "RESUME HERE" note at the top, the single most current
+status pointer for this whole project, and `docs/DECISIONS.md` decisions 14-23) are tracked there.
+**This file's own next step is stale as of this checkpoint** — the live items below (E1/E2) predate
+this session's P1/P3 work and should be re-read against decisions 20-23 before acting on them, not
+executed as-is.
 
 **Scope, deliberately narrow:** get the debug/sideloaded APK to relay reliably with bugless
 connections across **3 phones**. Not v1. Everything else is parked below.
