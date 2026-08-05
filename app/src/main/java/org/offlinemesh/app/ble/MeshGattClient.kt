@@ -39,6 +39,9 @@ class MeshGattClient(
     private val responder: RelayResponder,
     private val serviceScope: CoroutineScope,
     private val currentTier: () -> MeshService.PowerTier,
+    // Same shared instance RelayResponder writes to (PLAN-v2.md §5.2 / P0b) — see
+    // PeerIdentityResolver's class doc. Read only here.
+    private val peerIdentity: PeerIdentityResolver,
 ) {
     private val writeQueue = GattOperationQueue()
     private val maxConcurrentClientConnections = 3
@@ -86,12 +89,24 @@ class MeshGattClient(
     private val attemptGeneration = ConcurrentHashMap<String, Long>()
     private val attemptCounter = java.util.concurrent.atomic.AtomicLong(0)
 
+    // The attemptTracker key actually used for the address's CURRENT attempt, captured once at
+    // attemptStarted and reused for every later callback of that same connection — see
+    // PeerIdentityResolver's class doc. Deliberately NOT re-resolved on every call: if
+    // peerIdentity.learn() fires mid-connection (a presence frame arriving on THIS connection),
+    // re-resolving later callbacks would ask attemptTracker to end a key attemptStarted never
+    // actually started, leaking the original key's `connecting` entry forever. Bounded by
+    // maxConcurrentClientConnections in practice (one entry per address currently being dialled
+    // or connected), cleaned up on every path that ends an attempt below.
+    private val activeTrackerKey = ConcurrentHashMap<String, String>()
+
     @Synchronized
     @SuppressLint("MissingPermission")
     fun maybeConnect(device: BluetoothDevice) {
         val addr = device.address
-        if (!attemptTracker.canAttempt(addr)) return
-        attemptTracker.attemptStarted(addr)
+        val trackerKey = peerIdentity.resolve(addr)
+        if (!attemptTracker.canAttempt(trackerKey)) return
+        attemptTracker.attemptStarted(trackerKey)
+        activeTrackerKey[addr] = trackerKey
         val generation = attemptCounter.incrementAndGet()
         attemptGeneration[addr] = generation
         val gatt = device.connectGatt(context, false, callback)
@@ -103,11 +118,12 @@ class MeshGattClient(
         serviceScope.launch {
             delay(connectTimeoutMs)
             if (attemptGeneration[addr] != generation) return@launch // superseded by a newer attempt
-            if (attemptTracker.isStuck(addr)) {
+            if (attemptTracker.isStuck(trackerKey)) {
                 Log.w("MeshGattClient", "connect attempt to $addr never got a callback — forcing cleanup")
                 try { gatt.close() } catch (_: Exception) {}
                 DiagnosticsLog.event("conn", "timeout, no callback: ${addr.take(PEER_ID_LOG_CHARS)}")
-                attemptTracker.connectionEnded(addr)
+                attemptTracker.connectionEnded(trackerKey)
+                activeTrackerKey.remove(addr)
                 return@launch
             }
             // Second watchdog, for the failure the first one structurally cannot see. Once
@@ -120,7 +136,7 @@ class MeshGattClient(
             // (connectionMaxMs caps a real one at ~20s), so this can only ever catch a hung one.
             delay(connectionHardDeadlineMs - connectTimeoutMs)
             if (attemptGeneration[addr] != generation) return@launch // superseded by a newer attempt
-            if (attemptTracker.isTracked(addr)) {
+            if (attemptTracker.isTracked(trackerKey)) {
                 Log.w("MeshGattClient", "connection to $addr hung past its hard deadline — forcing cleanup")
                 DiagnosticsLog.event("conn", "hung past deadline: ${addr.take(PEER_ID_LOG_CHARS)}")
                 try { gatt.disconnect() } catch (_: Exception) {}
@@ -128,7 +144,8 @@ class MeshGattClient(
                 writeQueue.clear(addr)
                 lastActivity.remove(addr)
                 negotiatedMtu.remove(addr)
-                attemptTracker.connectionEnded(addr, synced = syncedThisSession.remove(addr))
+                attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(addr))
+                activeTrackerKey.remove(addr)
             }
         }
     }
@@ -177,12 +194,18 @@ class MeshGattClient(
     @SuppressLint("MissingPermission")
     private val callback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            attemptTracker.callbackReceived(gatt.device.address)
+            val address = gatt.device.address
+            // Falls back to the raw address if, somehow, this callback fires after maybeConnect's
+            // own cleanup already removed the entry (e.g. racing the hard-deadline watchdog) —
+            // matches ConnectionAttemptTracker's own graceful handling of an address it never
+            // tracked in the first place.
+            val trackerKey = activeTrackerKey[address] ?: address
+            attemptTracker.callbackReceived(trackerKey)
             if (newState == BluetoothProfile.STATE_CONNECTED) {
                 gatt.requestMtu(517)
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                val address = gatt.device.address
-                attemptTracker.connectionEnded(address, synced = syncedThisSession.remove(address))
+                attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(address))
+                activeTrackerKey.remove(address)
                 writeQueue.clear(address)
                 lastActivity.remove(address)
                 negotiatedMtu.remove(address)

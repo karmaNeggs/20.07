@@ -63,6 +63,9 @@ class MeshService : Service() {
     private lateinit var relay: RelayEngine
     val hopTracker = HopTracker()
     val positionTracker = PositionTracker()
+    // Shared between RelayResponder (writes) and MeshGattClient (reads) — see its class doc /
+    // PLAN-v2.md §5.2 (P0b).
+    private val peerIdentity = PeerIdentityResolver()
     lateinit var locationTracker: LocationTracker
         private set
     lateinit var compassTracker: CompassTracker
@@ -201,11 +204,11 @@ class MeshService : Service() {
             capabilityCheck = { WifiDirectCapabilities.supported(applicationContext) },
         )
         responder = RelayResponder(
-            repo, relay, hopTracker, positionTracker, locationTracker, wifiDirectCoordinator
+            repo, relay, hopTracker, positionTracker, locationTracker, peerIdentity, wifiDirectCoordinator
         ) { sos, groupName -> notifySos(sos, groupName) }
 
         gattServer = MeshGattServer(this, bluetoothManager, responder, serviceScope).also { it.start() }
-        gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier)
+        gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity)
         beaconRadio = BeaconRadio(bluetoothManager, repo, hopTracker, serviceScope, ::currentTier) { device ->
             gattClient.maybeConnect(device)
         }

@@ -453,3 +453,91 @@ relays through the middle phone as expected. Closes the loop on this decision's 
 Decision 8's adaptive round-robin dwell (a separate, narrower claim about advertise-restart
 frequency, not observable from hop count or relay behavior alone) remains unconfirmed on hardware.
 
+## 14. The crowd simulator has to reproduce a known-bad number before it can be trusted with a new one
+
+PLAN-v2.md's whole scaling argument rests on numbers nobody had measured above 2-3 phones. Building
+a simulator that just *asserts* v2 will work would be worthless — it would agree with whatever
+mechanism it was handed. So P0a's own gate isn't "does the simulator run," it's "does the simulator,
+run against the CURRENT (v1) mechanism, reproduce the specific bad numbers already measured on real
+hardware" (`20.07 mesh diagnostics 10`: 93% empty catalogue syncs, one connection roughly every 50s
+at D=3). Only once that's true does a D=400 projection from the same harness mean anything.
+
+This caught a real bug in the harness itself before it shipped: the first draft let both nodes in a
+pair independently decide to initiate a connection to each other, since nothing modelled which side
+of a link actually scans-and-connects in production. That doubled the effective connection rate for
+every pair, and the calibration test measured a ~31s pair-sync cadence against v1's real ~50s —
+almost exactly 2x too fast. Fixed by having only the lexicographically-lower node id initiate toward
+a given peer (a real GATT link is one connection per pair, not two) — the arbitrary-looking rule is
+fine precisely because it's arbitrary: any consistent total order gives every pair exactly one
+initiator, which is the actual property being modelled, not the specific ordering.
+
+Deliberately built as `app/src/test`-only Kotlin, not a new Gradle module: it drives the same
+Android-free classes (`ConnectionAttemptTracker`, `CatalogFilter`, `OpaqueFrameRelay`) production
+code already uses, via `./gradlew test`, and ships in no APK. A discrete-event scheduler
+(`SimEventQueue`, priority-queue driven, not a fixed tick) is what makes D=400 over a 90-simulated-
+minute run finish in the same few seconds as every other unit test — real wall-clock time is spent
+only on the events that actually happen, not on ticking through idle time between them.
+
+Scoped to seven of PLAN-v2.md §6.3's eleven named scenarios (S1, S2, S6, S7, S8, S9, S11).
+Deliberately not built yet: S3/S4 (mobility) need a broadcast tier with Trickle suppression to have
+anything meaningful to assert — I5 (fail-open) is trivially satisfied by an engine with no
+suppression mechanism at all, and a test that always passes for the wrong reason is worse than no
+test; S5 needs courier/store-and-forward logic (P4); S10 needs a bulk-media-transfer model (P5).
+`SimNetwork.degreeRamp` (the mobility primitive S3/S4 need) is already built and unused, waiting for
+P2's broadcast-tier engine to share this same rig against.
+
+## 15. Peer state moves off the BLE MAC — the middle path, not full re-identification
+
+PLAN-v2.md §5.2 calls for keying local peer state on "the per-(device,group) Ed25519 public key."
+The literal reading turned out to be the wrong shape for this codebase: the pubkey itself is only
+useful for cryptographic verification, and `RelayResponder` already has a simpler stable handle
+sitting right next to it — `senderId`, which is `GroupRepository.deviceId` (a random-per-install
+UUID, global across a device's every group, already sent in cleartext on presence heartbeats). Using
+`senderId` as the local-state key achieves exactly what §5.2 asks for (a device identity that
+survives address rotation, never new on the wire) without threading pubkey bytes through call sites
+that only ever needed a stable string to compare.
+
+**Where this landed, and where it deliberately didn't:**
+- `HopTracker.considerNeighborReport`/`considerDirectHop`'s `sourceId` param, at all three call
+  sites (SOS, presence, relayed position) — this was the concrete, load-bearing case: route
+  ownership (`updateHop`'s `lastSource` — see decision 13) was getting stranded on a BLE address
+  that had since rotated out of existence. Every one of these call sites already runs AFTER the
+  frame's group-key MAC (and, for presence, the sender-key pin) has verified — so trusting the
+  frame's own `senderId` at that point is no less trustworthy than the routing decision it already
+  drives; nothing new is being trusted that wasn't already.
+- `MeshGattClient`'s `ConnectionAttemptTracker` cooldowns — the harder case, because at
+  `maybeConnect` time (deciding whether to dial a freshly-heard address) there IS no stable identity
+  available yet; `senderId` is only learned once a connection to that address has already gone far
+  enough to receive an authenticated frame. New `PeerIdentityResolver` (pure/Android-free, mirrors
+  `ConnectionAttemptTracker`'s own LRU-bounded style) resolves an address to its learned identity,
+  falling back to the address itself when nothing is known yet — the same "low-information case is
+  the identity function" shape §5.4 already uses elsewhere (HopTracker, TrickleTimer). Stated
+  honestly: the FIRST connection to any freshly-rotated address always costs exactly what v1 always
+  cost; the fix is every reconnect *after* that within the same session, which is where the measured
+  46-addresses-in-23-minutes churn actually lived.
+- Getting `MeshGattClient` right needed one subtlety `HopTracker`'s fix didn't: the resolved key has
+  to be captured ONCE, at `attemptStarted`, and reused for every later callback of that same
+  connection attempt — never re-resolved mid-flight. `RelayResponder` can call `learn()` mid-
+  connection (a presence frame arriving on the very connection whose cooldown is being decided), and
+  if a later callback re-resolved the address at that point, `connectionEnded` would try to release
+  a tracker key `attemptStarted` never actually acquired — a silent, permanent leak of the original
+  key's slot. Fixed with a small `activeTrackerKey` map, populated once per attempt and read (never
+  re-resolved) by every subsequent callback for that attempt.
+- Deliberately NOT re-keyed: `RelayResponder.sessionBudget`/`catalogItemBudget`/`peerWfdCapable`/
+  `MeshGattClient.negotiatedMtu`/`syncedThisSession`. All five are already reset at the start of
+  every connection (`resetSessionBudget`, called from both GATT roles) — they are per-connection-
+  session state by design, not accumulated peer history, so re-keying them changes nothing
+  observable. PLAN-v2.md §1.3 lists them among "peer state keyed on a value that churns," but the
+  actual bug in two of them (`sessionBudget`/`catalogItemBudget`) turned out to be independent of
+  address rotation entirely: `resetSessionBudget` set them to 0 rather than removing the entry, so
+  they accumulated one stale zero-value entry per address ever seen, forever, regardless of key
+  type. Fixed with `.remove()` — simpler than an LRU bound, and stricter (bounded by *actual*
+  concurrent connections, not a fixed cap) — this was a real, confirmed leak independent of P0b,
+  found while already in this code for the re-keying work.
+
+**Not yet hardware-confirmed.** Compiles clean, 270 tests green (up from 247), `assembleRelease`
+(R8-minified) green. The actual claim — that a real 3-phone session's exported `DiagnosticsLog` now
+shows a stable `distinct=` peer count instead of growing with address churn — needs the debug APK
+tested on real hardware first; see PLAN-v2.md Part 7's preamble for the (now explicit) async
+verification workflow this and every future phase uses.
+

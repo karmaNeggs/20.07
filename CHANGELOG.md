@@ -1,5 +1,68 @@
 # Changelog
 
+## [0.5.0-dev] — v2 scaling plan begins: a crowd-scale test rig, and peer state stops being keyed on a rotating address
+
+First implementation work on `PLAN-v2.md` (the scaling plan, source of truth over `NEXT_STEPS.md`
+where the two disagree). Two phases, both required before P1's forwarding-plane rewrite can start:
+**P0a** (the crowd-scale simulator — a prerequisite, since v2's scaling claims were otherwise
+unfalsifiable) and **P0b** (re-keying peer state off the BLE MAC). 270 tests, up from 247, detekt
+clean, `assembleDebug`/`assembleRelease` both green. Compile/sim/test-verified only — **not yet
+hardware-confirmed**; see PLAN-v2.md Part 7's updated preamble for how that verification now works
+(debug APK → real-phone test → exported `DiagnosticsLog` sent back for review, asynchronously, not
+a precondition for landing code). Full reasoning in `docs/DECISIONS.md`, decisions 14-15.
+
+**P0a — the Tier-1 JVM crowd simulator** (`app/src/test/java/org/offlinemesh/app/sim/`, test-only,
+ships in no APK):
+- A discrete-event harness (`SimClock`/`SimEventQueue`) driving the REAL extracted decision classes
+  (`ConnectionAttemptTracker`, `CatalogFilter`, `OpaqueFrameRelay`) instead of re-implementing their
+  logic, from D=2 (a 3-phone test) to D=400 (a static crowd) in the same JVM test run.
+- PLAN-v2.md §6.2's eight invariants (I1-I8) mechanised as assertions over a run's recorded trace,
+  each independently unit-tested for both its pass and fail path.
+- §6.1's platform-quirk injection (address rotation, advertise-incapable nodes, radio-churn
+  instability with a total-failure breaker, callbacks that never arrive, half-open connections,
+  malicious nodes) as configurable knobs, each named after the pass that found the real bug it models.
+- The P0a gate itself: reproduces v1's measured diagnostics-10 numbers at D=3 (mostly-empty
+  catalogue syncs, pair-sync cadence anchored on the 45s reconnect cooldown) and shows D=400's
+  full-sync convergence lands in minutes, not seconds — confirming the harness models something
+  real before anything gets built on top of it.
+- Seven of the eleven named §6.3 scenarios running (S1, S2, S6, S7, S8, S9, S11); S3/S4 need a
+  broadcast tier to have anything to test (P2), S5 needs couriers (P4), S10 needs a media-transfer
+  model (P5) — documented as not-yet-built rather than shipped shallow.
+- A real bug in the simulator itself, caught by its own calibration gate: the first draft let both
+  sides of a pair independently initiate a connection, measuring a pair-sync cadence at roughly
+  half the real reconnect-cooldown-governed rate. Fixed by having only one side (deterministically)
+  initiate per pair, matching how a real GATT link is one connection, not two.
+
+**P0b — peer state re-keyed off the BLE MAC** (PLAN-v2.md §5.2):
+- New `PeerIdentityResolver` (`ble/`, pure/Android-free, unit-tested): resolves a transient BLE
+  address to the stable `senderId` behind it once an authenticated frame on that connection reveals
+  who it is. Falls back to the address itself for an unresolved peer — a brand-new address always
+  costs what v1 always cost; the benefit is every reconnect after the first one this session.
+- `HopTracker`'s route-ownership (`considerNeighborReport`/`considerDirectHop`) now sources on the
+  frame's own `senderId` instead of the transient peer address, at all three call sites (SOS,
+  presence, relayed position) — closes the exact gap `NEXT_STEPS.md` D1 and PLAN-v2.md §1.3 named:
+  route ownership no longer strands on an address that rotated out of existence mid-session.
+- `MeshGattClient`'s `ConnectionAttemptTracker` cooldowns now key on the resolved identity too, once
+  known — the address-rotation-causes-reconnect-storm bug §1.3 also names. Required care: the
+  resolved key is captured ONCE per connection attempt and threaded through every callback of that
+  same attempt, never re-resolved mid-flight — a mid-connection identity resolution updating the
+  key a later callback used would leak the original attempt's tracker entry forever.
+- Found and fixed a second, independent, already-confirmed bug while in this code:
+  `RelayResponder.sessionBudget`/`catalogItemBudget` were reset to 0 (not removed) at the start of
+  every connection, accumulating one entry per address ever seen, forever — unbounded regardless of
+  address rotation. Fixed with `.remove()`, which is both simpler and stricter than the LRU bound
+  `peerWfdCapable` already used for the same class of problem.
+- `DiagnosticsLog` gains an `identity` event logged only when a peer's address→identity mapping
+  actually changes, reporting both `addresses=` (raw BLE addresses tracked) and `distinct=` (unique
+  peers resolved) — the concrete thing the P0b hardware gate asks a real 3-phone log to show:
+  `distinct` should stay near the physical phone count even as `addresses` climbs with rotation,
+  unlike the pre-P0b diagnostics' 19-prefixes-for-3-phones.
+- Deliberately NOT re-keyed: `sessionBudget`/`catalogItemBudget`/`peerWfdCapable`/`negotiatedMtu`/
+  `syncedThisSession`. All five are reset at the start of every connection already — re-keying them
+  changes nothing observable, since they never survive a reconnect regardless of key type. PLAN-v2.md
+  §1.3 lists these among the "keyed on a value that churns" concern, but the actual fix for a
+  per-connection-scoped value is bounding it (done, above), not re-keying it.
+
 ## [0.4.0] — positions and presence are now blind-relayable, and the hop count actually moves
 
 The headline bug this release finally root-causes: on a live 3-phone A-B-C topology, the group row

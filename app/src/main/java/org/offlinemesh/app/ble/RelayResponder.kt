@@ -35,6 +35,11 @@ class RelayResponder(
     private val hopTracker: HopTracker,
     private val positionTracker: PositionTracker,
     private val locationTracker: LocationTracker,
+    // Shared with MeshGattClient (PLAN-v2.md §5.2 / P0b) — this side WRITES the address->senderId
+    // mapping (see the per-frame handlers below, right alongside their existing hopTracker calls);
+    // MeshGattClient reads it to key ConnectionAttemptTracker on the stable senderId once known,
+    // instead of the BLE address, which rotates roughly every 15 minutes.
+    private val peerIdentity: PeerIdentityResolver,
     // Optional, default-null — so nothing that constructs a RelayResponder outside MeshService
     // (e.g. a future test) needs to change. See the WifiDirectCap/WifiDirectHandoff/
     // WifiDirectAccept cases in handleIncoming and the Frame.Manifest case's WFD trigger for how
@@ -112,8 +117,14 @@ class RelayResponder(
 
     @Synchronized
     fun resetSessionBudget(address: String) {
-        sessionBudget[address] = 0
-        catalogItemBudget[address] = 0
+        // remove(), not set-to-0: this runs once at the start of EVERY connection (both GATT
+        // roles), so a set-to-0 entry accumulated one per address ever seen, forever — a real,
+        // confirmed unbounded-growth bug (PLAN-v2.md §1.3, independent of address rotation:
+        // even a re-key onto a stable identity wouldn't have bounded this on its own, since these
+        // two maps were never evicted at all). consumeBudget/consumeCatalogItemBudget already
+        // treat a missing entry as 0 via getOrDefault, so this changes memory footprint only.
+        sessionBudget.remove(address)
+        catalogItemBudget.remove(address)
         peerWfdCapable.remove(address)
     }
 
@@ -177,6 +188,21 @@ class RelayResponder(
     ): Boolean {
         val pinned = repo.peerKeyDao.get(groupId, senderId)
         return signatureCheckPasses(pinned?.publicKey, signature, signedData)
+    }
+
+    /** Wraps [PeerIdentityResolver.learn], logging only the events actually worth a line — a
+     *  brand-new peer resolved, or an address rotating onto an already-known one — so the P0b
+     *  hardware gate (`PLAN-v2.md` Part 7: "ship the debug APK, user runs 3 phones, exports the
+     *  log") has something concrete to check: `distinct=` should stay near the physical phone
+     *  count even as `addresses=` climbs with rotation, instead of the two tracking together like
+     *  the pre-P0b `19-prefixes-for-3-phones` diagnostics. */
+    private fun learnPeerIdentity(address: String, stableKey: String) {
+        if (!peerIdentity.learn(address, stableKey)) return
+        DiagnosticsLog.event(
+            "identity",
+            "peer resolved: addresses=${peerIdentity.trackedAddressCount()} " +
+                "distinct=${peerIdentity.distinctIdentityCount()}"
+        )
     }
 
     @Synchronized
@@ -452,7 +478,13 @@ class RelayResponder(
                     "hop=$hopsFromOrigin member=$isMember"
             )
         }
-        hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, peerAddress)
+        // Sourced on senderId (stable, global per device — see PeerIdentityResolver's class doc),
+        // not peerAddress (rotates ~every 15min and would strand HopTracker's route ownership on
+        // an address that no longer exists — PLAN-v2.md §1.3 / P0b). Both frame.sos.senderId and
+        // this MAC are already authenticated by authOk above, so learning it here is no less
+        // trustworthy than the routing decision this same value already drives.
+        learnPeerIdentity(peerAddress, frame.sos.senderId)
+        hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, frame.sos.senderId)
         // Only notify for groups we're actually in — a blind carrier ingests and relays SOS for
         // groups it isn't a member of too, but has no business alerting on them.
         if (isNew && isMember) {
@@ -560,7 +592,10 @@ class RelayResponder(
             // presence outward), not just from the beacon path.
             // frame.hop (envelope), not body.hop (sealed): the envelope's is the one every relay on
             // the path actually incremented, including relays that couldn't open the body at all.
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, peerAddress)
+            // Sourced on body.senderId (stable), not peerAddress — see PeerIdentityResolver's
+            // class doc / PLAN-v2.md §1.3 / P0b. Already passed verifySignatureIfPinned above.
+            learnPeerIdentity(peerAddress, body.senderId)
+            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, body.senderId)
             if (frame.hop < maxPositionRelayHops) {
                 positionTracker.offer(
                     frame.groupId, body.senderId, body.lat, body.lon,
@@ -602,8 +637,11 @@ class RelayResponder(
         if (frame.senderId != repo.deviceId) {
             // frame.hop, not a hardcoded 0: a presence that crossed relays (including relays that
             // couldn't verify it) must report the distance it actually travelled, or a member two
-            // hops out reads as a direct neighbour.
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, peerAddress)
+            // hops out reads as a direct neighbour. Sourced on frame.senderId (stable), not
+            // peerAddress — see PeerIdentityResolver's class doc / PLAN-v2.md §1.3 / P0b. This
+            // frame already passed presenceIsAuthentic (group MAC + sender-key pin) above.
+            learnPeerIdentity(peerAddress, frame.senderId)
+            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, frame.senderId)
         }
     }
 
