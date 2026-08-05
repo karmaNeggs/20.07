@@ -447,3 +447,9 @@ invariants of the mechanisms they touched. Decisions 8 and 12 already recorded t
 its third occurrence. Before changing a relay path, check what else reads the value being changed —
 skew gates, staleness windows, dedup keys, and budgets are all coupled to it.
 
+**Field-verified 2026-08-05, v0.4.0:** live 3-phone test confirms the group row correctly shows
+"2 hop(s) away" for the far phone (previously frozen at "1" through every prior build) and content
+relays through the middle phone as expected. Closes the loop on this decision's headline bug.
+Decision 8's adaptive round-robin dwell (a separate, narrower claim about advertise-restart
+frequency, not observable from hop count or relay behavior alone) remains unconfirmed on hardware.
+
