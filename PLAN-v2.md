@@ -48,10 +48,9 @@ section is what's stale.
   23-29's work (source/docs + four real production features) has not had a version bump or APK/Pages
   refresh yet. Due once this P2 work is ready to hand off for its own hardware smoke-test round, not
   before.
-- **Committed and pushed, on `main`, through `60dc9bb`** (decision 28's SOS hop-gradient slice;
-  decision 29's changes are being finalized this checkpoint — check `git log origin/main..HEAD` if
-  resuming mid-session). Working tree clean once decision 29's commit lands. If you find OTHER
-  uncommitted changes when resuming, they're from a session after this one.
+- **Committed and pushed, on `main`, through `baf3c71`** (decision 29's SOS content preview slice).
+  Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
+  from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
