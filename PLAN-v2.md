@@ -43,12 +43,14 @@ section is what's stale.
   - 337 tests, detekt clean, both variants compile/test/assemble (incl. `lintVitalRelease`) green
     — **NOT hardware-confirmed**, same as this channel's Coded-PHY-only predecessor always was, now
     broader still (every Tier B mechanism is new and untested on real hardware).
-- **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
-  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale** — decisions
-  23-29's work (source/docs + four real production features) has not had a version bump or APK/Pages
-  refresh yet. Due once this P2 work is ready to hand off for its own hardware smoke-test round, not
-  before.
-- **Committed and pushed, on `main`, through `baf3c71`** (decision 29's SOS content preview slice).
+- **Version bumped to v0.7.0-dev and a fresh in-tree debug APK is ready to hand off for its own
+  hardware smoke-test round**: `releases/20.07-v0.7.0-dev-debug.apk` (replaces the v0.6.3-dev one),
+  built from the exact commit this checkpoint describes, `versionCode`/`versionName` confirmed via
+  `aapt dump badging` before committing, not assumed. This is the FIRST APK that contains any of
+  decisions 23-29's work — nothing before this point in the session was installable. **GitHub Pages
+  is still stale** (still serves v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh
+  is a separate, not-yet-done step; the in-tree APK is what's ready right now.
+- **Committed and pushed, on `main`, through `0dceacf`** (the v0.7.0-dev version bump + debug APK).
   Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
   from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
