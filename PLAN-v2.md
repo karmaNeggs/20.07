@@ -12,28 +12,35 @@ section is what's stale.
   radar-staleness fix, duplicate-connection-callback fix, Bluetooth off→on recovery fix. Full detail
   in `docs/DECISIONS.md` decisions 18-22.
 - **P2 (broadcast tier): both Tier-1 sim open questions resolved (decisions 23-25), AND production
-  wiring has now started (decision 26, same day)** — first slice, deliberately narrow, same
-  discipline as P1's own "SOS only first" slice. Sim summary: decision 23's 3-way question resolved
+  wiring is now two slices deep (decisions 26-27, same day)** — deliberately narrow slices, same
+  discipline as P1's own "SOS only first" phase. Sim summary: decision 23's 3-way question resolved
   as option (c) (sightings own-group-scoped, already true in production `BeaconRadio`); that
   dissolved decision 23's "D=2 boundary bug" but surfaced decision 24's finding (suppression could
   pin at degree 1); decision 25 found and fixed the real root cause **in production**,
-  `TrickleTimer.onSighting(sourceId)` now dedupes within a window. Production summary (decision 26):
+  `TrickleTimer.onSighting(sourceId)` now dedupes within a window. Production slice 1 (decision 26):
   the old Coded-PHY-only "long-range channel" already had every piece Tier B needs, so it was
   **generalized in place** rather than duplicated — gate loosened to `extendedAdvertisingSupported`
   alone (Coded PHY now opportunistic, not required), new payload adds an explicit `presenceHop`
   field so presence can propagate a real multi-hop gradient with zero GATT connections, a hardware
   `ScanFilter` on the service UUID restored (on this new scan only — legacy scan deliberately
   untouched), degree-gated `setReportDelay()` batching added. Resolves `PLAN-v2.md` Part 8's open
-  item on the Coded PHY channel (re-scope, not delete). Position and SOS-message broadcast
-  deliberately deferred to a later slice, named explicitly. 319 tests, detekt clean, both variants
-  compile/test/assemble (incl. `lintVitalRelease`) green — **NOT hardware-confirmed**, same as this
-  channel's Coded-PHY-only predecessor always was, now broader (ScanFilter/batching are also new and
-  untested on real hardware).
+  item on the Coded PHY channel (re-scope, not delete). Production slice 2 (decision 27): Tier B now
+  also carries **single-hop position** — reuses `MeshFrameCodec.encodePosition`'s full output
+  verbatim (no new crypto/framing), resealed on a fixed ~20s cadence so a stationary sender's dot
+  doesn't go stale, ingested via a `serviceScope`-dispatched suspend path that reuses
+  `RelayResponder.signatureCheckPasses` directly so Tier B positions get the exact same trust bar
+  GATT positions do, not a weaker one. Deliberately single-hop only — no natural "relay" exists for
+  a connectionless broadcast the way GATT store-and-forward has one; multi-hop position still rides
+  the existing GATT path, unchanged. Position and SOS-message broadcast beyond this remain
+  deliberately deferred, named explicitly (multi-hop position propagation, SOS hop-gradient/message).
+  323 tests, detekt clean, both variants compile/test/assemble (incl. `lintVitalRelease`) green —
+  **NOT hardware-confirmed**, same as this channel's Coded-PHY-only predecessor always was, now
+  broader still (ScanFilter/batching/position are all new and untested on real hardware).
 - **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
   to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale** — decisions
-  23-26's work (source/docs + a real production feature) has not had a version bump or APK/Pages
-  refresh yet. Due once this P2 slice (or the next one) is ready to hand off for its own hardware
-  smoke-test round, not before.
+  23-27's work (source/docs + two real production features) has not had a version bump or APK/Pages
+  refresh yet. Due once this P2 work is ready to hand off for its own hardware smoke-test round, not
+  before.
 - **Committed and pushed, on `main`, through `dc7f341`** (decision 26's broadcast-tier slice).
   Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
   from a session after this one.
@@ -700,16 +707,34 @@ needs encryption/nonce-budget work, SOS hop-gradient is per-SOS-id and ambiguous
 legacy beacon's own `sosHop` already is — named explicitly rather than silently dropped, matching
 P1's own "SOS only first" precedent.
 
+**Same day, production wiring's second slice (decision 27): single-hop position.** Reuses
+`MeshFrameCodec.encodePosition`'s full output verbatim as the wire payload — no new crypto, no new
+framing — embedded length-prefixed inside the Tier B beacon; decode reuses the ordinary
+`MeshFrameCodec.decode`/`openPosition` pipeline unchanged. Resealed on a fixed ~20s cadence
+(matching `RelayResponder.positionFramesToPush`'s own GATT refresh rhythm), independent of whether
+the underlying GPS fix itself changed — mirrors that function's "stamp now as the timestamp, not the
+fix's age" behaviour, specifically so a stationary sender doesn't go stale on other people's radar.
+Real finding on the receive side: opening/verifying a position needs a suspend DB lookup
+(`repo.peerKeyDao.get`, the pinned-sender-key check) that the raw BLE scan-callback thread cannot
+make directly, so ingestion is dispatched onto `serviceScope` per received position rather than
+duplicating a synchronous cache of pinned keys. Reuses `RelayResponder.signatureCheckPasses`
+directly (already `internal`, no new coupling needed) so a Tier B position gets the *exact same*
+trust bar a GATT position does — not weaker just because it arrived connectionless. **Deliberately
+single-hop only**: a Tier B receiver does not re-broadcast a position it heard from someone else —
+extended advertising has no natural "relay" the way GATT store-and-forward has one, so genuine
+multi-hop position propagation over broadcast would need its own gossip design, out of scope here.
+The existing GATT `PositionSealed` relay is completely unaffected and still handles multi-hop.
+
 **No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
 note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
 comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
 Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
-measured — unaffected by any of the above. **Still not started**: position/SOS broadcast, the
-Tier 2/3 gates. 319 tests, detekt clean, both variants compile/test/assemble
-(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** —
-this channel's Coded-PHY-only predecessor never had hardware to test on either; now broader, since
-the ScanFilter and report-delay-batching pieces are also new and untested on real hardware this
-session.
+measured — unaffected by any of the above. **Still not started**: multi-hop position propagation,
+SOS message/hop-gradient broadcast, the Tier 2/3 gates. 323 tests, detekt clean, both variants
+compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT
+hardware-confirmed** — this channel's Coded-PHY-only predecessor never had hardware to test on
+either; now broader still, since ScanFilter/report-delay-batching/position are all new and untested
+on real hardware this session.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*

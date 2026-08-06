@@ -54,15 +54,24 @@ object MeshProtocol {
         return Beacon(type, rid, sHop)
     }
 
+    /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [positionFrame] block — defence
+     *  in depth for [decodeBroadcastTierBeacon]'s length-prefixed read, same reasoning as
+     *  [MeshFrameCodec.MAX_EVIDENCE_CHUNKS]/[MeshFrameCodec.MAX_SOS_MESSAGE_BYTES]. Generous against
+     *  a real `MeshFrameCodec.encodePosition` frame (~170-200B for a UUID-length groupId/senderId,
+     *  signed, GCM-tagged — see [encodeBroadcastTierBeacon]'s own doc) while keeping the WHOLE
+     *  beacon comfortably under extended advertising's ~251B in-place-update budget alongside the
+     *  fixed 9-byte header. */
+    const val MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 220
+
     /**
      * Broadcast-tier (Tier B, PLAN-v2.md §5.1) payload — carried over BLE Extended Advertising
      * (`BeaconRadio`'s broadcast-tier channel), NOT the legacy beacon above, which stays
      * byte-for-byte unchanged. Extended advertising's budget (~1650B chained, 251B per in-place
      * update) has none of [encodeBeacon]'s byte pressure — see that function's own doc: the legacy
      * 31-byte format has exactly 2 spare bytes after Android's Flags structure and this service's
-     * own 128-bit UUID overhead, nowhere near enough room for a second hop field. This format is
-     * free to grow (position, SOS message, further hop-gradient fields) in later slices; for now it
-     * is exactly [encodeBeacon]'s fields plus one: [presenceHop].
+     * own 128-bit UUID overhead, nowhere near enough room for a second hop field, let alone a
+     * position. This format is free to grow further (SOS message, more hop-gradient fields) in
+     * later slices.
      *
      * [presenceHop] is the sender's own current best-known distance to presence for this group —
      * i.e. `HopTracker.myHop(groupId, "PRESENCE")` at encode time, [UNKNOWN_HOP] if the sender
@@ -75,13 +84,39 @@ object MeshProtocol {
      * id, and [encodeBeacon]'s existing `sosHop` field is already deliberately NOT fed into hop
      * tracking for exactly that reason (see [decodeBeacon]'s call sites) — carrying it here would
      * inherit the same ambiguity rather than solve it, so SOS broadcast is left for a later slice.
+     *
+     * [positionFrame], when present, is `MeshFrameCodec.encodePosition`'s FULL output — the same
+     * `FRAME_POSITION`-tagged, groupId+hop+sealed-body bytes a GATT link would carry — reused
+     * verbatim rather than re-derived, deliberately at the cost of a redundant groupId string (this
+     * beacon already carries [rotatingGroupId] separately), so a receiver decodes it with the exact
+     * same `MeshFrameCodec.decode`/`openPosition` pipeline the GATT path already uses, no new
+     * crypto or framing code, and inherits [MeshFrameCodec.encodePosition]'s nonce-safety
+     * engineering (see its own doc) for free. Deliberately single-hop only in this slice: unlike
+     * GATT's `PositionSealed` relay, a Tier B receiver does NOT re-broadcast a position it heard
+     * from someone else — extended advertising has no natural "relay" the way a GATT store-and-
+     * forward blind carrier does, so multi-hop position propagation still goes through the existing
+     * GATT path unchanged; Tier B only ever carries the broadcaster's OWN current fix (hop 0).
+     * Length-prefixed (2 bytes) so a receiver can tell it apart from a presence-only beacon of the
+     * same decoded shape — see [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES] for the size ceiling.
      */
-    fun encodeBroadcastTierBeacon(type: Byte, rotatingGroupId: ByteArray, sosHop: Int, presenceHop: Int): ByteArray {
-        val buf = ByteBuffer.allocate(1 + ROTATING_ID_LEN + 1 + 1)
+    fun encodeBroadcastTierBeacon(
+        type: Byte,
+        rotatingGroupId: ByteArray,
+        sosHop: Int,
+        presenceHop: Int,
+        positionFrame: ByteArray? = null,
+    ): ByteArray {
+        val includePosition = positionFrame != null && positionFrame.size <= MAX_BROADCAST_TIER_POSITION_FRAME_BYTES
+        val headerLen = 1 + ROTATING_ID_LEN + 1 + 1
+        val buf = ByteBuffer.allocate(headerLen + if (includePosition) 2 + positionFrame!!.size else 0)
         buf.put(type)
         buf.put(rotatingGroupId.copyOf(ROTATING_ID_LEN))
         buf.put(sosHop.coerceIn(0, 255).toByte())
         buf.put(presenceHop.coerceIn(0, 255).toByte())
+        if (includePosition) {
+            buf.putShort(positionFrame!!.size.toShort())
+            buf.put(positionFrame)
+        }
         return buf.array()
     }
 
@@ -90,16 +125,26 @@ object MeshProtocol {
         val rotatingGroupId: ByteArray,
         val sosHop: Int,
         val presenceHop: Int,
+        val positionFrame: ByteArray? = null,
     )
 
+    @Suppress("ReturnCount", "MagicNumber") // malformed-input guard clauses; 0xFFFF/2 match readStr16's own idiom
     fun decodeBroadcastTierBeacon(bytes: ByteArray): BroadcastTierBeacon? {
-        val expected = 1 + ROTATING_ID_LEN + 1 + 1
-        if (bytes.size < expected) return null
+        val headerLen = 1 + ROTATING_ID_LEN + 1 + 1
+        if (bytes.size < headerLen) return null
         val type = bytes[0]
         val rid = bytes.copyOfRange(1, 1 + ROTATING_ID_LEN)
         val sHop = bytes[1 + ROTATING_ID_LEN].toInt() and 0xFF
         val pHop = bytes[1 + ROTATING_ID_LEN + 1].toInt() and 0xFF
-        return BroadcastTierBeacon(type, rid, sHop, pHop)
+        var positionFrame: ByteArray? = null
+        if (bytes.size > headerLen) {
+            val buf = ByteBuffer.wrap(bytes, headerLen, bytes.size - headerLen)
+            if (buf.remaining() < 2) return null // length prefix present but truncated — malformed
+            val len = buf.short.toInt() and 0xFFFF
+            if (len > MAX_BROADCAST_TIER_POSITION_FRAME_BYTES || buf.remaining() < len) return null
+            positionFrame = ByteArray(len).also { buf.get(it) }
+        }
+        return BroadcastTierBeacon(type, rid, sHop, pHop, positionFrame)
     }
 
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —

@@ -254,7 +254,9 @@ class MeshService : Service() {
             this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity, ::currentTier,
         ).also { it.start() }
         gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry)
-        beaconRadio = BeaconRadio(bluetoothManager, repo, hopTracker, serviceScope, ::currentTier) { device, rssi ->
+        beaconRadio = BeaconRadio(
+            bluetoothManager, repo, hopTracker, positionTracker, locationTracker, serviceScope, ::currentTier,
+        ) { device, rssi ->
             gattClient.maybeConnect(device, rssi)
         }
 

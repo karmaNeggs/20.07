@@ -71,4 +71,49 @@ class MeshProtocolBroadcastTierTest {
         val legacy = MeshProtocol.encodeBeacon(MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 1)
         assertNull(MeshProtocol.decodeBroadcastTierBeacon(legacy))
     }
+
+    @Test
+    fun `no positionFrame given - decodes with a null positionFrame, not an empty array`() {
+        val encoded =
+            MeshProtocol.encodeBroadcastTierBeacon(MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 0, presenceHop = 0)
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded)?.positionFrame)
+    }
+
+    @Test
+    fun `positionFrame round-trips verbatim alongside the header fields`() {
+        val fakeFrame = ByteArray(140) { (it * 7).toByte() } // stand-in for a real encodePosition() output
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 2, presenceHop = 1, positionFrame = fakeFrame,
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)
+
+        assertEquals(2, decoded?.sosHop)
+        assertEquals(1, decoded?.presenceHop)
+        assertArrayEquals(fakeFrame, decoded?.positionFrame)
+    }
+
+    @Test
+    fun `positionFrame past the size ceiling is silently omitted, not truncated into corrupt ciphertext`() {
+        val oversized = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_POSITION_FRAME_BYTES + 1)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 0, presenceHop = 0, positionFrame = oversized,
+        )
+        // Omitted entirely (not truncated) - a truncated AES-GCM ciphertext would still "decode" as
+        // bytes but could never open, silently wasting airtime on undecryptable garbage.
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded)?.positionFrame)
+        val legacyOnlyBeacon =
+            MeshProtocol.encodeBroadcastTierBeacon(MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 0, presenceHop = 0)
+        assertEquals(legacyOnlyBeacon.size, encoded.size)
+    }
+
+    @Test
+    fun `decode rejects a positionFrame length prefix that overruns the actual bytes`() {
+        val fakeFrame = ByteArray(20)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, sosHop = 0, presenceHop = 0, positionFrame = fakeFrame,
+        )
+        // Truncate after the length prefix claims 20 bytes are coming, but only leave 5 - a hostile
+        // or corrupted beacon must be rejected outright, not read out-of-bounds or read short.
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded.copyOf(encoded.size - 15)))
+    }
 }

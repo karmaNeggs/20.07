@@ -1226,3 +1226,77 @@ hardware this session. Needs a live-device pass before being trusted the way the
 is. Sim-side P2 work (decisions 23-25) is unaffected — that Tier-1 harness models `TrickleTimer`
 directly and doesn't touch `BeaconRadio`.
 
+## 27. P2 production wiring, second slice: single-hop position broadcast on Tier B
+
+2026-08-06, same day as decisions 23-26, continuing straight on from decision 26's own "not done
+this slice, deferred explicitly" list.
+
+**Scope decision, made explicit up front:** Tier B position broadcast in this slice is
+**single-hop only** — a device broadcasts its OWN current fix; a receiver stores it but does NOT
+re-broadcast it on Tier B. Extended advertising has no natural "relay" the way a GATT blind carrier
+does (a connection exists to receive-then-retransmit over; a broadcast is heard directly by whoever
+is in range and nothing more), so genuine multi-hop position propagation over a connectionless
+channel would need a real gossip/epidemic design of its own — out of scope here, deliberately, same
+"narrow first pass" discipline as every other phase. The existing GATT `PositionSealed` relay path
+is completely unaffected and still does multi-hop exactly as before; this slice only adds a faster,
+connectionless path for the 1-hop case, which is also the case §1.5 of `PLAN-v2.md` originally
+flagged as "structurally marginal" (radar refreshing only on GATT reconnect, ~45s/hop against a
+180s useful life).
+
+**Wire format — reuses existing crypto verbatim rather than inventing a broadcast-specific
+encoding.** `MeshProtocol.encodeBroadcastTierBeacon` gained an optional length-prefixed
+`positionFrame` block: `MeshFrameCodec.encodePosition`'s FULL output (the same `FRAME_POSITION`-
+tagged, groupId+hop+sealed-body bytes a GATT link would carry), embedded as-is. This is deliberately
+NOT the raw AES-GCM ciphertext alone — carrying the whole GATT frame costs ~40 redundant bytes (a
+duplicate groupId string; this beacon already carries `rotatingGroupId` separately) but means the
+receive side reuses `MeshFrameCodec.decode`/`openPosition` completely unchanged, with zero new
+crypto or framing code and the exact same nonce-safety engineering `encodePosition`'s own doc
+describes. Total worst-case payload (9-byte header + 2-byte length prefix + ~170-200B position
+frame for UUID-length ids) stays comfortably inside extended advertising's ~251B in-place-update
+budget — checked directly, not assumed (`MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 220`).
+
+**Sending side (`refreshBroadcastTierPositionIfDue`):** reseals from `locationTracker.location.value`
+on a fixed cadence (`BROADCAST_TIER_POSITION_REFRESH_MS = 20_000L`, matching
+`RelayResponder.positionFramesToPush`'s own "~15-20s" GATT refresh cadence), not on every advertise-
+check tick and not only when the underlying `Location` object changes. That second part matters and
+mirrors an existing, easy-to-miss GATT behaviour: `positionFramesToPush` stamps the position's
+timestamp as "now" at push time, not the fix's own age, specifically so a **stationary** sender's
+dot doesn't go stale on other people's radar just because the GPS provider stopped delivering new
+`Location` updates. Missing this would have made Tier B position broadcast silently worse than GATT
+for exactly the case (someone standing still) it should have made strictly better. The refresh
+timestamp is folded into `evaluateBroadcastTierAdvertising`'s existing payloadKey, so the established
+"only touch the radio when the payload actually changed" invariant (decision 1) covers position too,
+for free, with no separate change-detection mechanism.
+
+**Receiving side, real finding: position ingestion needs suspend DAO access the scan-callback
+thread cannot make, AND must not get a weaker trust bar than GATT.** `ScanCallback.onScanResult`/
+`onBatchScanResults` run on a raw BLE binder thread; `repo.peerKeyDao.get` (the pinned-sender-key
+lookup `RelayResponder.verifySignatureIfPinned` uses) is a suspend Room query. Rather than block
+that thread or build a second synchronously-readable cache of pinned keys duplicating what
+`RelayResponder` already tracks, `handleResult` dispatches `ingestBroadcastTierPosition` onto
+`serviceScope` per received position. That function reuses `RelayResponder.signatureCheckPasses`
+directly (an `internal` companion function, already callable module-wide with no new coupling) —
+so a position without a valid signature under an already-pinned sender key is dropped exactly as it
+would be over GATT, not silently trusted just because it arrived over a connectionless channel.
+Also passes the recovered raw ciphertext through to `PositionTracker.offer`'s `sealed` parameter
+(not left null) — a position learned over Tier B stays eligible for further GATT relay onward,
+extending its reach past this device's own radio range, matching `PositionTracker.Record.sealed`'s
+own documented purpose.
+
+**What this slice does NOT do, named explicitly:** multi-hop position propagation over Tier B
+(see the scope decision above); SOS message/hop-gradient broadcast (still deferred from decision
+26, same per-SOS-id ambiguity reasoning); peer-identity learning from a Tier B position the way
+`RelayResponder.ingestOpenedPosition` does via `learnPeerIdentity` (would need `PeerIdentityResolver`
+as a new `BeaconRadio` dependency — out of scope for an additive feature this narrow; Tier B already
+separately feeds presence hop-tracking via decision 26's `presenceHop` field regardless of whether a
+position happens to be attached).
+
+323 tests (up from 319, +4: `MeshProtocolBroadcastTierTest.kt` gained round-trip/oversized/
+truncated-length-prefix coverage for the new `positionFrame` field), detekt clean, both variants
+compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green.
+**Production code touched**: `BeaconRadio.kt` (position sealing/ingestion, new `PositionTracker`/
+`LocationTracker` constructor dependencies), `MeshProtocol.kt` (wire format extension),
+`MeshService.kt` (updated the one `BeaconRadio(...)` call site). **NOT hardware-confirmed** — same
+caveat as decision 26 in full: this touches the same never-hardware-tested channel, now carrying
+real GPS data end-to-end for the first time. Needs a live-device pass before being trusted.
+

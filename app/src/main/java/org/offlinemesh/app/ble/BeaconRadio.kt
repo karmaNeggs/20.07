@@ -27,6 +27,7 @@ import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
+import org.offlinemesh.app.sensors.LocationTracker
 
 /**
  * The connectionless half of the mesh: rotating-id beacon advertising and scanning for other
@@ -54,11 +55,19 @@ import org.offlinemesh.app.data.GroupRepository
 // BleTuning->AdvertisingSetParameters unit mappers) pushed this two over the threshold. Each is
 // small and single-purpose, and this class already deliberately keeps one function per radio
 // concern (advertise/scan/long-range/callbacks) rather than fewer, larger ones.
-@Suppress("TooManyFunctions")
+// LongParameterList: positionTracker/locationTracker (decision 27) pushed the constructor one over
+// - each dependency is used by exactly one additive feature (Tier B position broadcast), matching
+// this class's existing "one thing per radio concern" shape rather than bundling them into a DTO.
+@Suppress("TooManyFunctions", "LongParameterList")
 class BeaconRadio(
     private val bluetoothManager: BluetoothManager,
     private val repo: GroupRepository,
     private val hopTracker: HopTracker,
+    // Broadcast-tier position (decision 27, docs/DECISIONS.md) — same repo-backed group key and
+    // signing key RelayResponder's own positionFramesToPush already uses, just sourced here too so
+    // BeaconRadio doesn't need a RelayResponder reference for this one additive feature.
+    private val positionTracker: PositionTracker,
+    private val locationTracker: LocationTracker,
     private val serviceScope: CoroutineScope,
     private val currentTier: () -> MeshService.PowerTier,
     // rssi: PLAN-v2.md P3's real diversity signal (LinkSelector, via MeshGattClient's
@@ -139,6 +148,15 @@ class BeaconRadio(
     // the broadcastTierScanJob coroutine.
     private val broadcastTierRecentAddresses = ConcurrentHashMap<String, Long>()
     @Volatile private var broadcastTierReportDelayActive = false
+    // Position broadcast (decision 27) — single-writer from the advertiseJob coroutine only (the
+    // same one that calls evaluateBroadcastTierAdvertising), so plain vars are safe here, unlike
+    // the @Volatile fields above. Re-sealed on BROADCAST_TIER_POSITION_REFRESH_MS, not on every
+    // check tick and not only when the underlying fix changes — see evaluateBroadcastTierAdvertising
+    // for why a periodic reseal (fresh timestamp, same as RelayResponder.positionFramesToPush's own
+    // "now", not the fix's own age) is what keeps a STATIONARY sender's dot from going stale on
+    // other people's radar.
+    private var broadcastTierLastPositionSealedAtMs = 0L
+    private var broadcastTierPositionFrame: ByteArray? = null
 
     /** Safe to call more than once, and safe to follow with a fresh [startAdvertising]/
      *  [startScanning] later (see [MeshService.setMeshActive]'s "go offline"/"go active" cycle) —
@@ -172,6 +190,8 @@ class BeaconRadio(
         broadcastTierDisabledForSession = false
         broadcastTierRecentAddresses.clear()
         broadcastTierReportDelayActive = false
+        broadcastTierPositionFrame = null
+        broadcastTierLastPositionSealedAtMs = 0L
     }
 
     /** 3 HMACs per group, once per slot — not per scan result. Also refreshes the active-group
@@ -247,7 +267,7 @@ class BeaconRadio(
                         val sHop = bestSosHopFor(g.id)
                         val payloadKey = "${g.id}:${rid.toHex()}:$sHop"
                         ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
-                        evaluateBroadcastTierAdvertising(MeshProtocol.ADV_TYPE_GROUP, g.id, rid, sHop)
+                        evaluateBroadcastTierAdvertising(MeshProtocol.ADV_TYPE_GROUP, g.id, key, rid, sHop)
                     }
                 }
                 // How often to re-check whether the payload needs to change (new rotating-id window,
@@ -423,19 +443,55 @@ class BeaconRadio(
     // crash, never a fallback that touches the legacy advertiser.
     //
     // NOT device-tested — same caveat this channel's Coded-PHY-only predecessor carried, now
-    // broadened: the ScanFilter/report-delay-batching pieces below are ALSO new and untested on
-    // hardware this session. Treat this exactly like this project's unverified iOS code: carefully
-    // reviewed by hand against the documented AdvertisingSet/ScanSettings/ScanFilter API surface,
-    // but unverified on real hardware. Needs its own live-device pass before being trusted the way
-    // the legacy path now is.
+    // broadened: the ScanFilter/report-delay-batching/position pieces below are ALSO new and
+    // untested on hardware this session. Treat this exactly like this project's unverified iOS
+    // code: carefully reviewed by hand against the documented AdvertisingSet/ScanSettings/
+    // ScanFilter API surface, but unverified on real hardware. Needs its own live-device pass
+    // before being trusted the way the legacy path now is.
+
+    /** Re-seals [broadcastTierPositionFrame] from the current GPS fix, but only once every
+     *  [BROADCAST_TIER_POSITION_REFRESH_MS] — not on every advertise-check tick (a few seconds) and
+     *  not only when the underlying fix itself changes. The latter matters: `RelayResponder.
+     *  positionFramesToPush` already establishes the pattern of stamping "now" as the position's
+     *  timestamp on every periodic push rather than the fix's own age, specifically so a
+     *  STATIONARY sender's dot doesn't go stale on other people's radar just because the GPS
+     *  provider stopped delivering new `Location` objects — this mirrors that exactly. Returns the
+     *  refresh timestamp (or 0 if there's no fix to broadcast) purely so the caller can fold it into
+     *  [evaluateBroadcastTierAdvertising]'s own payloadKey and get the existing "only touch the
+     *  radio when the payload actually changed" behaviour for free, without a separate change-
+     *  detection mechanism. No group key access needed when there's no fix — cheap common case. */
+    @Suppress("ReturnCount") // three early-outs (no fix / not due yet / freshly sealed) read clearer than nesting
+    private fun refreshBroadcastTierPositionIfDue(groupId: String, key: ByteArray): Long {
+        val myLoc = locationTracker.location.value
+        if (myLoc == null) {
+            broadcastTierPositionFrame = null
+            broadcastTierLastPositionSealedAtMs = 0L
+            return 0L
+        }
+        val nowMs = System.currentTimeMillis()
+        if (broadcastTierPositionFrame != null &&
+            nowMs - broadcastTierLastPositionSealedAtMs < BROADCAST_TIER_POSITION_REFRESH_MS
+        ) {
+            return broadcastTierLastPositionSealedAtMs
+        }
+        val nowSec = nowMs / MILLIS_PER_SECOND
+        broadcastTierPositionFrame = MeshFrameCodec.encodePosition(
+            groupId, key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
+            nowSec, hop = 0, signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey,
+        )
+        broadcastTierLastPositionSealedAtMs = nowMs
+        return nowMs
+    }
+
     @SuppressLint("MissingPermission")
-    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, rid: ByteArray, sHop: Int) {
+    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray, sHop: Int) {
         if (broadcastTierDisabledForSession) return
         val adapter = bluetoothManager.adapter ?: return
         if (!BleCapabilities.extendedAdvertisingSupported(adapter)) return
         val adv = adapter.bluetoothLeAdvertiser ?: return
         val presenceHop = hopTracker.myHop(groupId, "PRESENCE")
-        val payloadKey = "$groupId:${rid.toHex()}:$sHop:$presenceHop"
+        val positionMarker = refreshBroadcastTierPositionIfDue(groupId, key)
+        val payloadKey = "$groupId:${rid.toHex()}:$sHop:$presenceHop:$positionMarker"
         if (broadcastTierTrickle.isSuppressed()) {
             if (broadcastTierAdvertisingActive) {
                 try { adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback) } catch (e: Exception) {
@@ -447,7 +503,7 @@ class BeaconRadio(
             return
         }
         if (payloadKey == broadcastTierCurrentPayloadKey && broadcastTierAdvertisingActive) return
-        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, sHop, presenceHop)
+        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, sHop, presenceHop, broadcastTierPositionFrame)
         val params = AdvertisingSetParameters.Builder()
             .setLegacyMode(false)
             .setConnectable(false)
@@ -678,6 +734,7 @@ class BeaconRadio(
     }
 
     @SuppressLint("MissingPermission")
+    @Suppress("ReturnCount") // guard-clause early-outs (no service data / bad decode / not a group beacon) - see body
     private fun handleResult(result: ScanResult) {
         val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
         val beacon = MeshProtocol.decodeBroadcastTierBeacon(serviceData) ?: return
@@ -696,6 +753,39 @@ class BeaconRadio(
         // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
         // lived peer state off it (decision 25, docs/DECISIONS.md).
         broadcastTierTrickle.onSighting(result.device.address)
+        val positionFrame = beacon.positionFrame ?: return
+        // Opening/verifying needs suspend DAO access (repo.peerKeyDao.get) that this raw BLE
+        // callback thread cannot make directly — dispatched onto serviceScope rather than blocking
+        // the binder thread or duplicating the DB-backed pin lookup into a synchronously-readable
+        // cache the way matchTable/cachedGroups already are for the (much hotter) per-packet path.
+        serviceScope.launch { ingestBroadcastTierPosition(groupId, positionFrame) }
+    }
+
+    /** Opens, verifies, and stores a position carried on the broadcast tier — same acceptance rule
+     *  GATT's `RelayResponder.ingestOpenedPosition` uses (`RelayResponder.signatureCheckPasses`
+     *  against whatever's pinned for this sender, reused directly rather than duplicated), so a
+     *  position without a valid signature under an already-pinned key is dropped exactly as it
+     *  would be over GATT — Tier B does not get a weaker trust bar just because it's connectionless.
+     *  [positionFrame] is `MeshFrameCodec.encodePosition`'s full output (see that field's own doc on
+     *  [MeshProtocol.encodeBroadcastTierBeacon]) — decoded with the ordinary `MeshFrameCodec.decode`
+     *  pipeline, which is what actually recovers the raw sealed bytes [MeshFrameCodec.openPosition]
+     *  needs. Passes [sealed] through to [PositionTracker.offer] (not left null) so this position
+     *  stays eligible for further GATT relay, extending it past this device's own radio range —
+     *  see [PositionTracker.Record.sealed]'s own doc for why forwarding the original ciphertext
+     *  verbatim (rather than re-sealing) matters for downstream dedup. */
+    private suspend fun ingestBroadcastTierPosition(groupId: String, positionFrame: ByteArray) {
+        val sealed = (MeshFrameCodec.decode(positionFrame) as? MeshFrameCodec.Frame.PositionSealed)?.sealed ?: return
+        val key = repo.getGroupKey(groupId) ?: return
+        val body = MeshFrameCodec.openPosition(sealed, key) ?: return
+        if (body.senderId == repo.deviceId) return // never ingest our own broadcast fix back into our own tracker
+        val pinned = repo.peerKeyDao.get(groupId, body.senderId)?.publicKey
+        if (!RelayResponder.signatureCheckPasses(pinned, body.signature, body.signedBytes)) {
+            Log.w(TAG, "broadcast-tier position signature failed verification for a pinned sender — dropping")
+            return
+        }
+        positionTracker.offer(
+            groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, body.hop, sealed = sealed,
+        )
     }
 
     companion object {
@@ -713,6 +803,13 @@ class BeaconRadio(
         private const val BROADCAST_TIER_REPORT_DELAY_MS = 1_500L
         private const val BROADCAST_TIER_DEGREE_WINDOW_MS = 30_000L
         private const val BROADCAST_TIER_DEGREE_CHECK_INTERVAL_MS = 5_000L
+
+        // See refreshBroadcastTierPositionIfDue's own doc. Matches the "~15-20s" cadence
+        // RelayResponder.positionFramesToPush's own doc cites for the GATT refresh loop this
+        // mirrors, at the upper end of that range since a Tier B refresh also costs an in-place
+        // advertising-data update (cheap, but not free) on top of the AES-GCM reseal itself.
+        internal const val BROADCAST_TIER_POSITION_REFRESH_MS = 20_000L
+        private const val MILLIS_PER_SECOND = 1000L
 
         /** `internal`, pure — same testability shape as [roundRobinDwellMs]. Returns the
          *  [ScanSettings.setReportDelay] value to use for the current measured [degree] of distinct
