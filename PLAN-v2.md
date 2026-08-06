@@ -1,10 +1,10 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-06 (session continued past the previous end-of-session
-checkpoint).** This is the single status block to trust; anything else in this document (including
-inline "STATUS" notes inside Part 7 below) is detail underneath this, not a competing source. If a
-phase's own section below ever seems to disagree with this block, this block is current and that
-section is what's stale.
+**RESUME HERE — current status as of 2026-08-06 (session continued twice past the previous
+end-of-session checkpoint).** This is the single status block to trust; anything else in this
+document (including inline "STATUS" notes inside Part 7 below) is detail underneath this, not a
+competing source. If a phase's own section below ever seems to disagree with this block, this block
+is current and that section is what's stale.
 
 - **Shipped and committed, on `main`, PUSHED to origin (public):** P0a (crowd simulator), P0b (peer
   identity), P1 (SOS flood-forward), P3 (persistent links) — v0.6.0-dev through v0.6.3-dev.
@@ -43,16 +43,28 @@ section is what's stale.
   - 337 tests, detekt clean, both variants compile/test/assemble (incl. `lintVitalRelease`) green
     — **NOT hardware-confirmed**, same as this channel's Coded-PHY-only predecessor always was, now
     broader still (every Tier B mechanism is new and untested on real hardware).
-- **Version bumped to v0.7.0-dev and a fresh in-tree debug APK is ready to hand off for its own
-  hardware smoke-test round**: `releases/20.07-v0.7.0-dev-debug.apk` (replaces the v0.6.3-dev one),
+- **First hardware round on v0.7.0-dev (2026-08-06, 3 phones) found and fixed two real bugs, one
+  gap, and confirmed one report as design-intentional (decision 30):** a presence hop-count bug in
+  this same session's own decision 26 code (two `HopTracker` calls per scan result with the same
+  source let a worse reading undercut a better one it had just set — merged into one call, two
+  regression tests added); a dismantled group's positions lingering on the radar (`PositionTracker`
+  had no way to hear about `dismantleGroup` — fixed with an immediate `clearForGroup` at the delete
+  call site plus a periodic `pruneOrphaned` safety net in `MeshService`'s existing sweep); and a
+  nickname set after a P3 link was already open never reaching that peer (nicknames were only ever
+  pushed once, on connect — now also pushed every periodic `refreshFramesToPush`, same fix decision
+  20 already gave presence/position). Radar contrast/brightness/dot-sharpness also raised a second
+  time per this round's UI feedback. Full detail in `docs/DECISIONS.md` decision 30. 342 tests,
+  detekt clean. **These fixes are NOT yet hardware-confirmed themselves** — next round needed.
+- **Version bumped to v0.7.1-dev and a fresh in-tree debug APK is ready to hand off for its own
+  hardware smoke-test round**: `releases/20.07-v0.7.1-dev-debug.apk` (replaces the v0.7.0-dev one),
   built from the exact commit this checkpoint describes, `versionCode`/`versionName` confirmed via
-  `aapt dump badging` before committing, not assumed. This is the FIRST APK that contains any of
-  decisions 23-29's work — nothing before this point in the session was installable. **GitHub Pages
-  is still stale** (still serves v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh
-  is a separate, not-yet-done step; the in-tree APK is what's ready right now.
-- **Committed and pushed, on `main`, through `0dceacf`** (the v0.7.0-dev version bump + debug APK).
-  Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
-  from a session after this one.
+  `aapt dump badging` before committing, not assumed. This is the FIRST APK containing decision 30's
+  fixes — nothing before this point was installable with them. **GitHub Pages is still stale**
+  (still serves v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh is a separate,
+  not-yet-done step; the in-tree APK is what's ready right now.
+- **Committed and pushed, on `main`, through `870c3f9`** (the v0.7.1-dev version bump + debug APK;
+  decision 30's own code+docs landed first as `53da503`). Working tree clean as of this checkpoint.
+  If you find uncommitted changes when resuming, they're from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
@@ -775,17 +787,33 @@ deliberately NOT stored — a preview is missing fields (`senderId`, `ttl`, the 
 mac/signature) a real `SosEntity` requires; full UI surfacing ahead of the GATT-confirmed record is
 a named follow-up, not silently dropped.
 
+**First hardware round on this work (decision 30, 2026-08-06, 3 phones) found two real bugs and one
+real gap, all fixed; one report explained as design-intentional, not a bug.** A presence hop-count
+bug in decision 26's own code (`BeaconRadio.handleResult` called `HopTracker.considerNeighborReport`
+twice per scan result with the same source, letting a worse propagated reading undercut a better
+direct one it had just set — merged into a single call). A dismantled group's positions lingering on
+the radar (`PositionTracker` had no route to hear about `GroupRepository.dismantleGroup` across the
+ble/data layer split — fixed with an immediate `clearForGroup` at the delete-group call site plus a
+periodic `pruneOrphaned` safety net in `MeshService`'s existing sweep loop, also catching automatic
+`expireGroups`). A nickname set after a P3 link was already open never reaching that peer — nicknames
+were only ever pushed once, on connect, unlike presence/position which decision 20 already made
+periodic; now pushed on every `refreshFramesToPush` too. Separately, a reported "3-4 hop position"
+was traced (via `DiagnosticsLog`) to other nearby devices' blind-relay traffic plus the existing,
+deliberate `maxPositionRelayHops = 4` ceiling — correct behavior for more than 3 devices in range,
+not a defect. Full detail in `docs/DECISIONS.md` decision 30.
+
 **No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
 note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
 comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
 Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
 measured — unaffected by any of the above. **Still not started**: full UI surfacing of the SOS
 content preview, multi-hop position propagation, thumbnails/catalogue digests (§5.1's own Tier B
-payload list), the Tier 2/3 gates. 337 tests, detekt clean, both variants compile/test/assemble
-(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** —
-this channel's Coded-PHY-only predecessor never had hardware to test on either; now broader still,
-since every Tier B mechanism (ScanFilter/batching/position/SOS-gradient/SOS-content) is new and
-untested on real hardware this session.
+payload list), the Tier 2/3 gates. 342 tests, detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **Partially hardware-confirmed
+as of decision 30** (2026-08-06, 3 phones): presence hop-gradient and single-hop position both ran
+live and surfaced the two real bugs + one gap fixed in decision 30 — SOS hop-gradient and SOS content
+preview still untested on real hardware (no live SOS raised during that round), and decision 30's own
+fixes need their own confirming round next.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
