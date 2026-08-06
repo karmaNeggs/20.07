@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.7.1-dev] — First v0.7.0-dev hardware round: two bugs and a gap fixed, radar polish
+
+First live 3-phone test of P2's Tier B broadcast work (2026-08-06). Found and fixed two real bugs
+and one real gap; confirmed one more report as design-intentional, not a bug. Full reasoning for
+every fix below is in `docs/DECISIONS.md` decision 30; this is a summary.
+
+**Fixed: presence hop count sometimes read 3-4 between phones that should never see more than 1-2.**
+`BeaconRadio.handleResult` was calling `HopTracker.considerNeighborReport` twice per scan result
+from the same source — once for the direct hearing, once for the propagated value — and the second,
+worse call could undercut the first, better one it had just set. Merged into a single call.
+
+**Fixed: a deleted group's last-known member positions kept showing on the radar long after the
+group was gone.** `PositionTracker` (in-memory, ble-layer) had no way to hear about
+`GroupRepository.dismantleGroup` (data-layer). Now cleared immediately at the delete-group call
+site, with a periodic orphan sweep as a safety net for automatic group expiry too.
+
+**Fixed: a nickname set after a persistent link was already open never reached that peer.**
+Nicknames were only ever pushed once, on connect — unlike presence/position, which already got a
+periodic refresh fix for exactly this P3 persistent-link scenario. Now nicknames get the same
+periodic push.
+
+**Explained, not a bug: position sometimes read 3-4 hops on a 3-phone test.** Traced to other nearby
+devices' blind-relay traffic combined with the existing, deliberate 4-hop position relay ceiling —
+correct behavior once more than 3 devices are in range.
+
+**Radar UI polish**, per this round's live feedback: grays and the reserved presence/"safe" green
+both brightened again (contrast was still too low in bright/outdoor light); the radar's background
+wash, glow rings, crosshair, and cardinal ticks all raised further; peer dots tightened for a
+sharper look (smaller, fainter halo; higher minimum core brightness) without touching the
+distance-based blink cadence, which tested well as-is.
+
+342 tests (up from 337), detekt clean, both variants compile/test/assemble green.
+
 ## [0.7.0-dev] — P2 broadcast tier (Tier B): first production wiring, four slices
 
 The first real payload on PLAN-v2.md's Tier B connectionless broadcast channel — generalized from
