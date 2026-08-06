@@ -34,10 +34,9 @@ section is what's stale.
   23-26's work (source/docs + a real production feature) has not had a version bump or APK/Pages
   refresh yet. Due once this P2 slice (or the next one) is ready to hand off for its own hardware
   smoke-test round, not before.
-- **Committed and pushed, on `main`**: everything through decision 25 (`5042374`) is pushed; decision
-  26's changes (this session) are committed locally but not yet pushed as of this checkpoint — check
-  `git log origin/main..HEAD` when resuming. If you find OTHER uncommitted changes, they're from a
-  session after this one.
+- **Committed and pushed, on `main`, through `dc7f341`** (decision 26's broadcast-tier slice).
+  Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
+  from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
