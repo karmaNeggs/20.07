@@ -41,7 +41,7 @@ section is what's stale.
   23-27's work (source/docs + two real production features) has not had a version bump or APK/Pages
   refresh yet. Due once this P2 work is ready to hand off for its own hardware smoke-test round, not
   before.
-- **Committed and pushed, on `main`, through `dc7f341`** (decision 26's broadcast-tier slice).
+- **Committed and pushed, on `main`, through `4886445`** (decision 27's position-broadcast slice).
   Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
   from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
