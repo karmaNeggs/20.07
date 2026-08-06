@@ -25,17 +25,28 @@ section is what's stale.
   both variants green — compile/test-verified, NOT hardware-confirmed (the long-range channel this
   touches is currently circuit-broken on the only test hardware so far, so it can't be right now).
 - **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
-  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale by one commit**
-  (`05e70e8`, decisions 23-24) plus today's decision-25 work — release artefacts were not
-  re-cut for either; only source/docs were updated and pushed.
-- **NOT committed to git**: nothing as of this exact checkpoint — decisions 23-24's work is
-  committed and pushed (`05e70e8`). Decision 25's changes (this session, after that push) are not
-  yet committed. If you find other uncommitted changes when resuming, they're from a session after
-  this one.
-- **P2 production wiring's only remaining gate is now the same one P1+P3 already have** — no
-  P2-specific blocker is left. **The one thing still genuinely missing before P1+P3 (and now P2) is
-  fully trusted**: a **sustained multi-hour 3-phone session** — all four rounds so far were short
-  (tens of minutes) ad hoc tests, not the longer session §6.4 calls for.
+  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale by two commits**
+  (`05e70e8` decisions 23-24, `5042374` decision 25) — no new version was cut for either, source/docs
+  only. If a P2 payload-model phase actually ships, that's when a version bump + APK/Pages refresh
+  is next due, not before.
+- **Committed and pushed, on `main`**: everything through decision 25 (`5042374`). Working tree
+  clean as of this checkpoint. If you find uncommitted changes when resuming, they're from a session
+  after this one.
+- **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
+  multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
+  as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
+  repeatable, so the intent is one field test that validates the WHOLE v2 stack (P0a/P0b/P1/P2/P3)
+  at once — "logic test harshly [in sim], then take to field for deep QC," in the user's own words —
+  rather than spending it early on just P1+P3 and needing a second one later once P2 exists. This
+  means: **P1+P3's four short ad hoc 3-phone rounds are their interim validation and that's expected
+  to be enough to keep building on for now** — they are not blocked waiting on the big session, it's
+  deliberately deferred. And **P2 should keep being built now** (full presence/position/SOS/
+  hop-gradient payload model, degree-gated scan batching, actual production wiring, with its own
+  short ad hoc hardware smoke-tests as it goes, same pattern P1/P3 used) so it's ready in time for
+  that one eventual field test, rather than sitting idle waiting for a session that is itself
+  waiting on P2. (This corrects framing in earlier entries below and in Part 7's P2 status that read
+  the sustained-session gate as blocking P2 production wiring — it does not; read this bullet as
+  authoritative where they disagree.)
 - **Next planned test**: user is running a full-day session across up to 10 devices, date TBD from
   their side (as of 2026-08-06, still not run) — will bring back logs afterward for review. This is
   a bigger test than anything done so far (device count and duration both); treat its findings as
@@ -664,8 +675,10 @@ mismatch against `BeaconRadio`'s continuously-broadcasting advertising-set sende
 via its actual `AdvertisingSetParameters`/`ScanSettings` config, not assumed) — a single present
 neighbour could generate dozens of "sightings" per window and pin suppression regardless of true
 redundancy. Fixed by deduping `onSighting(sourceId)` within a window. **Both of P2's open questions
-are now resolved; no P2-specific blocker remains** — only the sustained-session gate below still
-applies, same as P1/P3. Still refines "audibly loud again within one interval of leaving" to closer
+are now resolved; no P2-specific blocker remains.** Per the RESUME HERE block's sequencing note:
+the sustained multi-hour field session is planned for AFTER P2 is built, as the one comprehensive
+field validation of the whole v2 stack — it is not a gate P2 needs to wait behind, so P2 work should
+continue now. Still refines "audibly loud again within one interval of leaving" to closer
 to two intervals, measured — unaffected by this update. Full presence/position/SOS/hop-gradient
 payload model, degree-gated scan batching, and Tier 2/3 gates not started. The `TrickleTimer` fix is
 compile/test-verified only — it touches the long-range channel, which is currently circuit-broken
