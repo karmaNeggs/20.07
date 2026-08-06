@@ -393,7 +393,7 @@ unconfirmed one.
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.6.3-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.7.0-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain

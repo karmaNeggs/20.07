@@ -1,25 +1,59 @@
 # Changelog
 
-## [Unreleased] — P2 Tier-1 sim: fail-open works, but not at S3's own literal endpoint
+## [0.7.0-dev] — P2 broadcast tier (Tier B): first production wiring, four slices
 
-First P2 (broadcast tier) sim work — sim-only, no production code touched. Targets the single
-acceptance criterion `PLAN-v2.md` Part 7 calls out by name for this phase: §5.5's fail-open rule
-(I5), using the real production `TrickleTimer` (no reimplementation) driven through S3's own
-scripted "walking out" scenario (D 300 → 2 over 60s) with production's real tuning.
+The first real payload on PLAN-v2.md's Tier B connectionless broadcast channel — generalized from
+what was a Coded-PHY-only "long-range channel" into the actual §5.1 broadcast tier, then built out
+across four deliberately narrow slices in one session, each hardware-gate-ready (compile/test/
+detekt/lint clean) but **none of it hardware-confirmed yet** — this channel has never run on a real
+phone. Full reasoning for every decision below is in `docs/DECISIONS.md`; this is a summary.
 
-- New `BroadcastTierEngine.kt`/`BroadcastTierNode`/`BroadcastTierTuning`, `P2GateTest.kt`.
-- `Invariants.checkFailOpen` generalized to take a plain node id instead of a `SimNode` (P2's nodes
-  aren't `SimNode`s) — two call sites in `InvariantsTest.kt` updated.
-- **Finding**: fail-open genuinely works once degree drops meaningfully below the redundancy
-  constant (confirmed at D=0), with worst-case detection closer to *two* backed-off intervals, not
-  the "one interval" `PLAN-v2.md`'s own P2 text currently says.
-- **Bigger finding**: S3's own literal scenario endpoint (D=2) sits exactly on `TrickleTimer`'s own
-  default redundancy constant (also 2) and does NOT fail open there — a node hearing exactly 2
-  same-purpose neighbours reads as "still redundant" forever. Real, mechanised, reproducible — not
-  a hypothetical. Full reasoning and options in `docs/DECISIONS.md` decision 23. Flagged as an open
-  decision before P2 production wiring starts, not resolved by this sim pass.
+**Tier-1 sim work first (decisions 23-25):** resolved P2's own open sighting-scope question —
+Trickle suppression sightings are scoped to own-group broadcasts only (already true in production).
+That dissolved an earlier "boundary bug" finding but surfaced a real production bug in the process:
+`TrickleTimer.onSighting()` counted raw radio-reception calls instead of distinct neighbours, so a
+single present group-mate could permanently pin broadcast suppression regardless of true
+redundancy. Fixed — `onSighting(sourceId)` now dedupes within a window.
 
-307 tests (up from 304), detekt clean, both variants green.
+**Slice 1, presence hop-gradient (decision 26):** capability gate loosened to
+`extendedAdvertisingSupported` alone (Coded PHY now an opportunistic range upgrade, not required —
+broader hardware support than before). New payload adds an explicit `presenceHop` field so presence
+can propagate a real multi-hop gradient over broadcast with zero GATT connections. Hardware
+`ScanFilter` on the service UUID restored, but only on this new scan (legacy scan stays untouched).
+Degree-gated `setReportDelay()` scan-report batching added.
+
+**Slice 2, single-hop position (decision 27):** reuses `MeshFrameCodec.encodePosition`'s full
+output verbatim — no new crypto or framing — resealed on a fixed ~20s cadence so a stationary
+sender's dot doesn't go stale on others' radar. Verified via `RelayResponder.signatureCheckPasses`,
+the same trust bar a GATT position gets. Single-hop only: a receiver never re-broadcasts a position
+heard from someone else (extended advertising has no natural "relay"); multi-hop position still
+rides the existing, unaffected GATT relay path.
+
+**Slice 3, SOS hop-gradient (decision 28):** closes P2's other original deferral, deliberately NOT
+the way an earlier, already-reverted mechanism did it (a rough, sosId-agnostic hop estimate mixed
+with exact per-SOS tracking — confirmed by `grep` that the legacy beacon's own `sosHop` field has
+sat unread ever since). Fixed by keying on the real SOS id (`HopTracker.bestActiveSos`, split out of
+`bestActiveSosHop`) so a Tier B sighting composes with GATT flood-forward's own tracking instead of
+aggregating. Forced a wire-format redesign (both optional blocks now always length-prefixed) — a
+safe breaking change, since nothing has ever run this format.
+
+**Slice 4, SOS content preview (decision 29):** the one genuine threat-model call in this batch —
+stopped mid-design to ask before shipping it. The obvious approach (reuse the existing
+`sosMacInput` scheme) needs the sender's device id in the clear to verify, which would escalate an
+already-flagged, unresolved gap (SOS content is cleartext even over GATT — see `NEXT_STEPS.md`) from
+"readable if you connect" to "passively readable by any nearby BLE scanner." User chose to avoid the
+new exposure: new `MeshFrameCodec.broadcastSosMacInput` deliberately excludes `senderId` — a second,
+non-interchangeable mac scheme under the same group key. Broadcasts a short (≤120B) preview of
+whichever SOS is nearest, ours or a relayed one held; position is dropped from any cycle carrying
+SOS content (budget forces the priority call). Verified on receipt but not stored — a preview is
+missing fields a real `SosEntity` needs; full UI surfacing is a named follow-up.
+
+**Not yet started, named explicitly:** full UI surfacing of the SOS content preview; multi-hop
+position propagation over broadcast; thumbnails/catalogue digests; the Tier 2 (synthetic radio load)
+and Tier 3 (real hardware) gates this whole channel still needs.
+
+337 tests (up from 304), detekt clean, both variants compile/test/assemble (incl.
+`lintVitalRelease`) green.
 
 ## [0.6.3-dev] — Bluetooth off/on no longer strands the mesh
 
