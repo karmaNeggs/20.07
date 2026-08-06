@@ -204,6 +204,21 @@ object MeshFrameCodec {
             d.writeSosMessage(message); d.writeLong(timestamp)
         }
 
+    /** Broadcast-tier counterpart to [sosMacInput] (decision 29, `docs/DECISIONS.md`) — deliberately
+     *  excludes [senderId]. `BeaconRadio`'s Tier B SOS content broadcast is passively readable by
+     *  ANY nearby BLE scanner (no connection needed), unlike a GATT [Frame.Sos] which at least
+     *  requires connecting first — carrying a per-install `senderId` there would be a meaningfully
+     *  larger, purely passive tracking surface than this app currently broadcasts anywhere else
+     *  (position's own `senderId` stays inside the AES-GCM seal; this field has no seal to hide
+     *  behind, SOS content is cleartext-by-design even over GATT — see `NEXT_STEPS.md`'s open
+     *  decision on that). A SEPARATE mac from [sosMacInput]'s own — not reusable, not
+     *  interchangeable, computed fresh under the same group key at broadcast time from whichever
+     *  `SosEntity` is being mentioned, regardless of whether this device originated it or is
+     *  holding a relayed copy (the content was already verified once, under [sosMacInput]'s own
+     *  scheme, before being stored — see `RelayResponder.handleSos`). */
+    fun broadcastSosMacInput(id: String, groupId: String, message: String, timestamp: Long): ByteArray =
+        build { d -> d.writeStr(id); d.writeStr(groupId); d.writeSosMessage(message); d.writeLong(timestamp) }
+
     fun evidMacInput(
         id: String, groupId: String, senderId: String, timestamp: Long,
         sha256Hex: String, totalChunks: Int, mimeType: String

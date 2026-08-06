@@ -157,6 +157,15 @@ class BeaconRadio(
     // other people's radar.
     private var broadcastTierLastPositionSealedAtMs = 0L
     private var broadcastTierPositionFrame: ByteArray? = null
+    // SOS content preview cache (decision 29) — keyed on sosId, not time-based like position's
+    // cache above, because SOS content is immutable once created (no edit path exists on
+    // SosEntity) so there's nothing to go stale; only refetched when the nearest active sosId
+    // itself changes. null cache value (distinct from "not cached yet") means "fetched, but this
+    // SOS has nothing eligible to preview" (empty message, or we don't hold the group key) — see
+    // sosContentFor's own doc.
+    private var broadcastTierSosContentCacheId: String? = null
+    private var broadcastTierSosContentCache: MeshProtocol.SosAlert.Content? = null
+    private var broadcastTierSosContentCached = false
 
     /** Safe to call more than once, and safe to follow with a fresh [startAdvertising]/
      *  [startScanning] later (see [MeshService.setMeshActive]'s "go offline"/"go active" cycle) —
@@ -192,6 +201,9 @@ class BeaconRadio(
         broadcastTierReportDelayActive = false
         broadcastTierPositionFrame = null
         broadcastTierLastPositionSealedAtMs = 0L
+        broadcastTierSosContentCacheId = null
+        broadcastTierSosContentCache = null
+        broadcastTierSosContentCached = false
     }
 
     /** 3 HMACs per group, once per slot — not per scan result. Also refreshes the active-group
@@ -483,13 +495,41 @@ class BeaconRadio(
         return nowMs
     }
 
+    /** A short, authenticated broadcast preview of [sosId]'s message, if we hold one worth showing
+     *  — see [MeshProtocol.SosAlert.Content]'s own doc for the wire shape and decision 29
+     *  (`docs/DECISIONS.md`) for why it's computed with [MeshFrameCodec.broadcastSosMacInput]
+     *  (excludes `senderId`), NOT [MeshFrameCodec.sosMacInput] (the GATT-authoritative scheme).
+     *  Sourced from whichever `SosEntity` [sosId] names — OUR OWN or a relayed one we're holding,
+     *  either way (the content was already verified once, under the OTHER scheme, before it was
+     *  stored — see `RelayResponder.handleSos`). Cached per-id, not time-based: SOS content is
+     *  immutable once created, so nothing here can go stale the way a position fix does.
+     *  [encodeBroadcastTierBeacon] independently re-checks the size ceiling and silently omits an
+     *  oversized message — this function doesn't need to duplicate that check. */
+    private suspend fun sosContentFor(groupId: String, sosId: String): MeshProtocol.SosAlert.Content? {
+        if (broadcastTierSosContentCached && sosId == broadcastTierSosContentCacheId) {
+            return broadcastTierSosContentCache
+        }
+        val key = repo.getGroupKey(groupId)
+        val entity = key?.let { repo.sosDao.getById(sosId) }
+        val content = if (key != null && entity != null && entity.message.isNotEmpty()) {
+            val macInput = MeshFrameCodec.broadcastSosMacInput(sosId, groupId, entity.message, entity.timestamp)
+            MeshProtocol.SosAlert.Content(entity.message, entity.timestamp, CryptoUtils.authTag(key, macInput))
+        } else {
+            null
+        }
+        broadcastTierSosContentCacheId = sosId
+        broadcastTierSosContentCache = content
+        broadcastTierSosContentCached = true
+        return content
+    }
+
     @SuppressLint("MissingPermission")
     // CyclomaticComplexMethod: three independent optional payload concerns (presence hop, position
     // reseal, sos alert) plus the suppression/payload-key/advertising-set-lifecycle branches this
     // section's sibling functions already carry at similar complexity - splitting further would
     // scatter one radio operation's decision across more functions than it clarifies.
     @Suppress("CyclomaticComplexMethod")
-    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray) {
+    private suspend fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray) {
         if (broadcastTierDisabledForSession) return
         val adapter = bluetoothManager.adapter ?: return
         if (!BleCapabilities.extendedAdvertisingSupported(adapter)) return
@@ -499,8 +539,15 @@ class BeaconRadio(
         // Real sosId, not a rough aggregate — see MeshProtocol.encodeBroadcastTierBeacon's activeSos
         // doc (decision 28) for why that distinction is what makes this safe to feed into hop
         // tracking on receipt, unlike the legacy beacon's still-unread sosHop field.
-        val activeSos = hopTracker.bestActiveSos(groupId)?.let { (id, hop) -> MeshProtocol.SosAlert(id, hop) }
-        val payloadKey = "$groupId:${rid.toHex()}:$presenceHop:$positionMarker:${activeSos?.id}:${activeSos?.hop}"
+        val bestSos = hopTracker.bestActiveSos(groupId)
+        val activeSos = bestSos?.let { (id, hop) -> MeshProtocol.SosAlert(id, hop, sosContentFor(groupId, id)) }
+        // An emergency preview takes priority over a routine position refresh for however long the
+        // SOS stays the nearest active one — see encodeBroadcastTierBeacon's own doc for the budget
+        // arithmetic this trade is based on (both maxed together would overrun the ~251B update).
+        val hasSosContent = activeSos?.content != null
+        val positionForThisCycle = if (hasSosContent) null else broadcastTierPositionFrame
+        val payloadKey = "$groupId:${rid.toHex()}:$presenceHop:$positionMarker:" +
+            "${activeSos?.id}:${activeSos?.hop}:$hasSosContent"
         if (broadcastTierTrickle.isSuppressed()) {
             if (broadcastTierAdvertisingActive) {
                 try { adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback) } catch (e: Exception) {
@@ -512,8 +559,7 @@ class BeaconRadio(
             return
         }
         if (payloadKey == broadcastTierCurrentPayloadKey && broadcastTierAdvertisingActive) return
-        val payload =
-            MeshProtocol.encodeBroadcastTierBeacon(type, rid, presenceHop, broadcastTierPositionFrame, activeSos)
+        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, presenceHop, positionForThisCycle, activeSos)
         val params = AdvertisingSetParameters.Builder()
             .setLegacyMode(false)
             .setConnectable(false)
@@ -764,6 +810,11 @@ class BeaconRadio(
         // Only ever set when activeSos was actually encoded (see encodeBroadcastTierBeacon's own
         // doc) — no aggregate, no ambiguity about which SOS this hop count refers to.
         beacon.activeSos?.let { hopTracker.considerNeighborReport(groupId, it.id, it.hop, result.device.address) }
+        // Content preview verification (decision 29) - repo.getGroupKey is synchronous (unlike
+        // repo.peerKeyDao.get below), so this runs inline on the callback thread, no serviceScope
+        // dispatch needed.
+        val content = beacon.activeSos?.content
+        if (content != null) verifyBroadcastSosContent(groupId, beacon.activeSos.id, content)
         // Scoped to within ONE Trickle window only (tens of seconds) - see TrickleTimer.onSighting's
         // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
         // lived peer state off it (decision 25, docs/DECISIONS.md).
@@ -801,6 +852,29 @@ class BeaconRadio(
         positionTracker.offer(
             groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, body.hop, sealed = sealed,
         )
+    }
+
+    /** Verifies an SOS content preview's mac (decision 29, `docs/DECISIONS.md`) — recomputes
+     *  [MeshFrameCodec.broadcastSosMacInput] under this device's own copy of the group key and
+     *  constant-time-compares against [content]'s mac, the SAME acceptance shape
+     *  `RelayResponder.authOk` uses for the GATT-authoritative scheme, just without a `RelayResponder`
+     *  reference (this only needs [CryptoUtils], already a dependency here). A group we hold no key
+     *  for can't verify at all — silently does nothing, matching every other blind-relay-tolerant
+     *  check in this app (there is nothing to relay further here regardless, since Tier B content
+     *  is a broadcaster's own preview, never re-broadcast by a receiver — see
+     *  [MeshProtocol.encodeBroadcastTierBeacon]'s own doc). Verified content is logged only, not
+     *  stored: a broadcast preview is missing fields (`senderId`, `ttl`, the GATT-authoritative mac/
+     *  signature) a real `SosEntity` requires, so it deliberately does not get inserted into
+     *  storage or notify the user directly here — full UI surfacing of this preview (ahead of the
+     *  GATT-confirmed record) is a named follow-up, not silently dropped. */
+    private fun verifyBroadcastSosContent(groupId: String, sosId: String, content: MeshProtocol.SosAlert.Content) {
+        val key = repo.getGroupKey(groupId) ?: return
+        val macInput = MeshFrameCodec.broadcastSosMacInput(sosId, groupId, content.message, content.timestamp)
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), content.mac)) {
+            Log.w(TAG, "broadcast-tier SOS content failed mac verification — dropping")
+            return
+        }
+        DiagnosticsLog.event("recv", "broadcast-tier SOS content preview verified (no GATT connection needed)")
     }
 
     companion object {

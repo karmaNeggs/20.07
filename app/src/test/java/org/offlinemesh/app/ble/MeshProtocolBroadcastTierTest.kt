@@ -170,7 +170,7 @@ class MeshProtocolBroadcastTierTest {
     }
 
     @Test
-    fun `worst-case combined payload (max position plus max sos id) stays within the 251B advertising budget`() {
+    fun `worst-case position-plus-hop-gradient payload (no content) stays within the 251B advertising budget`() {
         val maxPosition = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_POSITION_FRAME_BYTES)
         val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
@@ -180,9 +180,100 @@ class MeshProtocolBroadcastTierTest {
         // BLE extended advertising's in-place-update budget - see encodeBroadcastTierBeacon's own
         // doc for the worst-case arithmetic this is checking directly rather than assuming.
         val extendedAdvertisingInPlaceUpdateBudget = 251
-        assertEquals(240, encoded.size)
+        assertEquals(242, encoded.size)
         assert(encoded.size <= extendedAdvertisingInPlaceUpdateBudget) {
             "worst-case Tier B beacon (${encoded.size}B) must fit the ~251B in-place-update budget"
+        }
+    }
+
+    @Test
+    fun `activeSos content (message, timestamp, mac) round-trips`() {
+        val mac = ByteArray(32) { it.toByte() } // stand-in for a real CryptoUtils.authTag output
+        val content = MeshProtocol.SosAlert.Content(message = "help, medical emergency", timestamp = 123L, mac = mac)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
+            activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)?.activeSos?.content
+
+        assertEquals("help, medical emergency", decoded?.message)
+        assertEquals(123L, decoded?.timestamp)
+        assertArrayEquals(mac, decoded?.mac)
+    }
+
+    @Test
+    fun `activeSos with no content still round-trips id and hop, content is null not a zero-length one`() {
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
+            activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 2),
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)?.activeSos
+
+        assertEquals("sos-1", decoded?.id)
+        assertEquals(2, decoded?.hop)
+        assertNull(decoded?.content)
+    }
+
+    @Test
+    fun `content is only ever attached alongside a sos id - encoder cannot produce content without one`() {
+        // SosAlert.Content isn't reachable without going through SosAlert itself, so this is really
+        // documenting the invariant decodeBroadcastTierBeacon's own malformed-input guard enforces
+        // on the wire (a content block with no sosId is rejected outright, see the length-overrun
+        // test above's sibling coverage) - included here for symmetry with the encode-side shape.
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0)
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded)?.activeSos)
+    }
+
+    @Test
+    fun `content message past the size ceiling is silently omitted, not truncated into an unverifiable mac`() {
+        val oversizedMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES + 1)
+        val content = MeshProtocol.SosAlert.Content(oversizedMessage, timestamp = 1L, mac = ByteArray(32))
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
+            activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)
+        // Content omitted, but the hop-gradient alert itself still goes out - a message that's too
+        // long to preview must never suppress the (always-valuable, always-small) hop-gradient too.
+        assertNull(decoded?.activeSos?.content)
+        assertEquals("sos-1", decoded?.activeSos?.id)
+    }
+
+    @Test
+    fun `content with a mac that isn't exactly 32 bytes is silently omitted`() {
+        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(16)) // wrong length
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
+            activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
+        )
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded)?.activeSos?.content)
+    }
+
+    @Test
+    fun `decode rejects a content block whose message length prefix overruns the actual bytes`() {
+        val content =
+            MeshProtocol.SosAlert.Content("a reasonably long help message", timestamp = 1L, mac = ByteArray(32))
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
+            activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
+        )
+        // Truncate away the mac and part of the message - must be rejected outright.
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded.copyOf(encoded.size - 20)))
+    }
+
+    @Test
+    fun `worst-case payload with content but no position (BeaconRadio's own priority trade) stays within budget`() {
+        val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
+        val maxMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES)
+        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = ByteArray(32))
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = null,
+            activeSos = MeshProtocol.SosAlert(maxSosId, 1, content),
+        )
+        val extendedAdvertisingInPlaceUpdateBudget = 251
+        assertEquals(222, encoded.size)
+        assert(encoded.size <= extendedAdvertisingInPlaceUpdateBudget) {
+            "worst-case content-bearing Tier B beacon (${encoded.size}B) must fit the ~251B budget"
         }
     }
 }

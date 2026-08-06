@@ -65,8 +65,8 @@ object MeshProtocol {
      *  Generous against a real `MeshFrameCodec.encodePosition` frame (~150-160B: `groupId` is a
      *  16-char hex id, not UUID-length — see [org.offlinemesh.app.data.JoinCode]'s `GROUP_ID_LEN`
      *  — while `senderId` IS a 36-char UUID) while leaving guaranteed headroom for
-     *  [MAX_BROADCAST_TIER_SOS_ID_BYTES] too — see [encodeBroadcastTierBeacon]'s own doc for the
-     *  full worst-case budget arithmetic. */
+     *  [MAX_BROADCAST_TIER_SOS_ID_BYTES] and [MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES] too — see
+     *  [encodeBroadcastTierBeacon]'s own doc for the full worst-case budget arithmetic. */
     const val MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 180
 
     /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [BroadcastTierBeacon.activeSos]
@@ -75,10 +75,35 @@ object MeshProtocol {
      *  [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES]. */
     const val MAX_BROADCAST_TIER_SOS_ID_BYTES = 48
 
+    /** Absolute ceiling on [SosAlert.Content.message] — deliberately much smaller than
+     *  [MeshFrameCodec.MAX_SOS_MESSAGE_BYTES] (2000): this is a broadcast preview competing for
+     *  space with everything else in a ~251B in-place update, not the authoritative GATT record,
+     *  which has no such pressure. 120 bytes is enough for a short, actionable alert ("medical
+     *  emergency, gate 3 stairwell") without crowding out the rest of the payload — see
+     *  [encodeBroadcastTierBeacon]'s own doc for the full worst-case budget arithmetic. A message
+     *  longer than this is simply not attached (see `BeaconRadio`'s sourcing logic) — the hop-
+     *  gradient-only [SosAlert] still goes out either way. */
+    const val MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES = 120
+
+    /** Fixed HMAC-SHA256 output length — see [MeshFrameCodec.broadcastSosMacInput]'s doc for what
+     *  this authenticates and, critically, what it deliberately leaves out. */
+    private const val MAC_LEN = 32
+
     /** The sender's own nearest known active SOS for this group — [id] is the real SOS id (matching
      *  `SosEntity.id`), NOT a rough placeholder — see [encodeBroadcastTierBeacon]'s own doc for why
      *  that distinction is the entire point of this type existing. */
-    data class SosAlert(val id: String, val hop: Int)
+    data class SosAlert(val id: String, val hop: Int, val content: Content? = null) {
+        /** A short, authenticated preview of the SOS message itself — see decision 29
+         *  (`docs/DECISIONS.md`) and [MeshFrameCodec.broadcastSosMacInput]'s own doc for why this
+         *  deliberately carries no `senderId`, unlike the GATT-authoritative `SosEntity`/`Frame.Sos`
+         *  it's sourced from. [timestamp] is the SOURCE `SosEntity`'s own creation timestamp, fixed
+         *  — NOT re-stamped to "now" on every broadcast the way [BroadcastTierBeacon.positionFrame]
+         *  is, because [mac] is computed over it: re-stamping would invalidate a previously-computed
+         *  mac for no benefit (SOS freshness is governed entirely by `HopTracker`'s own
+         *  `lastUpdated` staleness tracking, not by anything embedded in this content block, unlike
+         *  a position record's own embedded age). */
+        data class Content(val message: String, val timestamp: Long, val mac: ByteArray)
+    }
 
     /**
      * Broadcast-tier (Tier B, PLAN-v2.md §5.1) payload — carried over BLE Extended Advertising
@@ -110,29 +135,45 @@ object MeshProtocol {
      * broadcaster's OWN current fix (hop 0).
      *
      * [activeSos], when present, is `HopTracker.bestActiveSos(groupId)`'s result at encode time —
-     * the sender's own nearest known active SOS, by its REAL id, not a rough aggregate. This
-     * resolves what decision 26 deliberately deferred: an EARLIER version of the legacy beacon
-     * carried a rough, sosId-agnostic hop estimate that got fed into a shared "SOS_PENDING" key
-     * sitting alongside exact, TTL-derived per-SOS tracking, and a stale rough reading leaked
-     * through the `min()` of both (see `docs/DECISIONS.md` decision 13's live-tested finding, and
-     * [encodeBeacon]'s own doc — that field is STILL written today but confirmed, by grep, never
-     * read by any receiver). Keying on the real id instead avoids that failure mode entirely: a
-     * receiver feeds this straight into `HopTracker.considerNeighborReport(groupId, activeSos.id,
-     * activeSos.hop, ...)` — just ANOTHER SOURCE for the SAME exact per-SOS key GATT flood-forward
-     * already uses, so it composes via ordinary distance-vector relaxation instead of aggregating.
-     * Deliberately carries no message/mac/signature — a receiver learns "an SOS exists, this many
-     * hops away" for radar/UI purposes only; the authenticated content still arrives over GATT once
-     * connected (which `BeaconRadio`'s existing blind-carrier policy already attempts eagerly for
-     * every heard device, member or not).
+     * the nearest known active SOS (ours or a relayed one we're holding), by its REAL id, not a
+     * rough aggregate. This resolves what decision 26 deliberately deferred: an EARLIER version of
+     * the legacy beacon carried a rough, sosId-agnostic hop estimate that got fed into a shared
+     * "SOS_PENDING" key sitting alongside exact, TTL-derived per-SOS tracking, and a stale rough
+     * reading leaked through the `min()` of both (see `docs/DECISIONS.md` decision 13's live-tested
+     * finding, and [encodeBeacon]'s own doc — that field is STILL written today but confirmed, by
+     * grep, never read by any receiver). Keying on the real id instead avoids that failure mode
+     * entirely: a receiver feeds the hop/id into `HopTracker.considerNeighborReport(groupId,
+     * activeSos.id, activeSos.hop, ...)` — just ANOTHER SOURCE for the SAME exact per-SOS key GATT
+     * flood-forward already uses, composing via ordinary distance-vector relaxation instead of
+     * aggregating.
      *
-     * Both optional blocks are ALWAYS length-prefixed in the encoded output (a zero length means
-     * "absent"), rather than "trailing bytes present or not" — this is what lets two independently-
-     * optional variable-length fields coexist unambiguously. Worst-case total, computed not assumed:
-     * header(8) + positionLen(2)+[MAX_BROADCAST_TIER_POSITION_FRAME_BYTES](180) +
-     * sosIdLen(1)+[MAX_BROADCAST_TIER_SOS_ID_BYTES](48)+sosHop(1) = 240 bytes, comfortably inside
-     * extended advertising's ~251B in-place-update budget even at both ceilings simultaneously —
-     * which a real sender never hits anyway (realistic ~150B position + 36B sos id ≈ 198B total).
+     * [SosAlert.content], when present (decision 29), is a short authenticated preview of the SOS
+     * message itself — see [SosAlert.Content]'s own doc for why it carries no `senderId` and a
+     * fixed (not re-stamped) timestamp. Verified with [MeshFrameCodec.broadcastSosMacInput], NOT
+     * [MeshFrameCodec.sosMacInput] (the GATT-authoritative one) — a deliberately separate scheme,
+     * not interchangeable. The authoritative, fully-signed record (with sender identity) still
+     * arrives over GATT once connected, which `BeaconRadio`'s existing blind-carrier policy already
+     * attempts eagerly for every heard device, member or not — this is a preview, not the record.
+     *
+     * All three optional pieces (position, sos id/hop, sos content) are ALWAYS length-prefixed in
+     * the encoded output (a zero length means "absent"), rather than "trailing bytes present or
+     * not" — this is what lets independently-optional variable-length fields coexist unambiguously.
+     * Worst-case total, computed not assumed: header(8) + positionLen(2)+
+     * [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES](180) + sosIdLen(1)+
+     * [MAX_BROADCAST_TIER_SOS_ID_BYTES](48)+sosHop(1) + msgLen(2)+
+     * [MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES](120)+timestamp(8)+mac(32) = 400 bytes — OVER the ~251B
+     * budget if all three were maxed simultaneously. In practice this never happens: `BeaconRadio`
+     * deliberately omits [positionFrame] whenever [activeSos] carries content (see its own sourcing
+     * logic) — an emergency preview takes priority over a routine position refresh for however many
+     * seconds the SOS stays active. With position omitted, worst case is header(8) + positionLen-
+     * absent(2) + sosIdLen(1)+48+1 + msgLen(2)+120+8+32 = 222 bytes, comfortably inside budget —
+     * checked directly in a test, not assumed.
      */
+    // LongParameterList: wire-protocol scalars/blocks, matching MeshFrameCodec's own established
+    // pattern. CyclomaticComplexMethod: three independent optional blocks (position, sos id/hop,
+    // sos content), each with its own eligibility check - same shape as decodeBroadcastTierBeacon's
+    // own matching suppress below, for the same reason.
+    @Suppress("LongParameterList", "CyclomaticComplexMethod")
     fun encodeBroadcastTierBeacon(
         type: Byte,
         rotatingGroupId: ByteArray,
@@ -144,10 +185,16 @@ object MeshProtocol {
         val sosIdBytes = activeSos?.id?.toByteArray(UTF8)
         val includeSos = sosIdBytes != null && sosIdBytes.isNotEmpty() &&
             sosIdBytes.size <= MAX_BROADCAST_TIER_SOS_ID_BYTES
+        val content = activeSos?.content
+        val msgBytes = content?.message?.toByteArray(UTF8)
+        val includeContent = includeSos && msgBytes != null && msgBytes.isNotEmpty() &&
+            msgBytes.size <= MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES && content.mac.size == MAC_LEN
         val headerLen = 1 + ROTATING_ID_LEN + 1
-        var size = headerLen + 2 + 1 // header + positionLen prefix + sosIdLen prefix, always present
+        // header + positionLen prefix + sosIdLen prefix + msgLen prefix, all always present
+        var size = headerLen + 2 + 1 + 2
         if (includePosition) size += positionFrame!!.size
         if (includeSos) size += sosIdBytes!!.size + 1 // + hop byte
+        if (includeContent) size += msgBytes!!.size + Long.SIZE_BYTES + MAC_LEN
         val buf = ByteBuffer.allocate(size)
         buf.put(type)
         buf.put(rotatingGroupId.copyOf(ROTATING_ID_LEN))
@@ -158,6 +205,12 @@ object MeshProtocol {
         if (includeSos) {
             buf.put(sosIdBytes!!)
             buf.put(activeSos.hop.coerceIn(0, 255).toByte())
+        }
+        buf.putShort(if (includeContent) msgBytes!!.size.toShort() else 0)
+        if (includeContent) {
+            buf.put(msgBytes!!)
+            buf.putLong(content.timestamp)
+            buf.put(content.mac)
         }
         return buf.array()
     }
@@ -170,10 +223,12 @@ object MeshProtocol {
         val activeSos: SosAlert? = null,
     )
 
-    @Suppress("ReturnCount") // malformed-input guard clauses, same shape as every other decode() in this codebase
+    // ReturnCount/CyclomaticComplexMethod: malformed-input guard clauses for three independent
+    // optional blocks - same reasoning as encodeBroadcastTierBeacon's own matching suppress above.
+    @Suppress("ReturnCount", "CyclomaticComplexMethod")
     fun decodeBroadcastTierBeacon(bytes: ByteArray): BroadcastTierBeacon? {
         val headerLen = 1 + ROTATING_ID_LEN + 1
-        if (bytes.size < headerLen + 2 + 1) return null // header + both always-present length prefixes
+        if (bytes.size < headerLen + 2 + 1 + 2) return null // header + all three always-present length prefixes
         val type = bytes[0]
         val rid = bytes.copyOfRange(1, 1 + ROTATING_ID_LEN)
         val pHop = bytes[1 + ROTATING_ID_LEN].toInt() and UNSIGNED_BYTE_MASK
@@ -185,10 +240,26 @@ object MeshProtocol {
         val sosIdLen = buf.get().toInt() and UNSIGNED_BYTE_MASK
         val sosTailNeeded = if (sosIdLen > 0) sosIdLen + 1 else 0 // + hop byte, only if an id is actually present
         if (sosIdLen > MAX_BROADCAST_TIER_SOS_ID_BYTES || buf.remaining() < sosTailNeeded) return null
-        val activeSos = if (sosIdLen > 0) {
-            val idBytes = ByteArray(sosIdLen).also { buf.get(it) }
-            SosAlert(String(idBytes, UTF8), buf.get().toInt() and UNSIGNED_BYTE_MASK)
+        var sosId: String? = null
+        var sosHop = 0
+        if (sosIdLen > 0) {
+            sosId = String(ByteArray(sosIdLen).also { buf.get(it) }, UTF8)
+            sosHop = buf.get().toInt() and UNSIGNED_BYTE_MASK
+        }
+        if (buf.remaining() < 2) return null // msgLen prefix itself missing — malformed
+        val msgLen = buf.short.toInt() and UNSIGNED_SHORT_MASK
+        val msgTailNeeded = if (msgLen > 0) Long.SIZE_BYTES + MAC_LEN else 0
+        if (msgLen > MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES || buf.remaining() < msgLen + msgTailNeeded) return null
+        // A content block with no sosId to attach to is malformed, not just "ignore the content" —
+        // encodeBroadcastTierBeacon can never produce this shape (includeContent requires includeSos).
+        if (msgLen > 0 && sosId == null) return null
+        val content = if (msgLen > 0) {
+            val message = String(ByteArray(msgLen).also { buf.get(it) }, UTF8)
+            val timestamp = buf.long
+            val mac = ByteArray(MAC_LEN).also { buf.get(it) }
+            SosAlert.Content(message, timestamp, mac)
         } else null
+        val activeSos = sosId?.let { SosAlert(it, sosHop, content) }
         return BroadcastTierBeacon(type, rid, pHop, positionFrame, activeSos)
     }
 

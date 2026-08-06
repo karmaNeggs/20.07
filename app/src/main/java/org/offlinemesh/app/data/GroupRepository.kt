@@ -15,7 +15,11 @@ class GroupRepository(context: Context) {
     // key storage.
     private val keyStore by lazy { GroupKeyStore(context) }
     val groupDao = db.groupDao()
-    private val sosDao = db.sosDao()
+    // Public, not private, matching peerKeyDao below — BeaconRadio's Tier B SOS content broadcast
+    // (decision 29, docs/DECISIONS.md) needs a direct held-SOS-by-id lookup the same way it already
+    // uses peerKeyDao directly for position ingestion (decision 27), rather than growing this
+    // repository with a one-off wrapper per cross-class DAO need.
+    val sosDao = db.sosDao()
     private val evidenceDao = db.evidenceDao()
     private val evidenceChunkDao = db.evidenceChunkDao()
     private val nicknameDao = db.nicknameDao()

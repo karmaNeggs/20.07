@@ -79,6 +79,13 @@ interface SosDao {
     @Query("SELECT * FROM sos_events WHERE ttl > 0")
     suspend fun getRelayable(): List<SosEntity>
 
+    // No ttl/ownership filter, unlike getRelayable — BeaconRadio's Tier B SOS content broadcast
+    // (decision 29) needs whichever SOS HopTracker.bestActiveSos already named as nearest,
+    // regardless of whether we originated it or are holding a relayed copy; ttl=0 (stopped
+    // propagating over GATT) doesn't mean "don't mention it exists" for a device still in range.
+    @Query("SELECT * FROM sos_events WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): SosEntity?
+
     // No ttl filter, unlike getRelayable — "what do we hold" (used to build the outgoing catalog
     // filter, see RelayEngine.heldSosIds) is a different question from "what do we still forward"
     // (getRelayable, ttl > 0 only). An item at ttl 0 has stopped propagating but is still held

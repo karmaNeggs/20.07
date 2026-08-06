@@ -1372,3 +1372,77 @@ open — no natural "relay" exists for a connectionless channel); thumbnails and
 (§5.1's own Tier B payload list, not yet started). Tier 2/3 hardware gates remain not started for
 all of P2.
 
+## 29. P2 production wiring, fourth slice: SOS content preview — a genuine threat-model call, asked not assumed
+
+2026-08-06, same day as decisions 23-28, going back to close decision 28's own remaining deferral
+("the actual SOS message/mac/signature").
+
+**Stopped and asked before writing code, because this one is a real tradeoff, not an implementation
+detail.** The obvious design — reuse `MeshFrameCodec.sosMacInput`'s existing scheme so a receiver
+can verify content the same way GATT already does — requires `senderId` in the mac input, which
+means broadcasting it in the clear alongside the message. Two things made this worth stopping for
+rather than just shipping: (1) `NEXT_STEPS.md` already carries an explicit, UNRESOLVED open decision
+that SOS content is cleartext even over GATT ("any nearby phone can read SOS content... needs a
+call before any real deployment") — so this isn't a new problem, but Tier B genuinely escalates it:
+GATT requires an active connection to pull the content, Tier B broadcast makes it **passively
+readable by anyone with a BLE scanner, zero interaction required**. (2) it would broadcast a
+per-install `deviceId` in cleartext — currently the app never does this anywhere (position keeps
+`senderId` inside its AES-GCM seal). Presented the user three options — ship it as-is (a crisis
+alert being loud/discoverable could be a legitimate feature, not just a bug), skip content
+broadcast entirely, or build a version that avoids the new exposure. **User chose the third.**
+
+**The fix: a separate mac scheme that doesn't need `senderId` at all.** New
+`MeshFrameCodec.broadcastSosMacInput(id, groupId, message, timestamp)` — same HMAC-SHA256 under the
+group key, just missing the one field that would have leaked identity. Not interchangeable with
+`sosMacInput`'s own mac (different input shape, different value) — computed fresh at broadcast time
+under the group key we already hold, not reused from `SosEntity.mac`. This is deliberately a SECOND
+crypto surface, not a reuse of the existing one (unlike decisions 27-28's whole "reuse existing
+crypto verbatim" discipline) — the explicit cost of the privacy fix, called out rather than glossed
+over. Dropping `senderId` also freed up wire-format budget (removing a ~36-byte field gave more room
+than it cost), a nice side effect of the privacy-preserving path, not the reason for it.
+
+**Scope: broadcasts a short (≤120B), authenticated preview of whichever SOS `HopTracker.
+bestActiveSos` already names as nearest — ours or a relayed one we're holding.** Extending past
+"our own SOS only" turned out to be free: the message was already verified once (under
+`sosMacInput`'s scheme) before being stored by `RelayResponder.handleSos`, so re-authenticating it
+under the new broadcast-only scheme for re-broadcast is safe regardless of origin — no new trust is
+extended, we're vouching for content we already checked. Cached per-sosId (not time-based like
+position's cache): SOS content is immutable once created, nothing to go stale.
+
+**Budget forced an explicit priority call: position is dropped from any broadcast cycle where SOS
+content is being sent.** Worst case with both maxed (max position + max SOS content) is ~400 bytes,
+well over the ~251B in-place-update budget; worst case with content alone (no position) is 222
+bytes, comfortable. `BeaconRadio` now deliberately omits `positionFrame` whenever `activeSos.content
+!= null` — an emergency preview outranks a routine position refresh for however many seconds the
+SOS stays the nearest active one. Documented as a deliberate trade, not a bug: position resumes the
+moment the SOS goes stale or drops out of range.
+
+**Receive side: verified but NOT stored.** A broadcast preview is missing fields a real `SosEntity`
+requires (`senderId`, `ttl`, the GATT-authoritative mac/signature) — inserting a partial record
+would misrepresent what's actually known. `verifyBroadcastSosContent` checks the mac (mirroring
+`RelayResponder.authOk`'s exact acceptance shape via `CryptoUtils` directly, no `RelayResponder`
+reference needed) and logs a bare confirmation via `DiagnosticsLog` (event type only — no message
+body, no id, matching that class's own "never message bodies" constraint, verified against its
+class doc before writing the log line). **Full UI surfacing of this preview — showing it to the user
+before the GATT-confirmed record arrives — is a named follow-up, not silently dropped.** Unlike
+position/presence ingestion, this needed no suspend dispatch: `repo.getGroupKey` is synchronous, so
+verification runs inline on the scan-callback thread.
+
+Two small supporting changes: `SosDao.getById(id)` (new query — nothing existed to fetch a single
+held SOS by id) and `GroupRepository.sosDao` made public (matching `peerKeyDao`'s existing pattern,
+both exist for exactly this kind of cross-class Tier B access without growing the repository with
+one-off wrapper methods).
+
+337 tests (up from 330: +6 net, since one existing worst-case-size test was updated in place for
+the format change rather than replaced). detekt clean, both variants compile/test/assemble (incl.
+`lintVitalRelease`) green. **Production code touched**: `MeshFrameCodec.kt` (new mac-input
+function), `MeshProtocol.kt` (wire format grows a third optional block), `HopTracker.kt` (unchanged
+this decision — `bestActiveSos` from decision 28 already gave exactly what was needed),
+`BeaconRadio.kt` (content sourcing/caching on send, verification on receive), `Daos.kt`/
+`GroupRepository.kt` (the new query + visibility change). **NOT hardware-confirmed** — same caveat
+as decisions 26-28 in full.
+
+**What P2 still doesn't carry:** full UI surfacing of the broadcast SOS preview (verified but only
+logged, named above); multi-hop position propagation over broadcast; thumbnails and catalogue
+digests. Tier 2/3 hardware gates remain not started for all of P2.
+
