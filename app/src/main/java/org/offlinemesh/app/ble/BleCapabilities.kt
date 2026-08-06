@@ -22,12 +22,13 @@ object BleCapabilities {
     fun extendedAdvertisingSupported(adapter: BluetoothAdapter?): Boolean =
         try { adapter?.isLeExtendedAdvertisingSupported == true } catch (e: Exception) { false }
 
+    // Consulted independently by BeaconRadio's broadcast tier (decision 26, docs/DECISIONS.md) —
+    // extendedAdvertisingSupported alone gates whether Tier B runs at all; this one gates only
+    // whether it ALSO opportunistically requests Coded PHY for extra range on that same channel.
+    // No longer combined into one "both required" check (an earlier, Coded-PHY-only version of
+    // that channel did) — extended advertising alone is enough to get Tier B's actual point (a
+    // connectionless broadcast tier), Coded PHY is now a bonus, not a requirement.
     @Suppress("TooGenericExceptionCaught", "SwallowedException")
     fun codedPhySupported(adapter: BluetoothAdapter?): Boolean =
         try { adapter?.isLeCodedPhySupported == true } catch (e: Exception) { false }
-
-    /** Both capabilities are needed to actually gain anything from the long-range channel — extended
-     *  advertising alone (without Coded PHY) still caps out at ordinary 1M PHY range. */
-    fun longRangeBeaconSupported(adapter: BluetoothAdapter?): Boolean =
-        extendedAdvertisingSupported(adapter) && codedPhySupported(adapter)
 }

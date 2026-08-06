@@ -54,6 +54,54 @@ object MeshProtocol {
         return Beacon(type, rid, sHop)
     }
 
+    /**
+     * Broadcast-tier (Tier B, PLAN-v2.md §5.1) payload — carried over BLE Extended Advertising
+     * (`BeaconRadio`'s broadcast-tier channel), NOT the legacy beacon above, which stays
+     * byte-for-byte unchanged. Extended advertising's budget (~1650B chained, 251B per in-place
+     * update) has none of [encodeBeacon]'s byte pressure — see that function's own doc: the legacy
+     * 31-byte format has exactly 2 spare bytes after Android's Flags structure and this service's
+     * own 128-bit UUID overhead, nowhere near enough room for a second hop field. This format is
+     * free to grow (position, SOS message, further hop-gradient fields) in later slices; for now it
+     * is exactly [encodeBeacon]'s fields plus one: [presenceHop].
+     *
+     * [presenceHop] is the sender's own current best-known distance to presence for this group —
+     * i.e. `HopTracker.myHop(groupId, "PRESENCE")` at encode time, [UNKNOWN_HOP] if the sender
+     * doesn't currently know of anyone else either. This is what lets presence propagate a real
+     * multi-hop gradient over broadcast alone, with no GATT connection: a receiver feeds it straight
+     * into `HopTracker.considerNeighborReport` (which adds its own +1), exactly mirroring how
+     * `RelayResponder` already propagates `Frame.Presence.hop` over GATT relay — same distance-
+     * vector mechanism, now also available on a connectionless channel. Deliberately NOT extended
+     * to SOS the same way yet: unlike presence (one target per group), SOS hop-gradient is per-SOS-
+     * id, and [encodeBeacon]'s existing `sosHop` field is already deliberately NOT fed into hop
+     * tracking for exactly that reason (see [decodeBeacon]'s call sites) — carrying it here would
+     * inherit the same ambiguity rather than solve it, so SOS broadcast is left for a later slice.
+     */
+    fun encodeBroadcastTierBeacon(type: Byte, rotatingGroupId: ByteArray, sosHop: Int, presenceHop: Int): ByteArray {
+        val buf = ByteBuffer.allocate(1 + ROTATING_ID_LEN + 1 + 1)
+        buf.put(type)
+        buf.put(rotatingGroupId.copyOf(ROTATING_ID_LEN))
+        buf.put(sosHop.coerceIn(0, 255).toByte())
+        buf.put(presenceHop.coerceIn(0, 255).toByte())
+        return buf.array()
+    }
+
+    data class BroadcastTierBeacon(
+        val type: Byte,
+        val rotatingGroupId: ByteArray,
+        val sosHop: Int,
+        val presenceHop: Int,
+    )
+
+    fun decodeBroadcastTierBeacon(bytes: ByteArray): BroadcastTierBeacon? {
+        val expected = 1 + ROTATING_ID_LEN + 1 + 1
+        if (bytes.size < expected) return null
+        val type = bytes[0]
+        val rid = bytes.copyOfRange(1, 1 + ROTATING_ID_LEN)
+        val sHop = bytes[1 + ROTATING_ID_LEN].toInt() and 0xFF
+        val pHop = bytes[1 + ROTATING_ID_LEN + 1].toInt() and 0xFF
+        return BroadcastTierBeacon(type, rid, sHop, pHop)
+    }
+
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —
     // deliberately not duplicated here, where they used to drift out of sync.
 

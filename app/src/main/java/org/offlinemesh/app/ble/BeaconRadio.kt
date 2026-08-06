@@ -12,10 +12,12 @@ import android.bluetooth.le.AdvertisingSetParameters
 import android.bluetooth.le.BluetoothLeAdvertiser
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.os.ParcelUuid
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -101,49 +103,60 @@ class BeaconRadio(
     @Volatile private var matchTable: Map<String, String> = emptyMap()   // rotatingId(hex) -> groupId
     @Volatile private var cachedGroups: List<GroupEntity> = emptyList()
 
-    // ---- long-range supplementary channel state — see the section below for what this is ----
+    // ---- broadcast-tier (Tier B) channel state — see the section below for what this is ----
     // @Volatile (unlike currentPayloadKey above): currentPayloadKey is single-writer, touched only
     // from within the one advertiseJob coroutine, so a plain var is safe there. These two are
-    // written from THREE places — the advertiseJob coroutine (evaluateLongRangeAdvertising),
+    // written from THREE places — the advertiseJob coroutine (evaluateBroadcastTierAdvertising),
     // MeshService.onDestroy's caller thread (stop()), and the raw BLE callback thread
-    // (longRangeAdvertisingSetCallback, an OS callback with no guaranteed relationship to the
+    // (broadcastTierAdvertisingSetCallback, an OS callback with no guaranteed relationship to the
     // coroutine dispatcher) — matching why matchTable/cachedGroups above are @Volatile too: any
     // state genuinely crossing threads in this class follows that same convention.
-    @Volatile private var longRangeAdvertisingActive = false
-    @Volatile private var longRangeCurrentPayloadKey: String? = null
-    // Live-tested finding: a device can report isLeCodedPhySupported/isLeExtendedAdvertisingSupported
-    // true (BleCapabilities' own gate above) while still having no free advertising-set SLOT for a
-    // second, non-legacy advertiser — the legacy advertiser already holds the chipset's only one, on
-    // some hardware. Without a circuit breaker, that failure (ADVERTISE_FAILED_TOO_MANY_ADVERTISERS)
-    // retried every single check cycle, forever, for an entire live session, on real hardware — the
-    // exact "repeated failed radio operation churn" category decision 1 (docs/DECISIONS.md) already
-    // identified as capable of destabilizing the whole BLE stack, just from a different source this
-    // time. After LONG_RANGE_FAILURE_LIMIT consecutive failures, this stops retrying for the rest of
-    // the session rather than hammering a slot that's demonstrably never going to free up — a stop()/
+    @Volatile private var broadcastTierAdvertisingActive = false
+    @Volatile private var broadcastTierCurrentPayloadKey: String? = null
+    // Live-tested finding (from this channel's original, narrower Coded-PHY-only incarnation): a
+    // device can report isLeExtendedAdvertisingSupported true (BleCapabilities' own gate above)
+    // while still having no free advertising-set SLOT for a second, non-legacy advertiser — the
+    // legacy advertiser already holds the chipset's only one, on some hardware. Without a circuit
+    // breaker, that failure (ADVERTISE_FAILED_TOO_MANY_ADVERTISERS) retried every single check
+    // cycle, forever, for an entire live session, on real hardware — the exact "repeated failed
+    // radio operation churn" category decision 1 (docs/DECISIONS.md) already identified as capable
+    // of destabilizing the whole BLE stack, just from a different source this time. After
+    // BROADCAST_TIER_FAILURE_LIMIT consecutive failures, this stops retrying for the rest of the
+    // session rather than hammering a slot that's demonstrably never going to free up — a stop()/
     // restart cycle (e.g. the "go offline"/"go active" toggle) resets this, in case conditions changed.
-    @Volatile private var longRangeConsecutiveFailures = 0
-    @Volatile private var longRangeDisabledForSession = false
-    private val longRangeTrickle = TrickleTimer(minIntervalMs = 5_000L, maxIntervalMs = 60_000L)
-    private var longRangeScanner: BluetoothLeScanner? = null
-    private var longRangeScanJob: Job? = null
+    @Volatile private var broadcastTierConsecutiveFailures = 0
+    @Volatile private var broadcastTierDisabledForSession = false
+    private val broadcastTierTrickle = TrickleTimer(minIntervalMs = 5_000L, maxIntervalMs = 60_000L)
+    private var broadcastTierScanner: BluetoothLeScanner? = null
+    private var broadcastTierScanJob: Job? = null
+    // Degree signal for report-delay batching (PLAN-v2.md §9.2 item 1) — distinct addresses heard
+    // on THIS channel (already hardware-filtered to app devices, member or not — see
+    // startBroadcastTierScanning) within BROADCAST_TIER_DEGREE_WINDOW_MS. Deliberately raw local
+    // density, not own-group degree: batching protects the callback thread from total nearby
+    // app-device volume, which is a different question from TrickleTimer's own-group-scoped
+    // redundancy count (decision 25) — the two "degree"s in this file measure different things on
+    // purpose. ConcurrentHashMap: written from the scan-callback binder thread, pruned/read from
+    // the broadcastTierScanJob coroutine.
+    private val broadcastTierRecentAddresses = ConcurrentHashMap<String, Long>()
+    @Volatile private var broadcastTierReportDelayActive = false
 
     /** Safe to call more than once, and safe to follow with a fresh [startAdvertising]/
      *  [startScanning] later (see [MeshService.setMeshActive]'s "go offline"/"go active" cycle) —
-     *  resetting [currentPayloadKey]/[longRangeCurrentPayloadKey]/[longRangeAdvertisingActive] here
-     *  is what makes a restart actually re-assert the radio instead of [ensureAdvertising] /
-     *  [evaluateLongRangeAdvertising] wrongly believing the old payload is still being transmitted
-     *  (it isn't — the radio was just stopped below) and skipping the real re-start for up to a
-     *  full ~60s rotating-id window. */
+     *  resetting [currentPayloadKey]/[broadcastTierCurrentPayloadKey]/[broadcastTierAdvertisingActive]
+     *  here is what makes a restart actually re-assert the radio instead of [ensureAdvertising] /
+     *  [evaluateBroadcastTierAdvertising] wrongly believing the old payload is still being
+     *  transmitted (it isn't — the radio was just stopped below) and skipping the real re-start for
+     *  up to a full ~60s rotating-id window. */
     fun stop() {
         advertiseJob?.cancel()
         scanJob?.cancel()
-        longRangeScanJob?.cancel()
+        broadcastTierScanJob?.cancel()
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: Exception) {}
         try { scanner?.stopScan(scanCallback) } catch (_: Exception) {}
-        try { longRangeScanner?.stopScan(longRangeScanCallback) } catch (_: Exception) {}
+        try { broadcastTierScanner?.stopScan(broadcastTierScanCallback) } catch (_: Exception) {}
         try {
-            if (longRangeAdvertisingActive) {
-                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(longRangeAdvertisingSetCallback)
+            if (broadcastTierAdvertisingActive) {
+                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertisingSet(broadcastTierAdvertisingSetCallback)
             }
         } catch (_: Exception) {}
         try {
@@ -153,10 +166,12 @@ class BeaconRadio(
         } catch (_: Exception) {}
         advertisingSet = null
         currentPayloadKey = null
-        longRangeCurrentPayloadKey = null
-        longRangeAdvertisingActive = false
-        longRangeConsecutiveFailures = 0
-        longRangeDisabledForSession = false
+        broadcastTierCurrentPayloadKey = null
+        broadcastTierAdvertisingActive = false
+        broadcastTierConsecutiveFailures = 0
+        broadcastTierDisabledForSession = false
+        broadcastTierRecentAddresses.clear()
+        broadcastTierReportDelayActive = false
     }
 
     /** 3 HMACs per group, once per slot — not per scan result. Also refreshes the active-group
@@ -207,13 +222,13 @@ class BeaconRadio(
                 refreshCaches()
                 val groups = cachedGroups
                 // Same "we're not hearing anyone at all" signal the scan side escalates on — reset
-                // the long-range channel's backoff too, so it comes back to full strength exactly
-                // when extra range is most likely to actually help, not on its own independent clock.
-                if (isBlind()) longRangeTrickle.reset()
+                // the broadcast tier's backoff too, so it comes back to full strength exactly when
+                // it's most likely to actually help, not on its own independent clock.
+                if (isBlind()) broadcastTierTrickle.reset()
                 // Advances the trickle window on the same check cadence as everything else in this
-                // loop; the return value is unused here — evaluateLongRangeAdvertising below reads
-                // the resulting isSuppressed() state, not this call's edge-triggered pulse.
-                longRangeTrickle.shouldTransmit()
+                // loop; the return value is unused here — evaluateBroadcastTierAdvertising below
+                // reads the resulting isSuppressed() state, not this call's edge-triggered pulse.
+                broadcastTierTrickle.shouldTransmit()
                 if (groups.isEmpty()) {
                     val genericRid = ByteArray(MeshProtocol.ROTATING_ID_LEN)
                     ensureAdvertising(
@@ -232,7 +247,7 @@ class BeaconRadio(
                         val sHop = bestSosHopFor(g.id)
                         val payloadKey = "${g.id}:${rid.toHex()}:$sHop"
                         ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
-                        evaluateLongRangeAdvertising(MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
+                        evaluateBroadcastTierAdvertising(MeshProtocol.ADV_TYPE_GROUP, g.id, rid, sHop)
                     }
                 }
                 // How often to re-check whether the payload needs to change (new rotating-id window,
@@ -381,100 +396,107 @@ class BeaconRadio(
         override fun onStartFailure(errorCode: Int) { Log.w(TAG, "advertise start failure: $errorCode") }
     }
 
-    // ---------------- long-range supplementary channel (BT5 Coded PHY) ----------------
-    // Additive only: reuses the exact same 8-byte beacon wire format (MeshProtocol.encodeBeacon/
-    // decodeBeacon) and the exact same discovery outcomes (hopTracker presence) as the legacy path
-    // above — nothing about it changes what a legacy-only peer sees, and nothing about it touches
-    // [currentPayloadKey]/[advertiser]/[scanner]/[matchTable] or any other legacy state. It exists
-    // purely to extend range and coverage in a crowd, on hardware that supports it:
-    //  - Coded PHY (LE Long Range, S=8) trades bitrate for forward-error-correction coding gain —
-    //    roughly 2-4x usable range at the same TX power (Bluetooth SIG figures), so fewer relay
-    //    hops are needed to cover the same physical area, and fewer GATT connection-slot attempts
-    //    get spent trying to bridge gaps a longer-range beacon would have closed directly.
-    //  - Extended advertising is what makes a non-legacy, Coded-PHY-carried advertising set
-    //    possible on this radio at all — the payload itself is unchanged (still MeshProtocol's
-    //    8-byte format), this isn't used to carry more data, only to reach further.
+    // ---------------- broadcast tier (Tier B) — PLAN-v2.md §5.1, Part 7 P2 ----------------
+    // Additive only: doesn't touch [currentPayloadKey]/[advertiser]/[scanner]/[matchTable] or any
+    // other legacy state — nothing about it changes what a legacy-only peer sees. Generalized
+    // 2026-08-06 (decision 26, docs/DECISIONS.md) from what was originally a Coded-PHY-only "long
+    // range supplementary channel": that channel already had every piece Tier B needs (extended
+    // advertising, in-place payload update, non-connectable, Trickle-governed) — resolving
+    // PLAN-v2.md Part 8's open item on Coded PHY by RE-SCOPING it behind Tier B rather than
+    // deleting it, exactly as that section names as one of the two options.
+    //  - Gated on [BleCapabilities.extendedAdvertisingSupported] alone now, not the old, narrower
+    //    [BleCapabilities.longRangeBeaconSupported] — this channel's actual purpose (a connectionless
+    //    tier with no slot contention, PLAN-v2.md §5.1) needs extended advertising, not specifically
+    //    Coded PHY. Coded PHY is now an opportunistic, additive upgrade: used for range ONLY when
+    //    the adapter also reports [BleCapabilities.codedPhySupported], so hardware with extended-
+    //    advertising-but-not-Coded-PHY support (broader than the old gate) still gets Tier B.
+    //  - Carries [MeshProtocol.encodeBroadcastTierBeacon] — the legacy 8-byte beacon's fields plus
+    //    an explicit presence hop-gradient (see that function's own doc) — not the bare legacy
+    //    format, since extended advertising has none of the legacy 31-byte format's byte pressure.
     //  - Deliberately non-connectable (setConnectable(false)): GATT data transfer still rides only
-    //    the legacy connectable beacon, same as before this channel existed — this is a pure
-    //    coverage/presence extension, not a second data path.
-    //  - [longRangeTrickle] suppresses transmitting when enough neighbors are already covering a
-    //    group on this channel — see [TrickleTimer]'s doc for why this, not a fixed schedule, is
-    //    the actual crowd-scaling lever: redundant long-range traffic then scales with local
-    //    density, not with a per-device timer that gets worse as the crowd gets bigger.
+    //    the legacy connectable beacon, same as before this channel existed.
+    //  - [broadcastTierTrickle] suppresses transmitting when enough own-group neighbors are already
+    //    covering this group on this channel (own-group-scoped sightings — decisions 24/25) — see
+    //    [TrickleTimer]'s doc for why this, not a fixed schedule, is the actual crowd-scaling lever.
     //
-    // Gated behind [BleCapabilities.longRangeBeaconSupported] — unsupported hardware (or any
-    // exception probing the adapter) is always a silent no-op, never a crash, never a fallback
-    // that touches the legacy advertiser.
+    // Unsupported hardware (or any exception probing the adapter) is always a silent no-op, never a
+    // crash, never a fallback that touches the legacy advertiser.
     //
-    // NOT device-tested. Passes 1-21 of this file earned the "touch the radio only when something
-    // changed" principle through repeated live 2-phone testing on real hardware; BT5 Coded PHY
-    // hardware wasn't available to repeat that process here. Treat this exactly like this project's
-    // unverified iOS code: carefully reviewed by hand against the documented AdvertisingSet/
-    // ScanSettings API surface, but unverified on real hardware. Needs its own live-device pass —
-    // ideally two BT5 phones with confirmed Coded PHY support — before being trusted the way the
-    // legacy path now is.
+    // NOT device-tested — same caveat this channel's Coded-PHY-only predecessor carried, now
+    // broadened: the ScanFilter/report-delay-batching pieces below are ALSO new and untested on
+    // hardware this session. Treat this exactly like this project's unverified iOS code: carefully
+    // reviewed by hand against the documented AdvertisingSet/ScanSettings/ScanFilter API surface,
+    // but unverified on real hardware. Needs its own live-device pass before being trusted the way
+    // the legacy path now is.
     @SuppressLint("MissingPermission")
-    private fun evaluateLongRangeAdvertising(type: Byte, rid: ByteArray, sHop: Int, payloadKey: String) {
-        if (longRangeDisabledForSession) return
+    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, rid: ByteArray, sHop: Int) {
+        if (broadcastTierDisabledForSession) return
         val adapter = bluetoothManager.adapter ?: return
-        if (!BleCapabilities.longRangeBeaconSupported(adapter)) return
+        if (!BleCapabilities.extendedAdvertisingSupported(adapter)) return
         val adv = adapter.bluetoothLeAdvertiser ?: return
-        if (longRangeTrickle.isSuppressed()) {
-            if (longRangeAdvertisingActive) {
-                try { adv.stopAdvertisingSet(longRangeAdvertisingSetCallback) } catch (e: Exception) {
-                    Log.w(TAG, "long-range advertise stop failed: ${e.message}")
+        val presenceHop = hopTracker.myHop(groupId, "PRESENCE")
+        val payloadKey = "$groupId:${rid.toHex()}:$sHop:$presenceHop"
+        if (broadcastTierTrickle.isSuppressed()) {
+            if (broadcastTierAdvertisingActive) {
+                try { adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback) } catch (e: Exception) {
+                    Log.w(TAG, "broadcast-tier advertise stop failed: ${e.message}")
                 }
-                longRangeAdvertisingActive = false
-                longRangeCurrentPayloadKey = null
+                broadcastTierAdvertisingActive = false
+                broadcastTierCurrentPayloadKey = null
             }
             return
         }
-        if (payloadKey == longRangeCurrentPayloadKey && longRangeAdvertisingActive) return
-        val payload = MeshProtocol.encodeBeacon(type, rid, sHop)
+        if (payloadKey == broadcastTierCurrentPayloadKey && broadcastTierAdvertisingActive) return
+        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, sHop, presenceHop)
         val params = AdvertisingSetParameters.Builder()
             .setLegacyMode(false)
             .setConnectable(false)
-            .setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
-            .setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+            .apply {
+                // Opportunistic range upgrade, not a requirement — see this section's own doc.
+                if (BleCapabilities.codedPhySupported(adapter)) {
+                    setPrimaryPhy(BluetoothDevice.PHY_LE_CODED)
+                    setSecondaryPhy(BluetoothDevice.PHY_LE_CODED)
+                }
+            }
             .setInterval(AdvertisingSetParameters.INTERVAL_HIGH) // lower baseline power; Trickle already governs on/off
-            .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH) // range is the point of this channel
+            .setTxPowerLevel(AdvertisingSetParameters.TX_POWER_HIGH) // reaching every neighbour at once is the point
             .build()
         val data = AdvertiseData.Builder()
             .addServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID), payload)
             .setIncludeDeviceName(false)
             .build()
         try {
-            if (longRangeAdvertisingActive) adv.stopAdvertisingSet(longRangeAdvertisingSetCallback)
-            adv.startAdvertisingSet(params, data, null, null, null, longRangeAdvertisingSetCallback)
-            longRangeAdvertisingActive = true
-            longRangeCurrentPayloadKey = payloadKey
+            if (broadcastTierAdvertisingActive) adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback)
+            adv.startAdvertisingSet(params, data, null, null, null, broadcastTierAdvertisingSetCallback)
+            broadcastTierAdvertisingActive = true
+            broadcastTierCurrentPayloadKey = payloadKey
         } catch (e: Exception) {
-            Log.w(TAG, "long-range advertise start failed: ${e.message}")
-            longRangeAdvertisingActive = false
+            Log.w(TAG, "broadcast-tier advertise start failed: ${e.message}")
+            broadcastTierAdvertisingActive = false
         }
     }
 
-    private val longRangeAdvertisingSetCallback = object : AdvertisingSetCallback() {
+    private val broadcastTierAdvertisingSetCallback = object : AdvertisingSetCallback() {
         override fun onAdvertisingSetStarted(advertisingSet: AdvertisingSet?, txPower: Int, status: Int) {
             if (status != ADVERTISE_SUCCESS) {
-                longRangeAdvertisingActive = false
-                longRangeConsecutiveFailures++
-                if (longRangeConsecutiveFailures >= LONG_RANGE_FAILURE_LIMIT) {
-                    longRangeDisabledForSession = true
+                broadcastTierAdvertisingActive = false
+                broadcastTierConsecutiveFailures++
+                if (broadcastTierConsecutiveFailures >= BROADCAST_TIER_FAILURE_LIMIT) {
+                    broadcastTierDisabledForSession = true
                     Log.w(
                         TAG,
-                        "long-range advertising set failed $longRangeConsecutiveFailures times in a row " +
-                            "(status=$status) — giving up for this session rather than retrying forever"
+                        "broadcast-tier advertising set failed $broadcastTierConsecutiveFailures times in a " +
+                            "row (status=$status) — giving up for this session rather than retrying forever"
                     )
                 } else {
-                    Log.w(TAG, "long-range advertising set failed to start: status=$status")
+                    Log.w(TAG, "broadcast-tier advertising set failed to start: status=$status")
                 }
             } else {
-                longRangeConsecutiveFailures = 0
+                broadcastTierConsecutiveFailures = 0
             }
         }
         override fun onAdvertisingSetStopped(advertisingSet: AdvertisingSet?) {
-            longRangeAdvertisingActive = false
+            broadcastTierAdvertisingActive = false
         }
     }
 
@@ -520,35 +542,74 @@ class BeaconRadio(
                 delay(3000)
             }
         }
-        startLongRangeScanning()
+        startBroadcastTierScanning()
     }
 
-    /** A single, separate, always-LOW_POWER scan for the long-range channel above — kept entirely
-     *  apart from [restartScan]/[scanCallback] so the legacy scan path stays byte-for-byte
-     *  untouched regardless of whether this one works on a given chipset. LOW_POWER rather than
-     *  tier-driven: this channel is a coverage extender, not a latency-sensitive one — the
-     *  ordinary legacy scan above already carries the responsiveness requirement. A single
-     *  `startScan()` call left running, matching this file's established "leave it running, don't
-     *  touch it on a timer" principle — see the class doc. Silently does nothing if the adapter,
-     *  scanner, or hardware capability isn't there; never affects the legacy scan either way. */
+    /** A single, separate, always-LOW_POWER scan for the broadcast tier above — kept entirely apart
+     *  from [restartScan]/[scanCallback] so the legacy scan path stays byte-for-byte untouched
+     *  regardless of whether this one works on a given chipset. LOW_POWER rather than tier-driven:
+     *  this channel is a coverage extender, not a latency-sensitive one — the ordinary legacy scan
+     *  above already carries the responsiveness requirement. Uses [ScanSettings.PHY_LE_ALL_SUPPORTED],
+     *  not a specific PHY — the advertising side now opportunistically uses Coded PHY only when both
+     *  ends support it (see [evaluateBroadcastTierAdvertising]), so the scanner must not restrict
+     *  itself to just that PHY or it would miss every 1M-PHY-only broadcaster. Restores a hardware
+     *  [ScanFilter] on [MeshProtocol.SERVICE_UUID] (PLAN-v2.md §9.2 item 1) — deliberately a
+     *  **service-UUID** filter, not the service-DATA-with-mask filter decision 3 found unreliable
+     *  across chipsets; these are different filter types in the BLE stack (a service-UUID filter
+     *  matches the AD structure's UUID list, evaluated in controller firmware before the data
+     *  payload is even parsed), and conflating them is why legacy scanning ended up with no hardware
+     *  filtering at all. Safe to add here specifically because this is a brand new scan session with
+     *  no live-tested history to regress — the legacy scan in [restartScan] is deliberately left
+     *  unfiltered, unchanged, matching every other "additive only" caveat in this section.
+     *
+     *  Launches [broadcastTierScanJob], a periodic loop that does two things on the SAME low-risk,
+     *  infrequent cadence: prunes [broadcastTierRecentAddresses] and toggles degree-gated report-
+     *  delay batching (PLAN-v2.md §9.2 item 1's other half — [broadcastTierReportDelayMs]) by
+     *  restarting the scan only when the batching decision actually flips, never on a fixed timer.
+     *  Silently does nothing if the adapter, scanner, or hardware capability isn't there; never
+     *  affects the legacy scan either way. */
     @SuppressLint("MissingPermission")
-    private fun startLongRangeScanning() {
+    private fun startBroadcastTierScanning() {
         val adapter = bluetoothManager.adapter ?: return
-        if (!BleCapabilities.longRangeBeaconSupported(adapter)) {
-            Log.i(TAG, "Coded PHY not supported — long-range channel off, legacy discovery unaffected")
+        if (!BleCapabilities.extendedAdvertisingSupported(adapter)) {
+            Log.i(TAG, "Extended advertising not supported — broadcast tier off, legacy discovery unaffected")
             return
         }
         val s = adapter.bluetoothLeScanner ?: return
-        longRangeScanner = s
+        broadcastTierScanner = s
+        restartBroadcastTierScan(reportDelayMs = 0L)
+        broadcastTierScanJob = serviceScope.launch {
+            while (isActive) {
+                delay(BROADCAST_TIER_DEGREE_CHECK_INTERVAL_MS)
+                val nowMs = System.currentTimeMillis()
+                broadcastTierRecentAddresses.entries.removeAll {
+                    nowMs - it.value > BROADCAST_TIER_DEGREE_WINDOW_MS
+                }
+                val wantDelay = broadcastTierReportDelayMs(broadcastTierRecentAddresses.size)
+                val wantBatching = wantDelay > 0L
+                if (wantBatching != broadcastTierReportDelayActive) {
+                    restartBroadcastTierScan(wantDelay)
+                    broadcastTierReportDelayActive = wantBatching
+                }
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun restartBroadcastTierScan(reportDelayMs: Long) {
+        val s = broadcastTierScanner ?: return
+        try { s.stopScan(broadcastTierScanCallback) } catch (_: Exception) {}
         try {
             val settings = ScanSettings.Builder()
                 .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
                 .setLegacy(false)
-                .setPhy(BluetoothDevice.PHY_LE_CODED)
+                .setPhy(ScanSettings.PHY_LE_ALL_SUPPORTED)
+                .setReportDelay(reportDelayMs)
                 .build()
-            s.startScan(emptyList(), settings, longRangeScanCallback)
+            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(MeshProtocol.SERVICE_UUID)).build()
+            s.startScan(listOf(filter), settings, broadcastTierScanCallback)
         } catch (e: Exception) {
-            Log.w(TAG, "long-range scan start failed: ${e.message}")
+            Log.w(TAG, "broadcast-tier scan (re)start failed: ${e.message}")
         }
     }
 
@@ -599,34 +660,70 @@ class BeaconRadio(
         }
     }
 
-    /** Presence-only counterpart to [scanCallback] for the long-range channel — deliberately does
-     *  NOT call [onDeviceSeen]/maybeConnect, since long-range beacons are advertised non-connectable
-     *  (see [evaluateLongRangeAdvertising]); attempting to connect to one would only churn a
-     *  connection-attempt slot on a guaranteed failure. Feeds [longRangeTrickle] so a device that
-     *  keeps hearing others covering a group on this channel backs off transmitting its own. */
+    /** Presence-only counterpart to [scanCallback] for the broadcast tier — deliberately does NOT
+     *  call [onDeviceSeen]/maybeConnect, since Tier B beacons are advertised non-connectable (see
+     *  [evaluateBroadcastTierAdvertising]); attempting to connect to one would only churn a
+     *  connection-attempt slot on a guaranteed failure. [onBatchScanResults] handles the batched
+     *  delivery path Android uses once [restartBroadcastTierScan] sets a nonzero report delay —
+     *  without this override, degree-gated batching would silently stop delivering anything the
+     *  moment it engaged, since [onScanResult] alone isn't called while batching is active. Both
+     *  paths funnel through [handleResult] so decode/hop-tracking/Trickle/degree logic lives once. */
     @SuppressLint("MissingPermission")
-    private val longRangeScanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
-            val beacon = MeshProtocol.decodeBeacon(serviceData) ?: return
-            if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
-            val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
-            hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
-            // Scoped to within ONE Trickle window only (tens of seconds) - see TrickleTimer.onSighting's
-            // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
-            // lived peer state off it (decision 25, docs/DECISIONS.md).
-            longRangeTrickle.onSighting(result.device.address)
-        }
+    private val broadcastTierScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) = handleResult(result)
+        override fun onBatchScanResults(results: MutableList<ScanResult>) { results.forEach(::handleResult) }
         override fun onScanFailed(errorCode: Int) {
-            Log.w(TAG, "long-range scan failed: errorCode=$errorCode")
+            Log.w(TAG, "broadcast-tier scan failed: errorCode=$errorCode")
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleResult(result: ScanResult) {
+        val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
+        val beacon = MeshProtocol.decodeBroadcastTierBeacon(serviceData) ?: return
+        // Any valid Tier B beacon counts toward the degree signal — member or not, see
+        // broadcastTierRecentAddresses' own doc for why this is deliberately raw local density.
+        broadcastTierRecentAddresses[result.device.address] = System.currentTimeMillis()
+        if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
+        val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
+        // Direct hearing: the broadcaster is by definition 1 hop away — same shape as scanCallback.
+        hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
+        // Propagated multi-hop gradient: the broadcaster's OWN best-known presence distance, +1 —
+        // see MeshProtocol.encodeBroadcastTierBeacon's doc for why this is safe/correct for
+        // presence specifically (one target per group) where it wouldn't be for sosHop (many).
+        hopTracker.considerNeighborReport(groupId, "PRESENCE", beacon.presenceHop, result.device.address)
+        // Scoped to within ONE Trickle window only (tens of seconds) - see TrickleTimer.onSighting's
+        // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
+        // lived peer state off it (decision 25, docs/DECISIONS.md).
+        broadcastTierTrickle.onSighting(result.device.address)
     }
 
     companion object {
         private const val TAG = "BeaconRadio"
 
-        // See longRangeConsecutiveFailures/longRangeDisabledForSession's doc above.
-        private const val LONG_RANGE_FAILURE_LIMIT = 3
+        // See broadcastTierConsecutiveFailures/broadcastTierDisabledForSession's doc above.
+        private const val BROADCAST_TIER_FAILURE_LIMIT = 3
+
+        // Degree-gated report-delay batching (PLAN-v2.md §9.2 item 1) — see
+        // broadcastTierRecentAddresses' own doc for what "degree" means here. Floor of 5 matches
+        // every other §5.4 low/high-degree split in this codebase (ForwardingPolicy, LinkSelector):
+        // D <= 4 is the 3-phone case, adaptations are the identity function; D >= 5 is where they
+        // engage. 1500ms sits inside the plan's stated "1-2s" range for this specific lever.
+        internal const val BROADCAST_TIER_DEGREE_BATCHING_FLOOR = 5
+        private const val BROADCAST_TIER_REPORT_DELAY_MS = 1_500L
+        private const val BROADCAST_TIER_DEGREE_WINDOW_MS = 30_000L
+        private const val BROADCAST_TIER_DEGREE_CHECK_INTERVAL_MS = 5_000L
+
+        /** `internal`, pure — same testability shape as [roundRobinDwellMs]. Returns the
+         *  [ScanSettings.setReportDelay] value to use for the current measured [degree] of distinct
+         *  Tier B broadcasters heard recently: 0 (no batching, immediate delivery) at or below the
+         *  floor so 3-phone discovery stays exactly as responsive as an unbatched scan, batched
+         *  above it. Symmetric in both directions — a scan already batched drops back to 0 the next
+         *  time degree is measured at or below the floor, matching §5.4's "every adaptation's
+         *  low-degree case is the identity function" rule and its own fail-open framing (decisions
+         *  23-25): nothing here can get stuck batched once the crowd that justified it thins out. */
+        internal fun broadcastTierReportDelayMs(degree: Int): Long =
+            if (degree >= BROADCAST_TIER_DEGREE_BATCHING_FLOOR) BROADCAST_TIER_REPORT_DELAY_MS else 0L
 
         /** How long one group holds the shared advertiser before round-robin moves to the next.
          *  Deliberately NOT the ~60s a single group's rotating id stays stable for (decision 1's

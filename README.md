@@ -302,9 +302,13 @@ where it matters:
   only to wrap local key storage (see Security model above), not for any cryptographic operation
   itself. This reflects the state of that library upstream (no stable release exists), not a
   chosen risk.
-- **BT5 Coded PHY long-range beacon channel is new, compile-verified only, not device-tested.**
-  (`BleCapabilities.kt`/`TrickleTimer.kt`, extends beacon range on hardware that supports it) is
-  capability-gated and purely additive — on unsupported hardware, or if anything about it
+- **Broadcast tier (Tier B) is new, compile-verified only, not device-tested.**
+  (`BeaconRadio.kt`/`BleCapabilities.kt`/`TrickleTimer.kt`, PLAN-v2.md §5.1/decision 26) — a
+  connectionless, Trickle-governed extended-advertising channel carrying group presence and a
+  multi-hop presence-distance gradient, with a hardware `ScanFilter` and degree-gated scan-report
+  batching. Generalized from what was originally a Coded-PHY-only long-range beacon channel; Coded
+  PHY is now used opportunistically for extra range on hardware that supports it, not required.
+  Capability-gated and purely additive — on unsupported hardware, or if anything about it
   misbehaves, it's a silent no-op that can't affect the proven legacy discovery path.
 - **Delivery is now a forwarding protocol, not just a sync protocol — hardware-confirmed across
   four live rounds (2026-08-05), one real gap still open.** SOS floods immediately across every
@@ -339,7 +343,7 @@ where it matters:
   that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
-- **Automated test coverage is logic-only.** 310 pure-JVM/Robolectric unit tests cover crypto,
+- **Automated test coverage is logic-only.** 319 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
   of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
   relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI

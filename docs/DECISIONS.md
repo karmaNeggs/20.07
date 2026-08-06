@@ -1140,3 +1140,89 @@ yet been, and cannot yet be, hardware-confirmed on this project's own test devic
 compile/test-verified only. Recorded here rather than silently folded into decision 24 because it
 changes shipped production code, which decisions 23 and 24 explicitly did not.
 
+## 26. P2 production wiring, first slice: the broadcast tier is the long-range channel, generalized
+
+2026-08-06, same day as decisions 23-25, after the user's explicit go-ahead to start building P2
+production wiring (corrected sequencing: the field session comes after P2 is built, not before —
+see `PLAN-v2.md`'s RESUME HERE block). First production slice, deliberately scoped narrow, same
+discipline as P1's own "SOS only first" first slice.
+
+**Central design finding: the "long-range supplementary channel" (BT5 Coded PHY, `BeaconRadio.kt`)
+already WAS a prototype of Tier B.** It already had extended advertising, in-place payload update,
+non-connectable mode, and Trickle-governed suppression — everything §5.1's Tier B needs except two
+things: it required Coded PHY specifically (narrower hardware support than Tier B needs) and it
+carried only the bare legacy 8-byte beacon (no room to be more than a coverage extender). Rather
+than build a second, parallel connectionless channel — which would have meant two advertising sets
+competing for the same scarce per-chipset slot, exactly the resource contention `BleCapabilities`'
+class doc already warns about — this slice **generalizes the existing channel into Tier B**, which
+also resolves `PLAN-v2.md` Part 8's explicit open item on this channel ("delete or re-scope... where
+it actually belongs") by choosing re-scope.
+
+**What changed, concretely:**
+
+- **Capability gate loosened.** `BleCapabilities.longRangeBeaconSupported` (required BOTH extended
+  advertising AND Coded PHY) is retired. The channel now gates on `extendedAdvertisingSupported`
+  alone — Tier B's actual value (a connectionless tier with no slot contention) doesn't need range
+  extension, only extended advertising. Coded PHY becomes an opportunistic, additive upgrade,
+  requested only when `codedPhySupported` is ALSO true (`evaluateBroadcastTierAdvertising`), so
+  hardware with the former but not the latter (a broader set of devices) now gets Tier B at all,
+  where before it got nothing.
+- **New payload**, `MeshProtocol.encodeBroadcastTierBeacon`/`decodeBroadcastTierBeacon`: the legacy
+  beacon's fields (type, rotating group id, sosHop) plus one new field, `presenceHop` — the sender's
+  own `HopTracker.myHop(groupId, "PRESENCE")` at encode time. A receiver feeds it straight into
+  `considerNeighborReport`, exactly mirroring how `RelayResponder` already propagates
+  `Frame.Presence.hop` over GATT relay — the same distance-vector mechanism, now also running on a
+  connectionless channel. This is the change that actually delivers §9.2 item 7's claim ("the
+  broadcast tier is the only mechanism that makes the radar function at target scale"): presence can
+  now propagate a real multi-hop gradient without ANY GATT connection ever opening. Deliberately
+  NOT extended to carry position or an authenticated SOS message yet — position needs encryption/
+  nonce-budget engineering and SOS hop-gradient is per-SOS-id (ambiguous the same way the legacy
+  beacon's own `sosHop` already is, documented at that field's decode call sites) — both left for a
+  later slice, named explicitly rather than silently dropped, same pattern as P1 deferring evidence-
+  header/nickname forwarding.
+- **Hardware `ScanFilter` restored — on the broadcast tier's own new scan only.** Decision 3
+  (`docs/DECISIONS.md`) found *service-DATA-with-mask* filtering unreliable across chipsets years
+  ago; `PLAN-v2.md` §9.2 item 1 is explicit that *service-UUID* filtering is a different mechanism
+  (matched in controller firmware against the AD structure's UUID list, not a masked byte compare)
+  and conflating the two is why legacy scanning ended up with no hardware filter at all. Added here,
+  not to the legacy scan (`restartScan`), because this is a brand-new scan session with no live-
+  tested history to regress — the legacy path stays byte-for-byte unfiltered and untouched, matching
+  every other "additive only" caveat already established for this channel.
+- **Degree-gated report-delay batching** (`PLAN-v2.md` §9.2 item 1's other half): a new periodic
+  loop counts distinct addresses heard on this channel (any valid Tier B beacon, member or not —
+  deliberately raw local density, a different "degree" than Trickle's own-group-scoped one) over a
+  rolling 30s window, and only restarts the scan with `ScanSettings.setReportDelay()` set when the
+  batching decision actually flips across `BROADCAST_TIER_DEGREE_BATCHING_FLOOR` (5, matching every
+  other §5.4 low/high-degree split already used elsewhere in this codebase — `ForwardingPolicy`,
+  `LinkSelector`). Symmetric: drops back to immediate delivery the moment measured degree falls back
+  at or below the floor, matching §5.4's "every adaptation's low-degree case is the identity
+  function" rule. Required overriding `ScanCallback.onBatchScanResults` too, not just `onScanResult`
+  — Android delivers batched results on a different callback entirely once a report delay is set;
+  missing this would have made batching silently stop delivering anything the moment it engaged.
+  Scanner-side PHY also had to change from a hardcoded `PHY_LE_CODED` to `PHY_LE_ALL_SUPPORTED` as
+  part of the same edit — with advertising now opportunistically 1M-PHY-only on hardware without
+  Coded PHY, a scanner still hardcoded to Coded-PHY-only would have silently gone deaf to exactly
+  the broader hardware set this slice's capability-gate change was meant to include.
+- **`BleCapabilities.longRangeBeaconSupported` deleted** (not deprecated) — no remaining callers
+  after the above; both `extendedAdvertisingSupported` and `codedPhySupported` are now consulted
+  independently at their own call sites instead of being pre-combined into one check.
+
+**Not done this slice, named explicitly rather than silently deferred:** position and SOS-message
+broadcast; the full presence/position/SOS/hop-gradient payload model `PLAN-v2.md`'s P2 entry
+describes is therefore still only partially built (presence hop-gradient done; the rest queued).
+Legacy 31-byte beacon: completely untouched, by design — it had exactly 2 spare bytes of headroom
+(see `MeshProtocol.encodeBeacon`'s own doc) and every other additive channel in this file already
+established the pattern of leaving it alone rather than spending that headroom.
+
+319 tests (up from 310, +9: 6 new in `MeshProtocolBroadcastTierTest.kt` covering the new codec
+round-trip/coercion/malformed-input handling, 3 new in a new `BeaconRadioBroadcastTierBatchingTest`
+covering the degree-gated report-delay pure function), detekt clean, both variants compile, `test`,
+`assembleDebug`, and `assembleRelease` (incl. `lintVitalRelease`) all green. **Production code
+touched**: `BeaconRadio.kt` (the generalization itself), `MeshProtocol.kt` (new codec),
+`BleCapabilities.kt` (retired the narrower gate). **NOT hardware-confirmed** — same caveat this
+channel's Coded-PHY-only predecessor already carried (never had hardware to test Coded PHY on),
+now broader: the ScanFilter and report-delay-batching pieces are ALSO new and untested on real
+hardware this session. Needs a live-device pass before being trusted the way the legacy beacon path
+is. Sim-side P2 work (decisions 23-25) is unaffected — that Tier-1 harness models `TrickleTimer`
+directly and doesn't touch `BeaconRadio`.
+

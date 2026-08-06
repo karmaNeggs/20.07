@@ -11,27 +11,33 @@ section is what's stale.
 - **Hardware-confirmed across four live 3-phone test rounds** (2026-08-05): message-delay fix,
   radar-staleness fix, duplicate-connection-callback fix, Bluetooth off→on recovery fix. Full detail
   in `docs/DECISIONS.md` decisions 18-22.
-- **P2 (broadcast tier): Tier-1 SIM work only, NOT production wiring — but both of its open
-  questions are now resolved.** Decision 23's 3-way question resolved as option (c), 2026-08-06:
-  sightings are scoped to own-group broadcasts only — already true in production `BeaconRadio`.
-  Reworking the sim to match dissolved decision 23's "D=2 boundary bug" (a labelling artefact of
-  swarm-density semantics, not a real bug), but surfaced a new one (decision 24): the sim could pin
-  suppression at own-group degree as low as 1. Digging into THAT (same session, decision 25) found
-  it wasn't a sim artefact at all — `TrickleTimer.onSighting()` counted raw calls instead of
-  distinct sources, which is a real mismatch against `BeaconRadio`'s continuously-broadcasting
-  advertising-set sender model (confirmed: `INTERVAL_HIGH` = 1000 ms, no scan report-delay
-  batching, so one present neighbour genuinely generates dozens of calls per window). **Fixed in
-  production code**: `onSighting(sourceId)` now dedupes within a window. 310 tests, detekt clean,
-  both variants green — compile/test-verified, NOT hardware-confirmed (the long-range channel this
-  touches is currently circuit-broken on the only test hardware so far, so it can't be right now).
+- **P2 (broadcast tier): both Tier-1 sim open questions resolved (decisions 23-25), AND production
+  wiring has now started (decision 26, same day)** — first slice, deliberately narrow, same
+  discipline as P1's own "SOS only first" slice. Sim summary: decision 23's 3-way question resolved
+  as option (c) (sightings own-group-scoped, already true in production `BeaconRadio`); that
+  dissolved decision 23's "D=2 boundary bug" but surfaced decision 24's finding (suppression could
+  pin at degree 1); decision 25 found and fixed the real root cause **in production**,
+  `TrickleTimer.onSighting(sourceId)` now dedupes within a window. Production summary (decision 26):
+  the old Coded-PHY-only "long-range channel" already had every piece Tier B needs, so it was
+  **generalized in place** rather than duplicated — gate loosened to `extendedAdvertisingSupported`
+  alone (Coded PHY now opportunistic, not required), new payload adds an explicit `presenceHop`
+  field so presence can propagate a real multi-hop gradient with zero GATT connections, a hardware
+  `ScanFilter` on the service UUID restored (on this new scan only — legacy scan deliberately
+  untouched), degree-gated `setReportDelay()` batching added. Resolves `PLAN-v2.md` Part 8's open
+  item on the Coded PHY channel (re-scope, not delete). Position and SOS-message broadcast
+  deliberately deferred to a later slice, named explicitly. 319 tests, detekt clean, both variants
+  compile/test/assemble (incl. `lintVitalRelease`) green — **NOT hardware-confirmed**, same as this
+  channel's Coded-PHY-only predecessor always was, now broader (ScanFilter/batching are also new and
+  untested on real hardware).
 - **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
-  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale by two commits**
-  (`05e70e8` decisions 23-24, `5042374` decision 25) — no new version was cut for either, source/docs
-  only. If a P2 payload-model phase actually ships, that's when a version bump + APK/Pages refresh
-  is next due, not before.
-- **Committed and pushed, on `main`**: everything through decision 25 (`5042374`). Working tree
-  clean as of this checkpoint. If you find uncommitted changes when resuming, they're from a session
-  after this one.
+  to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale** — decisions
+  23-26's work (source/docs + a real production feature) has not had a version bump or APK/Pages
+  refresh yet. Due once this P2 slice (or the next one) is ready to hand off for its own hardware
+  smoke-test round, not before.
+- **Committed and pushed, on `main`**: everything through decision 25 (`5042374`) is pushed; decision
+  26's changes (this session) are committed locally but not yet pushed as of this checkpoint — check
+  `git log origin/main..HEAD` when resuming. If you find OTHER uncommitted changes, they're from a
+  session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
@@ -662,27 +668,49 @@ acceptance criterion, not a later refinement** — Trickle without it turns "the
 group-mates drift out of range" into "went silent." (Corrected per decision 24, 2026-08-06: sightings
 are own-group-scoped, so it is specifically *your group* thinning out that risks silence, not swarm
 density falling — walking out of a crowd of strangers, by itself, moves nothing here.)
-**STATUS (2026-08-06): Tier 1 sim started, narrow first pass (I5/fail-open only) — see
-`docs/DECISIONS.md` decisions 23-25.** Decision 23's three-way open question is resolved as option
-(c) — own-group-only sighting scope, already true in production `BeaconRadio`, no production code
-changed there. Reworking the sim to match dissolved decision 23's "S3 D=2 never fails open" finding:
-under corrected own-group-degree semantics, D=2 means two real group-mates still in range, an
-ordinary covered state, not isolation — staying suppressed there is correct, not a bug. That surfaced
-a follow-on finding (decision 24): the sim could pin suppression at own-group degree as low as 1.
-Digging into it (decision 25) found the real cause and fixed it **in production code**:
+**STATUS (2026-08-06): Tier 1 sim done for now (I5/fail-open pass), PRODUCTION WIRING STARTED —
+see `docs/DECISIONS.md` decisions 23-26.** Decision 23's three-way open question is resolved as
+option (c) — own-group-only sighting scope, already true in production `BeaconRadio`, no production
+code changed there. Reworking the sim to match dissolved decision 23's "S3 D=2 never fails open"
+finding: under corrected own-group-degree semantics, D=2 means two real group-mates still in range,
+an ordinary covered state, not isolation — staying suppressed there is correct, not a bug. That
+surfaced a follow-on finding (decision 24): the sim could pin suppression at own-group degree as low
+as 1. Digging into it (decision 25) found the real cause and fixed it **in production code**:
 `TrickleTimer.onSighting()` was counting raw calls instead of distinct sources, which is a genuine
 mismatch against `BeaconRadio`'s continuously-broadcasting advertising-set sender model (confirmed
 via its actual `AdvertisingSetParameters`/`ScanSettings` config, not assumed) — a single present
 neighbour could generate dozens of "sightings" per window and pin suppression regardless of true
-redundancy. Fixed by deduping `onSighting(sourceId)` within a window. **Both of P2's open questions
-are now resolved; no P2-specific blocker remains.** Per the RESUME HERE block's sequencing note:
-the sustained multi-hour field session is planned for AFTER P2 is built, as the one comprehensive
-field validation of the whole v2 stack — it is not a gate P2 needs to wait behind, so P2 work should
-continue now. Still refines "audibly loud again within one interval of leaving" to closer
-to two intervals, measured — unaffected by this update. Full presence/position/SOS/hop-gradient
-payload model, degree-gated scan batching, and Tier 2/3 gates not started. The `TrickleTimer` fix is
-compile/test-verified only — it touches the long-range channel, which is currently circuit-broken
-(100% advertise failure) on the only hardware tested so far, so it cannot be hardware-confirmed yet.
+redundancy. Fixed by deduping `onSighting(sourceId)` within a window.
+
+**Then, same day, production wiring's first slice (decision 26):** rather than build Tier B as a
+new, separate channel, the existing Coded-PHY-only "long-range channel" — which already had extended
+advertising, in-place updates, non-connectable mode, and Trickle governance — was **generalized in
+place**, avoiding a second advertising set competing for the same scarce chipset slot. Capability
+gate loosened to `extendedAdvertisingSupported` alone (Coded PHY now an opportunistic add-on via
+`codedPhySupported`, not a requirement) — broader hardware support than before. New payload
+(`MeshProtocol.encodeBroadcastTierBeacon`) adds an explicit `presenceHop` field, so presence now
+propagates a real multi-hop gradient over broadcast with zero GATT connections — this is what
+actually delivers §9.2 item 7's claim, not just makes it theoretically possible. Hardware
+`ScanFilter` on the service UUID restored, but ONLY on this brand-new scan (§9.2 item 1) — the
+legacy scan stays deliberately unfiltered/untouched, consistent with decision 3's lesson and every
+other "additive only" precedent in this file. Degree-gated `setReportDelay()` batching added
+(§9.2 item 1's other half), symmetric — drops back to immediate once measured degree falls back at
+or below the floor. Resolves `PLAN-v2.md` Part 8's open item on the Coded PHY channel (re-scope, not
+delete). **Position and SOS-message broadcast deliberately deferred to a later slice** — position
+needs encryption/nonce-budget work, SOS hop-gradient is per-SOS-id and ambiguous the same way the
+legacy beacon's own `sosHop` already is — named explicitly rather than silently dropped, matching
+P1's own "SOS only first" precedent.
+
+**No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
+note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
+comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
+Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
+measured — unaffected by any of the above. **Still not started**: position/SOS broadcast, the
+Tier 2/3 gates. 319 tests, detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** —
+this channel's Coded-PHY-only predecessor never had hardware to test on either; now broader, since
+the ScanFilter and report-delay-batching pieces are also new and untested on real hardware this
+session.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
@@ -755,8 +783,12 @@ compensate for the sync-primary design.
 - The evidence manifest + have-bitset + deficit computation (replaced by fountain coding).
 - Wi-Fi Direct entirely (`transport/wifidirect/`, 5 files) — replaced by Wi-Fi Aware, and it raises a
   system dialog that breaks the disguise.
-- BT5 Coded PHY long-range channel — 100 % failure on test hardware, currently circuit-broken.
-  Either delete or re-scope it behind the P2 broadcast tier where it actually belongs.
+- ~~BT5 Coded PHY long-range channel~~ — **resolved 2026-08-06, decision 26**: re-scoped (not
+  deleted) behind the P2 broadcast tier, exactly as this item proposed. It's no longer a standalone
+  Coded-PHY-only channel — `BeaconRadio`'s broadcast tier now gates on `extendedAdvertisingSupported`
+  alone and requests Coded PHY only as an opportunistic add-on. The 100%-failure-on-test-hardware
+  history was specific to the OLD narrower gate; not yet re-tested against the new one (still not
+  hardware-confirmed either way).
 
 ---
 
