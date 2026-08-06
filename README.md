@@ -339,7 +339,7 @@ where it matters:
   that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
-- **Automated test coverage is logic-only.** 307 pure-JVM/Robolectric unit tests cover crypto,
+- **Automated test coverage is logic-only.** 309 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
   of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
   relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI

@@ -994,3 +994,78 @@ P2 (scan-storm measurement, 3-phone hardware pass) not started; per `PLAN-v2.md`
 discipline, P2 production wiring should not begin until finding #3 above has an actual decision,
 and P1+P3 has had the sustained multi-hour session it's still waiting on (see decision 22's update).
 
+## 24. Decision 23 resolved as option (c) — and it dissolves finding #3 rather than fixing it
+
+2026-08-06. User's explicit call on decision 23's three-way open question: **sightings stay scoped
+to own-group broadcasts only.** A stranger's beacon — even thousands of them — never counts, no
+matter how it's produced. Framed by the user directly: phones running the app but sharing no group
+with us are pure relay capacity, not "neighbours" for density purposes, and they keep relaying
+(the blind-relay pillar, unaffected) even with the screen off or the app backgrounded. That is
+option (c) from decision 23's three, not (a) or (b).
+
+**Production already does this — confirmed, not changed.** `BeaconRadio.longRangeScanCallback`
+only calls `longRangeTrickle.onSighting()` after `matchTable[beacon.rotatingGroupId.toHex()]`
+resolves, i.e. only for a beacon from a group this device actually holds the key for (see that
+callback's own doc: "a neighbor's own long-range beacon for the same group"). `TrickleTimer.kt`
+itself needed no change either — its `onSighting()` doc already specified this scope. The gap was
+entirely in the **P2 Tier-1 sim**, which — via `P2GateTest`'s `degreeAt` — had been feeding
+`BroadcastTierEngine` raw swarm density (S3's literal "D 300 → 2") as the sighting count. That
+conflated two different numbers PLAN-v2.md §6.3 never meant as one: swarm size (drives relay/
+connection-slot pressure elsewhere in the design, irrelevant to Trickle) and own-group degree,
+which — per §9.1's 3–8 person groups — is bounded at 0–7 other members, full stop, independent of
+how many strangers surround you.
+
+**Reworked `P2GateTest.kt` to model own-group degree, decoupled from swarm size**, and it changes
+the read on decision 23's own headline finding, not just the numbers feeding it:
+
+- **Finding #3 ("S3's D=2 endpoint never fails open") was never actually a bug — it was a labelling
+  problem.** Under swarm-density semantics, "2 strangers left after you walked out of 300" reads as
+  "basically alone," so staying suppressed there looked wrong. Under the corrected own-group-degree
+  semantics, D=2 means **two of your actual group-mates are still in direct mutual range, still
+  broadcasting the same group-presence signal** — an ordinary, stable, well-covered state for a
+  3–8 person group, not an edge of isolation. Staying suppressed there is `TrickleTimer`'s
+  redundancy rule doing exactly its job: your own broadcast genuinely would be redundant. New test
+  `exactly 2 group-mates in range is a covered state, not isolation` asserts this directly and
+  passes. **None of decision 23's three proposed fixes (lower the constant / redefine the endpoint
+  / rescope sightings) turned out to be needed as tuning** — (c) resolves it by correcting what
+  "isolated" means, not by moving a number.
+- A direct, mechanised proof that swarm size is now provably irrelevant to this mechanism: new test
+  `swarm size is irrelevant to own-group Trickle behaviour` runs the identical own-group-degree
+  ramp under two swarm-size labels (3 and 3000) that are never read by `degreeAt`, and asserts the
+  resulting radio-touch traces are byte-identical.
+- Genuine isolation (own-group degree → 0) still cleanly fails open — `genuine isolation (own-group
+  degree to 0)- I5 fail-open holds` passes unchanged in spirit from decision 23's own degree-well-
+  under-constant case, just relabelled from "walked out of the crowd" to "your own group-mates left
+  your range," which is the scenario that actually drives this timer.
+
+**New finding, not present in decision 23, surfaced only because this session tested an explicit
+held low-nonzero own-group degree for the first time: `BroadcastTierEngine`'s sighting-cadence model
+can pin a node in permanent suppression at degree as low as 1, not just at the boundary constant.**
+The engine injects `degreeAt(...)` sightings once every `sightingIntervalMs` (default 5 s, "the
+fastest any real neighbour could plausibly re-announce" — decision 23's own fix, unchanged here).
+That implicitly assumes a neighbour transmits at that fastest possible rate *forever*, regardless of
+whether the neighbour's own `TrickleTimer` has itself backed off. Once this node's own window has
+backed off to `maxIntervalMs` (60 s), a single such neighbour contributes 60 s / 5 s = 12 sightings
+per window — six times `redundancyConstant` — so the node reads "still redundant" indefinitely no
+matter how long degree stays at exactly 1. Test `last buddy remaining (degree 1)- honest negative
+finding, sighting-cadence model can pin suppression` documents this the same way decision 23 itself
+documented its own honest negative finding: asserts the violation currently happens, with a comment
+explaining why, rather than silently tuning a scenario until the test goes green. **Not fixed this
+session — deliberately, matching this file's own "narrow first pass" framing for P2 Tier-1.** A real
+fix needs the modelled sighting rate to depend on the *neighbour's* own suppression state too (a
+suppressed neighbour's advertising set is OFF per `TrickleTimer.isSuppressed`'s own doc, so it
+should contribute ~0 sightings while suppressed, not a constant stream) — i.e. coupling multiple
+real `TrickleTimer` instances together instead of driving one node off an exogenous degree signal.
+That is squarely inside the still-not-started "full presence/position/SOS/hop-gradient payload
+model" (`PLAN-v2.md` P2 status), not a quick patch here. **Open question for whoever picks up P2's
+fuller sim work: does this cadence assumption also affect S2/S3/S4's still-valid findings at
+degree ≥ redundancyConstant, or only the newly-tested degree-strictly-below-constant case?** Not
+answered here — those tests never held a nonzero-but-below-constant degree before this session.
+
+309 tests (up from 307, net +2 — `P2GateTest` grew from 3 to 5 tests), detekt clean, both variants
+green. Sim-only, same as decision 23 — no production code touched (confirmed already correct,
+per above). `BroadcastTierEngine.kt`'s doc comments updated to state the own-group-only contract
+explicitly; its actual injection logic is unchanged (that's exactly what the new finding above is
+about). Decision 23's boundary-bug framing is superseded by this entry, not merely amended — read
+this one first if the two disagree.
+

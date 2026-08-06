@@ -32,9 +32,18 @@ data class BroadcastTierTuning(
  * model, degree-gated scan batching, or the legacy 31-byte fallback (all still open, see
  * `PLAN-v2.md`'s P2 entry).
  *
- * A node's local degree (how many same-purpose broadcasters it currently hears) drives how many
- * sightings arrive; [degreeAt] lets a scenario script that degree changing over time (S2 static,
- * S3 walking out, S4 walking in — PLAN-v2.md §6.3).
+ * [degreeAt] must return **own-group degree** — how many of this node's OWN group's other members
+ * it currently hears broadcasting the same group-presence signal, not total local/swarm density.
+ * This matches production exactly: [org.offlinemesh.app.ble.BeaconRadio]'s `longRangeScanCallback`
+ * only calls `onSighting()` after a successful `matchTable[groupId]` lookup — a beacon from a
+ * group this device holds no key for is never counted, because it says nothing about whether THIS
+ * node's own group already has its presence covered. Decisions 23/24 (`docs/DECISIONS.md`) settled
+ * this after the first version of this engine and `P2GateTest` fed it raw swarm density (S3's
+ * "D 300 → 2") as the sighting count, conflating two different things: swarm size (drives relay/
+ * connection-slot pressure elsewhere, irrelevant to THIS timer) and own-group degree, which is
+ * bounded by group size (3–8 people per PLAN-v2.md §9.1, so 0–7 other members max) regardless of
+ * how many strangers are around. [degreeAt] lets a scenario script that own-group degree changing
+ * over time.
  *
  * Sighting model, and a real bug this caught in the FIRST version of this engine: [TrickleTimer]
  * expects [TrickleTimer.onSighting] called once per ACTUAL neighbour broadcast heard, accumulated

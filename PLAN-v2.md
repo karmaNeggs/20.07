@@ -1,30 +1,41 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-06, end of session.** This is the single status block
-to trust; anything else in this document (including inline "STATUS" notes inside Part 7 below) is
-detail underneath this, not a competing source. If a phase's own section below ever seems to
-disagree with this block, this block is current and that section is what's stale.
+**RESUME HERE — current status as of 2026-08-06 (session continued past the previous end-of-session
+checkpoint).** This is the single status block to trust; anything else in this document (including
+inline "STATUS" notes inside Part 7 below) is detail underneath this, not a competing source. If a
+phase's own section below ever seems to disagree with this block, this block is current and that
+section is what's stale.
 
 - **Shipped and committed, on `main`, PUSHED to origin (public):** P0a (crowd simulator), P0b (peer
   identity), P1 (SOS flood-forward), P3 (persistent links) — v0.6.0-dev through v0.6.3-dev.
 - **Hardware-confirmed across four live 3-phone test rounds** (2026-08-05): message-delay fix,
   radar-staleness fix, duplicate-connection-callback fix, Bluetooth off→on recovery fix. Full detail
   in `docs/DECISIONS.md` decisions 18-22.
-- **P2 (broadcast tier): Tier-1 SIM work only has started, NOT production wiring.** Deliberately
-  narrow first pass (§5.5's fail-open rule only) found a real, unresolved open decision — see
-  decision 23. Do not begin P2 PRODUCTION wiring until that decision is made.
+- **P2 (broadcast tier): Tier-1 SIM work only, NOT production wiring.** Decision 23's open question
+  is now **resolved** (`docs/DECISIONS.md` decision 24, 2026-08-06): sightings are scoped to
+  own-group broadcasts only (option (c)) — already true in production `BeaconRadio`, so no
+  production code changed. Reworking the sim to match dissolves decision 23's "D=2 boundary bug"
+  finding (it was a labelling artefact of swarm-density semantics, not a real bug — see decision 24)
+  but surfaces a new, genuinely open one: the sim's sighting-cadence model can pin suppression at
+  own-group degree as low as 1, not just at the boundary constant, and it's undecided whether that
+  also affects the still-valid degree ≥ constant findings. **Do not begin P2 PRODUCTION wiring until
+  someone has explicitly decided whether that new finding blocks it** (it's a sim-fidelity question,
+  not a demonstrated device failure — see decision 24's closing paragraph) — this is in addition to,
+  not instead of, the sustained-session gate below.
 - **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
   to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`.
-- **NOT committed to git**: nothing as of this checkpoint — everything above is committed
-  (`a0d45e1` is the latest commit). If you find uncommitted changes when resuming, they're from a
-  session after this one.
+- **NOT committed to git**: nothing as of this checkpoint — everything through decision 23
+  (`a0d45e1`) plus a session-close cleanup commit (`8ff4679`) are committed but **not yet pushed** to
+  origin; decision 24's changes (this session) are not yet committed at all. If you find other
+  uncommitted changes when resuming, they're from a session after this one.
 - **The one thing still genuinely missing before P1+P3 is fully trusted**: a **sustained multi-hour
   3-phone session** — all four rounds so far were short (tens of minutes) ad hoc tests, not the
-  longer session §6.4 calls for.
+  longer session §6.4 calls for. This remains the primary blocker on P2 production wiring regardless
+  of the decision-24 question above.
 - **Next planned test**: user is running a full-day session across up to 10 devices, date TBD from
-  their side — will bring back logs afterward for review. This is a bigger test than anything done
-  so far (device count and duration both); treat its findings as the most current information
-  available, ahead of everything summarized above.
+  their side (as of 2026-08-06, still not run) — will bring back logs afterward for review. This is
+  a bigger test than anything done so far (device count and duration both); treat its findings as
+  the most current information available, ahead of everything summarized above.
 
 **Written:** 2026-07-31, after reading bitchat's WHITEPAPER.md end-to-end and re-reading our own
 transport layer and live diagnostics 8/9/10 against it.
@@ -632,16 +643,24 @@ This is directly measurable and is the headline claim of the whole plan.*
 advertising, Trickle-governed, carrying presence, position, SOS and hop gradient. Legacy 31-byte
 fallback and capability circuit-breaker mandatory. Hardware `ScanFilter` on the service UUID and
 degree-gated report batching land here (§9.2 item 1). **The §5.5 fail-open rule (I5) is a P2
-acceptance criterion, not a later refinement** — Trickle without it turns "walked out of the crowd"
-into "went silent."
+acceptance criterion, not a later refinement** — Trickle without it turns "the last of your own
+group-mates drift out of range" into "went silent." (Corrected per decision 24, 2026-08-06: sightings
+are own-group-scoped, so it is specifically *your group* thinning out that risks silence, not swarm
+density falling — walking out of a crowd of strangers, by itself, moves nothing here.)
 **STATUS (2026-08-06): Tier 1 sim started, narrow first pass (I5/fail-open only) — see
-`docs/DECISIONS.md` decision 23.** Real finding: fail-open works once degree drops meaningfully
-below the redundancy constant, but S3's own literal endpoint (D=2) sits exactly on `TrickleTimer`'s
-own default redundancy constant (also 2) and does NOT fail open there — an open decision (three
-options logged in decision 23) that needs resolving before production wiring starts, not just a
-sim curiosity. Also refines "audibly loud again within one interval of leaving" to closer to two
-intervals, measured. No production code touched. Full presence/position/SOS/hop-gradient payload
-model, degree-gated scan batching, and Tier 2/3 gates not started.
+`docs/DECISIONS.md` decisions 23-24.** Decision 23's three-way open question is resolved as option
+(c) — own-group-only sighting scope, already true in production `BeaconRadio`, no production code
+changed. Reworking the sim to match dissolves decision 23's "S3 D=2 never fails open" finding: under
+corrected own-group-degree semantics, D=2 means two real group-mates still in range, an ordinary
+covered state, not isolation — staying suppressed there is correct, not a bug. A new, genuinely open
+finding took its place: the sim's sighting-cadence model can pin suppression at own-group degree as
+low as 1 (not just at the boundary), and whether that also undermines the still-valid degree ≥
+redundancy-constant findings is undecided — flagged, not fixed, deliberately (full write-up in
+decision 24). **P2 production wiring should not start until that's decided**, on top of the
+sustained-session gate below. Still refines "audibly loud again within one interval of leaving" to
+closer to two intervals, measured — unaffected by this update. No production code touched. Full
+presence/position/SOS/hop-gradient payload model, degree-gated scan batching, and Tier 2/3 gates not
+started.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
