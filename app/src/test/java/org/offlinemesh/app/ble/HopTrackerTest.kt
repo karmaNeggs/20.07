@@ -152,6 +152,23 @@ class HopTrackerTest {
     }
 
     @Test
+    fun `bestActiveSos names the nearest sos id, not just its hop distance`() {
+        val t = tracker()
+        t.considerDirectHop("group-1", "sos-far", 3, sourceId = "peerA")
+        t.considerDirectHop("group-1", "sos-near", 1, sourceId = "peerB")
+        assertEquals("sos-near" to 1, t.bestActiveSos("group-1"))
+    }
+
+    @Test
+    fun `bestActiveSos is null when nothing is fresh, matching bestActiveSosHop's UNKNOWN_HOP`() {
+        val t = tracker()
+        assertEquals(null, t.bestActiveSos("group-1"))
+        t.markSosOrigin("group-1", "sos-1")
+        clock += 180_001
+        assertEquals(null, t.bestActiveSos("group-1"))
+    }
+
+    @Test
     fun `hop tracking for one group never leaks into another group's key`() {
         val t = tracker()
         t.considerNeighborReport("group-A", "PRESENCE", neighborHop = 0, sourceId = "peerA")

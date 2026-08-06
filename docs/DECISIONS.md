@@ -1300,3 +1300,75 @@ compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalReleas
 caveat as decision 26 in full: this touches the same never-hardware-tested channel, now carrying
 real GPS data end-to-end for the first time. Needs a live-device pass before being trusted.
 
+## 28. P2 production wiring, third slice: SOS hop-gradient — done right this time
+
+2026-08-06, same day as decisions 23-27, closing out decision 26's other explicit deferral.
+
+**The exact bug this had to avoid repeating.** Decision 26 deferred SOS deliberately, citing that
+the legacy beacon's own `sosHop` field is "already deliberately NOT fed into hop tracking" because
+an EARLIER version tried exactly that and broke: a rough, sosId-agnostic hop estimate was fed into a
+shared `"SOS_PENDING"` key sitting alongside exact, TTL-derived per-SOS tracking, and
+`HopTracker.bestActiveSosHop`'s `min()` of both let a stale rough reading leak through — the
+live-tested symptom (decision 13) was a hop count frozen at "2" with only 2 test phones in the mesh,
+where the exact channel could only ever produce 0 or 1. Simply wiring the existing `sosHop` field
+into hop tracking on receipt would have reintroduced that exact failure mode.
+
+**The fix that actually resolves it: key on the REAL SOS id, not a rough aggregate.** Confirmed by
+`grep` before touching anything: `beacon.sosHop` is written but never read by ANY receiver, legacy
+or Tier B — genuinely dead weight, not a field anything currently depends on. Removed it from the
+Tier B format entirely (the legacy 31-byte beacon's own `sosHop` field is untouched — this project's
+established "additive only, never touch the byte-starved legacy format" discipline) and replaced it
+with `MeshProtocol.SosAlert(id, hop)`: the sender's own nearest known active SOS, sourced from a new
+`HopTracker.bestActiveSos(groupId)` (split out of `bestActiveSosHop`, same staleness-checked logic,
+now also returning WHICH sosId the hop belongs to). A receiver feeds this straight into
+`HopTracker.considerNeighborReport(groupId, activeSos.id, activeSos.hop, ...)` — just ANOTHER SOURCE
+for the SAME exact per-SOS key GATT flood-forward already uses. There is no aggregation, no shared
+placeholder key, and no `min()` across sources of different fidelity: two reports for the same real
+sosId compose via `HopTracker`'s ordinary distance-vector relaxation (already correct, already
+tested), exactly as if both had arrived over GATT from different peers. The old bug was never really
+about "hop-gradient over broadcast is unsafe" — it was about conflating a rough measurement with an
+exact one under one key; keying on the real id removes the conflation, not the feature.
+
+**Scope, deliberately narrow, matching position's own precedent:** carries hop-gradient only — id +
+hop, no message, no mac, no signature. A receiver learns "an SOS exists for this group, N hops away"
+for radar/UI purposes; the authenticated message content still arrives over GATT once connected,
+which `BeaconRadio`'s existing blind-carrier policy already attempts for every heard device, member
+or not, so this doesn't need to (and doesn't try to) accelerate message delivery itself — only the
+awareness that something is active, before any connection completes.
+
+**Wire format redesign, not purely additive this time — and why that's safe.** Adding a second
+independently-optional variable-length field (alongside decision 27's position) meant the old
+"trailing bytes present or not" encoding could no longer distinguish "position but no SOS" from "SOS
+but no position." Redesigned both blocks to be ALWAYS length-prefixed in the output (zero length =
+absent), a strictly better-defined shape than what shipped in decisions 26-27. This is a breaking
+change to a format that has never been on real hardware or in any release — zero deployed devices,
+zero compatibility obligation, same reasoning `JoinCode`'s own v1→v2 bump already used. Worst-case
+combined size is computed, not assumed, and asserted in a test:
+`MAX_BROADCAST_TIER_POSITION_FRAME_BYTES` (180, lowered from decision 27's 220 to guarantee
+headroom) + `MAX_BROADCAST_TIER_SOS_ID_BYTES` (48) + fixed overhead = 240 bytes, inside the ~251B
+in-place-update budget even with BOTH ceilings hit simultaneously — which a real sender never does
+anyway (realistic ~150B position, since `groupId` turns out to be a 16-char hex id, not UUID-length
+— confirmed against `JoinCode.GROUP_ID_LEN`, not assumed — plus a 36-char UUID `senderId`; realistic
+36-byte SOS id).
+
+**Receive-side bug caught before it shipped: an early return was skipping SOS entirely whenever
+position was absent.** `handleResult`'s existing `val positionFrame = beacon.positionFrame ?: return`
+guard (from decision 27) would have short-circuited past the SOS-handling code for any beacon
+carrying an SOS alert but no position — i.e. most of them, since GPS fixes aren't always available.
+Fixed by moving SOS handling before that guard, so the two optional fields are processed
+independently, matching how they're now independently encoded.
+
+31 tests added across two files (`HopTrackerTest.kt`: `bestActiveSos` naming the nearest id, and its
+null case; `MeshProtocolBroadcastTierTest.kt`: substantially rewritten for the new always-length-
+prefixed format, including a direct assertion on the worst-case combined size). 330 tests total (up
+from 323), detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
+incl. `lintVitalRelease`) green. **Production code touched**: `MeshProtocol.kt` (format redesign),
+`HopTracker.kt` (`bestActiveSos` split out), `BeaconRadio.kt` (SOS sourcing on send, ingestion on
+receive, the early-return fix). **NOT hardware-confirmed** — same caveat as decisions 26-27 in full.
+
+**What P2 still doesn't carry, named explicitly:** the actual SOS message/mac/signature (deliberate,
+see scope above); multi-hop position propagation over broadcast (decision 27's own deferral, still
+open — no natural "relay" exists for a connectionless channel); thumbnails and catalogue digests
+(§5.1's own Tier B payload list, not yet started). Tier 2/3 hardware gates remain not started for
+all of P2.
+

@@ -303,16 +303,18 @@ where it matters:
   itself. This reflects the state of that library upstream (no stable release exists), not a
   chosen risk.
 - **Broadcast tier (Tier B) is new, compile-verified only, not device-tested.**
-  (`BeaconRadio.kt`/`BleCapabilities.kt`/`TrickleTimer.kt`, PLAN-v2.md §5.1/decisions 26-27) — a
-  connectionless, Trickle-governed extended-advertising channel carrying group presence, a
-  multi-hop presence-distance gradient, and a single-hop live position (reuses the same AES-GCM
-  sealing/signing GATT position frames already use — no new crypto), with a hardware `ScanFilter`
-  and degree-gated scan-report batching. Generalized from what was originally a Coded-PHY-only
-  long-range beacon channel; Coded PHY is now used opportunistically for extra range on hardware
-  that supports it, not required. Position broadcast is single-hop only — multi-hop position still
-  goes through the existing GATT relay path, unaffected. Capability-gated and purely additive — on
-  unsupported hardware, or if anything about it misbehaves, it's a silent no-op that can't affect
-  the proven legacy discovery path.
+  (`BeaconRadio.kt`/`BleCapabilities.kt`/`TrickleTimer.kt`/`HopTracker.kt`, PLAN-v2.md
+  §5.1/decisions 26-28) — a connectionless, Trickle-governed extended-advertising channel carrying
+  group presence, a multi-hop presence-distance gradient, a single-hop live position (reuses the
+  same AES-GCM sealing/signing GATT position frames already use — no new crypto), and an SOS
+  hop-gradient (id + hop distance only, keyed on the real SOS id so it composes with GATT
+  flood-forward's own tracking instead of a separate rough estimate — content still arrives over
+  GATT once connected), with a hardware `ScanFilter` and degree-gated scan-report batching.
+  Generalized from what was originally a Coded-PHY-only long-range beacon channel; Coded PHY is now
+  used opportunistically for extra range on hardware that supports it, not required. Position
+  broadcast is single-hop only — multi-hop position still goes through the existing GATT relay path,
+  unaffected. Capability-gated and purely additive — on unsupported hardware, or if anything about
+  it misbehaves, it's a silent no-op that can't affect the proven legacy discovery path.
 - **Delivery is now a forwarding protocol, not just a sync protocol — hardware-confirmed across
   four live rounds (2026-08-05), one real gap still open.** SOS floods immediately across every
   open link the moment it's created or received, and links now stay open for minutes instead of
@@ -346,7 +348,7 @@ where it matters:
   that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
-- **Automated test coverage is logic-only.** 323 pure-JVM/Robolectric unit tests cover crypto,
+- **Automated test coverage is logic-only.** 330 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
   of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
   relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI

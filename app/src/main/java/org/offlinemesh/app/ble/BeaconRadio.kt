@@ -267,7 +267,7 @@ class BeaconRadio(
                         val sHop = bestSosHopFor(g.id)
                         val payloadKey = "${g.id}:${rid.toHex()}:$sHop"
                         ensureAdvertising(profile, MeshProtocol.ADV_TYPE_GROUP, rid, sHop, payloadKey)
-                        evaluateBroadcastTierAdvertising(MeshProtocol.ADV_TYPE_GROUP, g.id, key, rid, sHop)
+                        evaluateBroadcastTierAdvertising(MeshProtocol.ADV_TYPE_GROUP, g.id, key, rid)
                     }
                 }
                 // How often to re-check whether the payload needs to change (new rotating-id window,
@@ -484,14 +484,23 @@ class BeaconRadio(
     }
 
     @SuppressLint("MissingPermission")
-    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray, sHop: Int) {
+    // CyclomaticComplexMethod: three independent optional payload concerns (presence hop, position
+    // reseal, sos alert) plus the suppression/payload-key/advertising-set-lifecycle branches this
+    // section's sibling functions already carry at similar complexity - splitting further would
+    // scatter one radio operation's decision across more functions than it clarifies.
+    @Suppress("CyclomaticComplexMethod")
+    private fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray) {
         if (broadcastTierDisabledForSession) return
         val adapter = bluetoothManager.adapter ?: return
         if (!BleCapabilities.extendedAdvertisingSupported(adapter)) return
         val adv = adapter.bluetoothLeAdvertiser ?: return
         val presenceHop = hopTracker.myHop(groupId, "PRESENCE")
         val positionMarker = refreshBroadcastTierPositionIfDue(groupId, key)
-        val payloadKey = "$groupId:${rid.toHex()}:$sHop:$presenceHop:$positionMarker"
+        // Real sosId, not a rough aggregate — see MeshProtocol.encodeBroadcastTierBeacon's activeSos
+        // doc (decision 28) for why that distinction is what makes this safe to feed into hop
+        // tracking on receipt, unlike the legacy beacon's still-unread sosHop field.
+        val activeSos = hopTracker.bestActiveSos(groupId)?.let { (id, hop) -> MeshProtocol.SosAlert(id, hop) }
+        val payloadKey = "$groupId:${rid.toHex()}:$presenceHop:$positionMarker:${activeSos?.id}:${activeSos?.hop}"
         if (broadcastTierTrickle.isSuppressed()) {
             if (broadcastTierAdvertisingActive) {
                 try { adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback) } catch (e: Exception) {
@@ -503,7 +512,8 @@ class BeaconRadio(
             return
         }
         if (payloadKey == broadcastTierCurrentPayloadKey && broadcastTierAdvertisingActive) return
-        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, sHop, presenceHop, broadcastTierPositionFrame)
+        val payload =
+            MeshProtocol.encodeBroadcastTierBeacon(type, rid, presenceHop, broadcastTierPositionFrame, activeSos)
         val params = AdvertisingSetParameters.Builder()
             .setLegacyMode(false)
             .setConnectable(false)
@@ -746,9 +756,14 @@ class BeaconRadio(
         // Direct hearing: the broadcaster is by definition 1 hop away — same shape as scanCallback.
         hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
         // Propagated multi-hop gradient: the broadcaster's OWN best-known presence distance, +1 —
-        // see MeshProtocol.encodeBroadcastTierBeacon's doc for why this is safe/correct for
-        // presence specifically (one target per group) where it wouldn't be for sosHop (many).
+        // see MeshProtocol.encodeBroadcastTierBeacon's doc for why this composes correctly for
+        // presence specifically (one target per group).
         hopTracker.considerNeighborReport(groupId, "PRESENCE", beacon.presenceHop, result.device.address)
+        // Same shape, real per-SOS-id key (decision 28) — just another source for the SAME exact
+        // key GATT flood-forward already uses, composing via ordinary distance-vector relaxation.
+        // Only ever set when activeSos was actually encoded (see encodeBroadcastTierBeacon's own
+        // doc) — no aggregate, no ambiguity about which SOS this hop count refers to.
+        beacon.activeSos?.let { hopTracker.considerNeighborReport(groupId, it.id, it.hop, result.device.address) }
         // Scoped to within ONE Trickle window only (tens of seconds) - see TrickleTimer.onSighting's
         // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
         // lived peer state off it (decision 25, docs/DECISIONS.md).

@@ -1,6 +1,7 @@
 package org.offlinemesh.app.ble
 
 import java.nio.ByteBuffer
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,6 +19,10 @@ object MeshProtocol {
 
     const val UNKNOWN_HOP: Int = 255
     const val ROTATING_ID_LEN: Int = 6
+
+    private val UTF8 = StandardCharsets.UTF_8
+    private const val UNSIGNED_BYTE_MASK = 0xFF
+    private const val UNSIGNED_SHORT_MASK = 0xFFFF
 
     /** BLE's ATT MTU before any negotiation ever succeeds — the floor every connection starts at
      *  and the value to assume if `requestMtu`/`onMtuChanged` never resolved for some reason. */
@@ -54,14 +59,26 @@ object MeshProtocol {
         return Beacon(type, rid, sHop)
     }
 
-    /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [positionFrame] block — defence
-     *  in depth for [decodeBroadcastTierBeacon]'s length-prefixed read, same reasoning as
-     *  [MeshFrameCodec.MAX_EVIDENCE_CHUNKS]/[MeshFrameCodec.MAX_SOS_MESSAGE_BYTES]. Generous against
-     *  a real `MeshFrameCodec.encodePosition` frame (~170-200B for a UUID-length groupId/senderId,
-     *  signed, GCM-tagged — see [encodeBroadcastTierBeacon]'s own doc) while keeping the WHOLE
-     *  beacon comfortably under extended advertising's ~251B in-place-update budget alongside the
-     *  fixed 9-byte header. */
-    const val MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 220
+    /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [BroadcastTierBeacon.positionFrame]
+     *  block — defence in depth for [decodeBroadcastTierBeacon]'s length-prefixed read, same
+     *  reasoning as [MeshFrameCodec.MAX_EVIDENCE_CHUNKS]/[MeshFrameCodec.MAX_SOS_MESSAGE_BYTES].
+     *  Generous against a real `MeshFrameCodec.encodePosition` frame (~150-160B: `groupId` is a
+     *  16-char hex id, not UUID-length — see [org.offlinemesh.app.data.JoinCode]'s `GROUP_ID_LEN`
+     *  — while `senderId` IS a 36-char UUID) while leaving guaranteed headroom for
+     *  [MAX_BROADCAST_TIER_SOS_ID_BYTES] too — see [encodeBroadcastTierBeacon]'s own doc for the
+     *  full worst-case budget arithmetic. */
+    const val MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 180
+
+    /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [BroadcastTierBeacon.activeSos]
+     *  id — generous against a real SOS id (`UUID.randomUUID().toString()`, 36 chars/bytes, see
+     *  `RelayEngine.createSos`). Same defence-in-depth reasoning as
+     *  [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES]. */
+    const val MAX_BROADCAST_TIER_SOS_ID_BYTES = 48
+
+    /** The sender's own nearest known active SOS for this group — [id] is the real SOS id (matching
+     *  `SosEntity.id`), NOT a rough placeholder — see [encodeBroadcastTierBeacon]'s own doc for why
+     *  that distinction is the entire point of this type existing. */
+    data class SosAlert(val id: String, val hop: Int)
 
     /**
      * Broadcast-tier (Tier B, PLAN-v2.md §5.1) payload — carried over BLE Extended Advertising
@@ -69,9 +86,8 @@ object MeshProtocol {
      * byte-for-byte unchanged. Extended advertising's budget (~1650B chained, 251B per in-place
      * update) has none of [encodeBeacon]'s byte pressure — see that function's own doc: the legacy
      * 31-byte format has exactly 2 spare bytes after Android's Flags structure and this service's
-     * own 128-bit UUID overhead, nowhere near enough room for a second hop field, let alone a
-     * position. This format is free to grow further (SOS message, more hop-gradient fields) in
-     * later slices.
+     * own 128-bit UUID overhead, nowhere near enough room for a hop field, let alone a position or
+     * SOS block.
      *
      * [presenceHop] is the sender's own current best-known distance to presence for this group —
      * i.e. `HopTracker.myHop(groupId, "PRESENCE")` at encode time, [UNKNOWN_HOP] if the sender
@@ -79,11 +95,7 @@ object MeshProtocol {
      * multi-hop gradient over broadcast alone, with no GATT connection: a receiver feeds it straight
      * into `HopTracker.considerNeighborReport` (which adds its own +1), exactly mirroring how
      * `RelayResponder` already propagates `Frame.Presence.hop` over GATT relay — same distance-
-     * vector mechanism, now also available on a connectionless channel. Deliberately NOT extended
-     * to SOS the same way yet: unlike presence (one target per group), SOS hop-gradient is per-SOS-
-     * id, and [encodeBeacon]'s existing `sosHop` field is already deliberately NOT fed into hop
-     * tracking for exactly that reason (see [decodeBeacon]'s call sites) — carrying it here would
-     * inherit the same ambiguity rather than solve it, so SOS broadcast is left for a later slice.
+     * vector mechanism, now also available on a connectionless channel.
      *
      * [positionFrame], when present, is `MeshFrameCodec.encodePosition`'s FULL output — the same
      * `FRAME_POSITION`-tagged, groupId+hop+sealed-body bytes a GATT link would carry — reused
@@ -91,31 +103,61 @@ object MeshProtocol {
      * beacon already carries [rotatingGroupId] separately), so a receiver decodes it with the exact
      * same `MeshFrameCodec.decode`/`openPosition` pipeline the GATT path already uses, no new
      * crypto or framing code, and inherits [MeshFrameCodec.encodePosition]'s nonce-safety
-     * engineering (see its own doc) for free. Deliberately single-hop only in this slice: unlike
-     * GATT's `PositionSealed` relay, a Tier B receiver does NOT re-broadcast a position it heard
-     * from someone else — extended advertising has no natural "relay" the way a GATT store-and-
-     * forward blind carrier does, so multi-hop position propagation still goes through the existing
-     * GATT path unchanged; Tier B only ever carries the broadcaster's OWN current fix (hop 0).
-     * Length-prefixed (2 bytes) so a receiver can tell it apart from a presence-only beacon of the
-     * same decoded shape — see [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES] for the size ceiling.
+     * engineering (see its own doc) for free. Deliberately single-hop only: a Tier B receiver does
+     * NOT re-broadcast a position it heard from someone else — extended advertising has no natural
+     * "relay" the way a GATT store-and-forward blind carrier does, so multi-hop position propagation
+     * still goes through the existing GATT path unchanged; Tier B only ever carries the
+     * broadcaster's OWN current fix (hop 0).
+     *
+     * [activeSos], when present, is `HopTracker.bestActiveSos(groupId)`'s result at encode time —
+     * the sender's own nearest known active SOS, by its REAL id, not a rough aggregate. This
+     * resolves what decision 26 deliberately deferred: an EARLIER version of the legacy beacon
+     * carried a rough, sosId-agnostic hop estimate that got fed into a shared "SOS_PENDING" key
+     * sitting alongside exact, TTL-derived per-SOS tracking, and a stale rough reading leaked
+     * through the `min()` of both (see `docs/DECISIONS.md` decision 13's live-tested finding, and
+     * [encodeBeacon]'s own doc — that field is STILL written today but confirmed, by grep, never
+     * read by any receiver). Keying on the real id instead avoids that failure mode entirely: a
+     * receiver feeds this straight into `HopTracker.considerNeighborReport(groupId, activeSos.id,
+     * activeSos.hop, ...)` — just ANOTHER SOURCE for the SAME exact per-SOS key GATT flood-forward
+     * already uses, so it composes via ordinary distance-vector relaxation instead of aggregating.
+     * Deliberately carries no message/mac/signature — a receiver learns "an SOS exists, this many
+     * hops away" for radar/UI purposes only; the authenticated content still arrives over GATT once
+     * connected (which `BeaconRadio`'s existing blind-carrier policy already attempts eagerly for
+     * every heard device, member or not).
+     *
+     * Both optional blocks are ALWAYS length-prefixed in the encoded output (a zero length means
+     * "absent"), rather than "trailing bytes present or not" — this is what lets two independently-
+     * optional variable-length fields coexist unambiguously. Worst-case total, computed not assumed:
+     * header(8) + positionLen(2)+[MAX_BROADCAST_TIER_POSITION_FRAME_BYTES](180) +
+     * sosIdLen(1)+[MAX_BROADCAST_TIER_SOS_ID_BYTES](48)+sosHop(1) = 240 bytes, comfortably inside
+     * extended advertising's ~251B in-place-update budget even at both ceilings simultaneously —
+     * which a real sender never hits anyway (realistic ~150B position + 36B sos id ≈ 198B total).
      */
     fun encodeBroadcastTierBeacon(
         type: Byte,
         rotatingGroupId: ByteArray,
-        sosHop: Int,
         presenceHop: Int,
         positionFrame: ByteArray? = null,
+        activeSos: SosAlert? = null,
     ): ByteArray {
         val includePosition = positionFrame != null && positionFrame.size <= MAX_BROADCAST_TIER_POSITION_FRAME_BYTES
-        val headerLen = 1 + ROTATING_ID_LEN + 1 + 1
-        val buf = ByteBuffer.allocate(headerLen + if (includePosition) 2 + positionFrame!!.size else 0)
+        val sosIdBytes = activeSos?.id?.toByteArray(UTF8)
+        val includeSos = sosIdBytes != null && sosIdBytes.isNotEmpty() &&
+            sosIdBytes.size <= MAX_BROADCAST_TIER_SOS_ID_BYTES
+        val headerLen = 1 + ROTATING_ID_LEN + 1
+        var size = headerLen + 2 + 1 // header + positionLen prefix + sosIdLen prefix, always present
+        if (includePosition) size += positionFrame!!.size
+        if (includeSos) size += sosIdBytes!!.size + 1 // + hop byte
+        val buf = ByteBuffer.allocate(size)
         buf.put(type)
         buf.put(rotatingGroupId.copyOf(ROTATING_ID_LEN))
-        buf.put(sosHop.coerceIn(0, 255).toByte())
         buf.put(presenceHop.coerceIn(0, 255).toByte())
-        if (includePosition) {
-            buf.putShort(positionFrame!!.size.toShort())
-            buf.put(positionFrame)
+        buf.putShort(if (includePosition) positionFrame!!.size.toShort() else 0)
+        if (includePosition) buf.put(positionFrame!!)
+        buf.put((if (includeSos) sosIdBytes!!.size else 0).toByte())
+        if (includeSos) {
+            buf.put(sosIdBytes!!)
+            buf.put(activeSos.hop.coerceIn(0, 255).toByte())
         }
         return buf.array()
     }
@@ -123,28 +165,31 @@ object MeshProtocol {
     data class BroadcastTierBeacon(
         val type: Byte,
         val rotatingGroupId: ByteArray,
-        val sosHop: Int,
         val presenceHop: Int,
         val positionFrame: ByteArray? = null,
+        val activeSos: SosAlert? = null,
     )
 
-    @Suppress("ReturnCount", "MagicNumber") // malformed-input guard clauses; 0xFFFF/2 match readStr16's own idiom
+    @Suppress("ReturnCount") // malformed-input guard clauses, same shape as every other decode() in this codebase
     fun decodeBroadcastTierBeacon(bytes: ByteArray): BroadcastTierBeacon? {
-        val headerLen = 1 + ROTATING_ID_LEN + 1 + 1
-        if (bytes.size < headerLen) return null
+        val headerLen = 1 + ROTATING_ID_LEN + 1
+        if (bytes.size < headerLen + 2 + 1) return null // header + both always-present length prefixes
         val type = bytes[0]
         val rid = bytes.copyOfRange(1, 1 + ROTATING_ID_LEN)
-        val sHop = bytes[1 + ROTATING_ID_LEN].toInt() and 0xFF
-        val pHop = bytes[1 + ROTATING_ID_LEN + 1].toInt() and 0xFF
-        var positionFrame: ByteArray? = null
-        if (bytes.size > headerLen) {
-            val buf = ByteBuffer.wrap(bytes, headerLen, bytes.size - headerLen)
-            if (buf.remaining() < 2) return null // length prefix present but truncated — malformed
-            val len = buf.short.toInt() and 0xFFFF
-            if (len > MAX_BROADCAST_TIER_POSITION_FRAME_BYTES || buf.remaining() < len) return null
-            positionFrame = ByteArray(len).also { buf.get(it) }
-        }
-        return BroadcastTierBeacon(type, rid, sHop, pHop, positionFrame)
+        val pHop = bytes[1 + ROTATING_ID_LEN].toInt() and UNSIGNED_BYTE_MASK
+        val buf = ByteBuffer.wrap(bytes, headerLen, bytes.size - headerLen)
+        val posLen = buf.short.toInt() and UNSIGNED_SHORT_MASK
+        if (posLen > MAX_BROADCAST_TIER_POSITION_FRAME_BYTES || buf.remaining() < posLen) return null
+        val positionFrame = if (posLen > 0) ByteArray(posLen).also { buf.get(it) } else null
+        if (buf.remaining() < 1) return null // sosIdLen prefix itself missing — malformed
+        val sosIdLen = buf.get().toInt() and UNSIGNED_BYTE_MASK
+        val sosTailNeeded = if (sosIdLen > 0) sosIdLen + 1 else 0 // + hop byte, only if an id is actually present
+        if (sosIdLen > MAX_BROADCAST_TIER_SOS_ID_BYTES || buf.remaining() < sosTailNeeded) return null
+        val activeSos = if (sosIdLen > 0) {
+            val idBytes = ByteArray(sosIdLen).also { buf.get(it) }
+            SosAlert(String(idBytes, UTF8), buf.get().toInt() and UNSIGNED_BYTE_MASK)
+        } else null
+        return BroadcastTierBeacon(type, rid, pHop, positionFrame, activeSos)
     }
 
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —
@@ -293,19 +338,30 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
         _snapshot.update { it + (key to 0) }
     }
 
-    /** Minimum hop distance among currently-*fresh* SOS trackers for a group (excludes PRESENCE) —
-     *  i.e. "how far to the nearest known active SOS," expiring old entries the same way [myHop]
-     *  does for presence. Previously the SOS display read the raw table directly, bypassing this
-     *  staleness check entirely — a stale reading could sit there and be shown as current. */
-    fun bestActiveSosHop(groupId: String): Int {
+    /** The nearest currently-*fresh* SOS tracked for a group (excludes PRESENCE) — its real sosId
+     *  alongside its hop distance, expiring old entries the same way [myHop] does for presence.
+     *  `null` if none is currently fresh. Split out from [bestActiveSosHop] (decision 28,
+     *  `docs/DECISIONS.md`) so a caller that needs to name WHICH SOS is nearest — not just how near
+     *  — doesn't have to re-derive it from the raw table itself: `BeaconRadio`'s Tier B SOS
+     *  hop-gradient broadcast needs the id specifically so it can feed a receiver's
+     *  [considerNeighborReport] with the SAME real per-SOS key GATT flood-forward already uses,
+     *  rather than a second, id-agnostic aggregate — see [MeshProtocol.encodeBroadcastTierBeacon]'s
+     *  `activeSos` doc for why that distinction is the whole point (a prior, now-removed mechanism
+     *  mixed a rough aggregate with this exact tracking and let a stale rough reading leak through). */
+    fun bestActiveSos(groupId: String): Pair<String, Int>? {
         val nowMs = now()
-        return table.keys
+        return table.entries
             .asSequence()
-            .filter { it.groupId == groupId && it.target != "PRESENCE" }
-            .filter { key -> nowMs - (lastUpdated[key] ?: 0L) <= effectiveStaleMs(staleMs, table[key] ?: 0) }
-            .mapNotNull { table[it] }
-            .minOrNull() ?: MeshProtocol.UNKNOWN_HOP
+            .filter { it.key.groupId == groupId && it.key.target != "PRESENCE" }
+            .filter { (key, hop) -> nowMs - (lastUpdated[key] ?: 0L) <= effectiveStaleMs(staleMs, hop) }
+            .minByOrNull { it.value }
+            ?.let { it.key.target to it.value }
     }
+
+    /** Minimum hop distance among currently-*fresh* SOS trackers for a group — i.e. "how far to the
+     *  nearest known active SOS." Previously the SOS display read the raw table directly, bypassing
+     *  the staleness check entirely — a stale reading could sit there and be shown as current. */
+    fun bestActiveSosHop(groupId: String): Int = bestActiveSos(groupId)?.second ?: MeshProtocol.UNKNOWN_HOP
 
     companion object {
         // See staleMs's doc above for the live-tested reasoning: one more reconnect-cooldown's

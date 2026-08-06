@@ -12,7 +12,7 @@ section is what's stale.
   radar-staleness fix, duplicate-connection-callback fix, Bluetooth off→on recovery fix. Full detail
   in `docs/DECISIONS.md` decisions 18-22.
 - **P2 (broadcast tier): both Tier-1 sim open questions resolved (decisions 23-25), AND production
-  wiring is now two slices deep (decisions 26-27, same day)** — deliberately narrow slices, same
+  wiring is now THREE slices deep (decisions 26-28, same day)** — deliberately narrow slices, same
   discipline as P1's own "SOS only first" phase. Sim summary: decision 23's 3-way question resolved
   as option (c) (sightings own-group-scoped, already true in production `BeaconRadio`); that
   dissolved decision 23's "D=2 boundary bug" but surfaced decision 24's finding (suppression could
@@ -31,19 +31,30 @@ section is what's stale.
   `RelayResponder.signatureCheckPasses` directly so Tier B positions get the exact same trust bar
   GATT positions do, not a weaker one. Deliberately single-hop only — no natural "relay" exists for
   a connectionless broadcast the way GATT store-and-forward has one; multi-hop position still rides
-  the existing GATT path, unchanged. Position and SOS-message broadcast beyond this remain
-  deliberately deferred, named explicitly (multi-hop position propagation, SOS hop-gradient/message).
-  323 tests, detekt clean, both variants compile/test/assemble (incl. `lintVitalRelease`) green —
-  **NOT hardware-confirmed**, same as this channel's Coded-PHY-only predecessor always was, now
-  broader still (ScanFilter/batching/position are all new and untested on real hardware).
+  the existing GATT path, unchanged. Production slice 3 (decision 28): **SOS hop-gradient**, closing
+  decision 26's other deferral — deliberately NOT done the way an earlier, reverted mechanism tried
+  (a rough, sosId-agnostic hop estimate mixed with exact per-SOS tracking, which is why the legacy
+  beacon's own `sosHop` field has sat unread since — confirmed by `grep`, not assumed). Fixed
+  correctly this time by keying on the REAL SOS id (new `HopTracker.bestActiveSos`) so a receiver
+  just adds another source to the SAME exact per-SOS key GATT flood-forward already uses — no
+  aggregation, no conflation, the old bug's actual cause. Required redesigning the wire format
+  (both position and SOS blocks now always length-prefixed, zero = absent) since two independently-
+  optional fields can't share the old "trailing bytes present or not" shape — a safe breaking change
+  given zero devices have ever run this format. Also caught and fixed a real bug before it shipped:
+  the position-ingestion early-return was silently skipping SOS handling whenever position was
+  absent. Full SOS message/mac/signature and multi-hop position propagation remain deliberately
+  deferred, named explicitly. 330 tests, detekt clean, both variants compile/test/assemble (incl.
+  `lintVitalRelease`) green — **NOT hardware-confirmed**, same as this channel's Coded-PHY-only
+  predecessor always was, now broader still (ScanFilter/batching/position/SOS-gradient are all new
+  and untested on real hardware).
 - **GitHub Pages + Releases are caught up**: `README.md`/`releases/` APK/GitHub Release all updated
   to v0.6.3-dev, pushed live at `https://karmaneggs.github.io/20.07/`. **Now stale** — decisions
-  23-27's work (source/docs + two real production features) has not had a version bump or APK/Pages
+  23-28's work (source/docs + three real production features) has not had a version bump or APK/Pages
   refresh yet. Due once this P2 work is ready to hand off for its own hardware smoke-test round, not
   before.
-- **Committed and pushed, on `main`, through `4886445`** (decision 27's position-broadcast slice).
-  Working tree clean as of this checkpoint. If you find uncommitted changes when resuming, they're
-  from a session after this one.
+- **Committed and pushed, on `main`** — check `git log origin/main..HEAD` for anything past decision
+  28's own commits if resuming mid-session. Working tree clean as of this checkpoint. If you find
+  uncommitted changes when resuming, they're from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
@@ -725,16 +736,39 @@ extended advertising has no natural "relay" the way GATT store-and-forward has o
 multi-hop position propagation over broadcast would need its own gossip design, out of scope here.
 The existing GATT `PositionSealed` relay is completely unaffected and still handles multi-hop.
 
+**Same day, production wiring's third slice (decision 28): SOS hop-gradient — closing decision 26's
+other deferral, correctly this time.** The naive approach (feed the legacy beacon's existing
+`sosHop` field into hop tracking) was exactly what an EARLIER, reverted mechanism already tried and
+broke: a rough, sosId-agnostic hop estimate sharing a key with exact TTL-derived per-SOS tracking,
+where `min()` let a stale rough reading leak through (decision 13's live-tested "frozen at 2 hops
+with 2 test phones" bug). Confirmed by `grep` that `beacon.sosHop` is written but genuinely never
+read by any receiver today — removed it from the Tier B format (legacy beacon's own copy stays
+untouched) and replaced it with `MeshProtocol.SosAlert(id, hop)`, keyed on the REAL SOS id via a new
+`HopTracker.bestActiveSos(groupId)` (split out of `bestActiveSosHop`, same staleness check, now also
+names which sosId). A receiver feeds this into `HopTracker.considerNeighborReport(groupId,
+activeSos.id, activeSos.hop, ...)` — just another source for the SAME exact per-SOS key GATT
+flood-forward already uses, composing via ordinary distance-vector relaxation instead of
+aggregating. The old bug was never "hop-gradient over broadcast is unsafe," it was conflating rough
+and exact measurements under one key — keying on the real id removes the conflation, not the
+feature. Carries id+hop only, deliberately — no message/mac/signature; the authenticated content
+still arrives over GATT once connected (already attempted eagerly for every heard device via the
+existing blind-carrier policy). Required redesigning the wire format (both position and SOS blocks
+now always length-prefixed, zero = absent, since two independently-optional fields can't share the
+old "trailing bytes present or not" shape) — a safe breaking change given zero devices have ever run
+this format. Also found and fixed a real bug before it shipped: the position-ingestion early return
+was silently skipping SOS handling whenever position was absent from a beacon.
+
 **No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
 note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
 comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
 Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
 measured — unaffected by any of the above. **Still not started**: multi-hop position propagation,
-SOS message/hop-gradient broadcast, the Tier 2/3 gates. 323 tests, detekt clean, both variants
-compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT
-hardware-confirmed** — this channel's Coded-PHY-only predecessor never had hardware to test on
-either; now broader still, since ScanFilter/report-delay-batching/position are all new and untested
-on real hardware this session.
+full SOS message/mac/signature broadcast, thumbnails/catalogue digests (§5.1's own Tier B payload
+list), the Tier 2/3 gates. 330 tests, detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** —
+this channel's Coded-PHY-only predecessor never had hardware to test on either; now broader still,
+since ScanFilter/report-delay-batching/position/SOS-gradient are all new and untested on real
+hardware this session.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
