@@ -20,6 +20,17 @@ package org.offlinemesh.app.ble
  * transmitting the moment sightings drop below the redundancy constant.
  *
  * [now] is injectable so backoff/reset timing is testable without waiting out real seconds.
+ *
+ * **[redundancyConstant] counts DISTINCT sources per window, not raw [onSighting] calls** — see
+ * decision 25 (`docs/DECISIONS.md`) for why this matters and isn't just a style choice: unlike
+ * RFC 6206's own peers (which self-limit to at most one transmission per interval by the same
+ * protocol), [BeaconRadio]'s advertising set — the actual sender this timer governs — stays
+ * continuously ON for an entire un-suppressed period once started (see [isSuppressed]'s own doc),
+ * so a real listener genuinely receives many separate packets from ONE present neighbor over the
+ * course of a single window. Counting raw receptions against [redundancyConstant] would make a
+ * single actively-broadcasting neighbor look "redundant" within seconds and pin suppression for as
+ * long as that one neighbor keeps going, regardless of how many total neighbors are actually
+ * present — the opposite of what this class exists to measure.
  */
 class TrickleTimer(
     private val minIntervalMs: Long,
@@ -29,14 +40,22 @@ class TrickleTimer(
 ) {
     private var intervalMs = minIntervalMs
     private var windowStart = now()
-    private var sightingsThisWindow = 0
+    private val sightingSourcesThisWindow = mutableSetOf<Any>()
     private var suppressed = false
 
     /** Call every time a same-purpose signal is heard from another device (e.g. a neighbor's own
      *  long-range beacon for the same group) — this is what lets [shouldTransmit] tell "I'm
-     *  redundant, others already have this covered" apart from "I'm the only one out here." */
-    fun onSighting() {
-        sightingsThisWindow++
+     *  redundant, others already have this covered" apart from "I'm the only one out here."
+     *  [sourceId] identifies WHICH device this sighting came from (e.g. the scanned BLE address) —
+     *  repeated calls with the same [sourceId] inside one window count once, matching
+     *  [redundancyConstant]'s "how many DISTINCT sources" intent (see this class's own doc). The
+     *  identity only needs to stay stable for the life of one window (tens of seconds to low
+     *  minutes) — far shorter than BLE address rotation (~15 min), so the raw scanned address is a
+     *  fine [sourceId] here even though longer-lived state elsewhere in this app deliberately
+     *  avoids keying on it (decision 15's peer-identity work is about state that must survive
+     *  rotation; this is not that). */
+    fun onSighting(sourceId: Any) {
+        sightingSourcesThisWindow.add(sourceId)
     }
 
     /** True if this device should transmit right now. Only actually decides (and rolls over to
@@ -49,10 +68,10 @@ class TrickleTimer(
      *  level-style query a continuously-running radio should poll instead. */
     fun shouldTransmit(): Boolean {
         if (now() - windowStart < intervalMs) return false
-        val fewEnoughSightings = sightingsThisWindow < redundancyConstant
+        val fewEnoughSightings = sightingSourcesThisWindow.size < redundancyConstant
         suppressed = !fewEnoughSightings
         windowStart = now()
-        sightingsThisWindow = 0
+        sightingSourcesThisWindow.clear()
         intervalMs = (intervalMs * 2).coerceAtMost(maxIntervalMs)
         return fewEnoughSightings
     }
@@ -75,7 +94,7 @@ class TrickleTimer(
     fun reset() {
         intervalMs = minIntervalMs
         windowStart = now()
-        sightingsThisWindow = 0
+        sightingSourcesThisWindow.clear()
         suppressed = false
     }
 }

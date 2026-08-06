@@ -10,15 +10,21 @@ import org.junit.Test
  * BeaconRadio tuning (min 5s / max 60s / redundancy 2), same "no reimplementation" discipline as
  * every other sim engine in this package.
  *
- * Rewritten per decision 24 (`docs/DECISIONS.md`): [BroadcastTierEngine.degreeAt] must be
- * **own-group degree** (0 to group-size-minus-one, so 0-7 per PLAN-v2.md §9.1's 3-8 person groups),
- * not swarm/stranger density — matching [org.offlinemesh.app.ble.BeaconRadio]'s actual
- * `matchTable`-gated `onSighting()` call. The original version of this file fed S3's literal
- * "D 300 -> 2" as the sighting count, which is a swarm-density number PLAN-v2.md §6.3 never meant
- * as a group-degree number, and which produced a now-superseded "boundary bug" finding (decision 23)
- * that decision 24 explains away rather than fixes — see that decision for the reasoning. Swarm
- * size does not appear anywhere below because it is provably irrelevant to this specific mechanism;
- * `swarm size irrelevance` proves that directly.
+ * Rewritten per decisions 24-25 (`docs/DECISIONS.md`):
+ *
+ * - Decision 24: [BroadcastTierEngine.degreeAt] must be **own-group degree** (0 to
+ *   group-size-minus-one, so 0-7 per PLAN-v2.md §9.1's 3-8 person groups), not swarm/stranger
+ *   density — matching [org.offlinemesh.app.ble.BeaconRadio]'s actual `matchTable`-gated
+ *   `onSighting()` call. The original version of this file fed S3's literal "D 300 -> 2" as the
+ *   sighting count, conflating swarm density with group degree, and produced a now-superseded
+ *   "boundary bug" finding (decision 23) that decision 24 explains away rather than fixes. Swarm
+ *   size does not appear anywhere below because it is provably irrelevant to this mechanism;
+ *   `swarm size irrelevant to own-group Trickle behaviour` proves that directly.
+ * - Decision 25: the real root cause behind decision 24's OWN still-open finding (a single held
+ *   neighbour could pin suppression indefinitely) was [org.offlinemesh.app.ble.TrickleTimer]
+ *   itself counting raw `onSighting()` calls instead of distinct sources — fixed there, not
+ *   worked around here. `last buddy remaining (degree 1)` now asserts success instead of
+ *   documenting a gap.
  */
 class P2GateTest {
 
@@ -119,31 +125,17 @@ class P2GateTest {
     }
 
     @Test
-    fun `last buddy remaining (degree 1)- honest negative finding, sighting-cadence model can pin suppression`() {
-        // Expected on first read: sightingsThisWindow < redundancyConstant is a strict less-than at
-        // 2, so degree=1 alone "should" already read as few enough. It does not - and the reason is
-        // a genuine, previously-untested limitation of BroadcastTierEngine's sighting model, not a
-        // production bug. The engine injects `degreeAt(...)` sightings once every
-        // `sightingIntervalMs` (default 5s, "the fastest any real neighbour could plausibly
-        // re-announce" - see BroadcastTierEngine's class doc, unchanged from decision 23's own fix).
-        // That model implicitly assumes every neighbour keeps transmitting at that fastest possible
-        // rate FOREVER, regardless of whether that neighbour's own TrickleTimer has itself backed
-        // off. Once this node's own window has backed off to maxIntervalMs (60s), a SINGLE such
-        // neighbour contributes 60s/5s = 12 sightings per window - 6x redundancyConstant - so this
-        // node reads "still redundant" indefinitely, no matter how long degree stays at exactly 1.
-        // Only degree=0 (the previous test) is unambiguous under this model, because 0 sightings can
-        // never exceed any positive constant regardless of cadence.
-        //
-        // This was never exercised before this session because P2GateTest's original version (pre
-        // decision 24) only ever tested degree=0 and degree=2-as-swarm-density; nothing previously
-        // tried an explicit, held, low-nonzero own-group degree. Genuinely open, not fixed here:
-        // fixing it properly needs the sighting rate to depend on the NEIGHBOUR's own suppression
-        // state too (a suppressed neighbour's advertising set is OFF - see TrickleTimer.isSuppressed's
-        // doc - so it should contribute ~0 sightings, not a constant stream), which means coupling
-        // multiple real TrickleTimer instances together rather than driving one node off an
-        // exogenous degree signal. That is squarely part of the still-not-started "full presence/
-        // position/SOS/hop-gradient payload model" (PLAN-v2.md P2 status), not a quick fix here -
-        // see decision 24 for the write-up and the open question this leaves for P2 production wiring.
+    fun `last buddy remaining (degree 1)- fails open cleanly (decision 25 fix)`() {
+        // Previously a documented gap (decision 24): BroadcastTierEngine re-injected `degree`
+        // sightings on every sightingIntervalMs tick with no source identity, so a single held
+        // neighbour accumulated far more than 1 sighting per window once it backed off to
+        // maxIntervalMs, pinning suppression indefinitely at ANY nonzero degree. Root cause and fix
+        // are in TrickleTimer itself, not just this harness: onSighting() now takes a sourceId and
+        // dedupes within a window (docs/DECISIONS.md decision 25) - re-injecting the SAME synthetic
+        // "neighbor-0" id every tick no longer inflates the count past 1, matching what
+        // redundancyConstant was always meant to compare against ("2 distinct neighbours already
+        // cover this", per TrickleTimerTest's own long-standing comments). This test now asserts the
+        // fix holds at the exact degree that used to expose the bug.
         val clock = SimClock()
         val metrics = SimMetrics()
         val node = BroadcastTierNode("n1", minIntervalMs, maxIntervalMs, redundancyConstant, clock::now)
@@ -151,17 +143,8 @@ class P2GateTest {
 
         engine.run(runEndMs)
 
-        val failedOpen = runCatching {
-            Invariants.checkFailOpen(
-                "n1", metrics, sinceMs = transitionEndMs, nowMs = runEndMs, maxSilenceMs = maxIntervalMs + 1_000L,
-            )
-        }.isFailure
-        assertTrue(
-            "expected I5 to currently FAIL at a held own-group degree of 1 (the sighting-cadence " +
-                "modelling gap documented above) - if this now passes, the engine's sighting model " +
-                "has been made degree-of-the-neighbour-aware and this test should be rewritten to " +
-                "assert fail-open success instead of documenting the gap",
-            failedOpen,
+        Invariants.checkFailOpen(
+            "n1", metrics, sinceMs = transitionEndMs, nowMs = runEndMs, maxSilenceMs = maxIntervalMs + 1_000L,
         )
     }
 

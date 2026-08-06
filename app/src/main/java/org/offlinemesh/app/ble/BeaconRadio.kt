@@ -612,7 +612,10 @@ class BeaconRadio(
             if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
             val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
             hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
-            longRangeTrickle.onSighting()
+            // Scoped to within ONE Trickle window only (tens of seconds) - see TrickleTimer.onSighting's
+            // own doc for why the raw scanned address is fine here despite decision 15 moving longer-
+            // lived peer state off it (decision 25, docs/DECISIONS.md).
+            longRangeTrickle.onSighting(result.device.address)
         }
         override fun onScanFailed(errorCode: Int) {
             Log.w(TAG, "long-range scan failed: errorCode=$errorCode")

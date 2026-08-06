@@ -1069,3 +1069,74 @@ explicitly; its actual injection logic is unchanged (that's exactly what the new
 about). Decision 23's boundary-bug framing is superseded by this entry, not merely amended — read
 this one first if the two disagree.
 
+## 25. The root cause behind decision 24's open finding: `TrickleTimer` counted packets, not neighbours
+
+2026-08-06, same session as decision 24. User's instruction: dig into the open finding rather than
+leave it flagged. That digging found the bug was never really about sim cadence modelling — it's a
+real mismatch in `TrickleTimer` itself, live in production code, not a sim-only artefact.
+
+**The actual mechanism.** `TrickleTimer.onSighting()` took no argument and simply incremented a
+counter (`sightingsThisWindow++`), compared against `redundancyConstant` at window close. RFC 6206's
+own peers self-limit to at most one transmission per interval, so counting raw receptions is
+equivalent to counting distinct neighbours *in that protocol*. Ours don't: `BeaconRadio`'s
+long-range channel drives its advertising set through `isSuppressed()`'s **level-style** read (see
+that method's own doc) — once "not suppressed," the set stays continuously ON for the whole period,
+re-transmitting at `AdvertisingSetParameters.INTERVAL_HIGH` (1000 ms) the entire time, not once.
+`longRangeScanCallback.onScanResult` — with no `ScanSettings` report-delay batching or match-type
+filtering configured — fires once per received advertisement, so a single continuously-present
+neighbour genuinely generates **dozens of `onSighting()` calls per minute**, not one. Confirmed by
+grepping the actual `ScanSettings`/`AdvertisingSetParameters` configuration, not assumed.
+
+**Consequence, unnoticed until decision 24's own test exercised it:** at `redundancyConstant = 2`,
+a SINGLE actively-broadcasting neighbour trips the "already covered" threshold within the first
+couple of seconds and then holds it — the timer stays suppressed for as long as that one neighbour
+keeps transmitting, regardless of whether 1 or 100 neighbours are actually present. `TrickleTimer`'s
+whole purpose — "back off only when genuinely redundant, fail open otherwise" — was quietly not
+being measured at all; the real gate was closer to "has anyone at all been heard from recently,"
+which contradicts §5.4/§5.5's entire density-driven design and, worse, would have undermined P2's
+central acceptance claim (I5 fail-open) the moment production wiring actually started depending on
+sustained multi-neighbour presence rather than a single connection.
+
+**The comments in `TrickleTimerTest.kt` already said what was intended** — `t.onSighting();
+t.onSighting() // 2 neighbors already covering this` — the implementation just never enforced that
+each call represented a *distinct* neighbour. This was a latent bug against the class's own stated
+intent from the start, not a regression.
+
+**Fix, in production code, not the sim:** `TrickleTimer.onSighting()` now takes a `sourceId: Any`
+and dedupes within a window via a `MutableSet<Any>`, cleared on each window close (same place
+`sightingsThisWindow` was reset). `redundancyConstant` now genuinely compares against *distinct
+sources heard this window*, matching the class's own doc and its test comments' original intent.
+`BeaconRadio`'s call site now passes `result.device.address`. This reopens the exact identity
+question decision 15/P0b already answered for *long-lived* peer state — deliberately not reused
+here: a Trickle window is tens of seconds to low minutes, BLE address rotation is ~15 minutes, so
+the raw scanned address is a perfectly adequate, much simpler key for a dedup scope this short-lived.
+Using the stable per-group Ed25519 identity here would need a signed field inside the beacon payload
+that the current group-presence beacon doesn't carry (it only carries a *group*-level rotating
+handle, not a per-sender one) — out of scope for this fix, and unnecessary for what it's fixing.
+
+**This fully resolves decision 24's open question**, and does so more simply than the coupled
+multi-node engine that question's own text anticipated needing: once sightings are deduped by
+source, `BroadcastTierEngine`'s existing single-node, exogenous-`degreeAt` model becomes correct on
+its own — injecting the same `degree` synthetic source ids on every `sightingIntervalMs` tick no
+longer inflates the count, because re-adding an id already in the set is a no-op. No multi-node
+coupling was needed after all; the bug was never really about modelling neighbour-side suppression
+state, it was about not deduplicating sender identity at all. `BroadcastTierEngine.kt` updated to
+inject distinct `"neighbor-$i"` ids; `P2GateTest`'s `last buddy remaining (degree 1)` now asserts
+fail-open success instead of documenting a gap. `TrickleTimerTest.kt` updated to pass source ids on
+every call (matching what its comments always described) plus one new test proving the dedup
+directly: 50 calls with the same source id count as 1.
+
+**Consequence for `PLAN-v2.md`'s P2 gating:** decision 23's original blocker (an unresolved 3-way
+question) and decision 24's follow-on blocker (an unresolved sim-fidelity question) are BOTH now
+resolved. The only remaining gate on P2 production wiring is the sustained multi-hour 3-phone
+session P1+P3 are still waiting on (§6.4/decision 22) — not a new P2-specific one.
+
+310 tests (up from 309, +1 — the new dedup-proof test in `TrickleTimerTest.kt`), detekt clean, both
+variants green. **Production code touched this time**, unlike decisions 23/24: `TrickleTimer.kt`
+(`onSighting` signature + internal storage) and `BeaconRadio.kt` (one call site). The long-range
+channel this affects is currently circuit-broken on the only hardware tested so far (100% advertise
+failure, self-disables after 3 attempts — see `NEXT_STEPS.md`'s open decisions), so this fix has not
+yet been, and cannot yet be, hardware-confirmed on this project's own test devices; it is
+compile/test-verified only. Recorded here rather than silently folded into decision 24 because it
+changes shipped production code, which decisions 23 and 24 explicitly did not.
+

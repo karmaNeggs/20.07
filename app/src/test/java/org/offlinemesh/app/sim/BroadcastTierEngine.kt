@@ -45,17 +45,27 @@ data class BroadcastTierTuning(
  * how many strangers are around. [degreeAt] lets a scenario script that own-group degree changing
  * over time.
  *
- * Sighting model, and a real bug this caught in the FIRST version of this engine: [TrickleTimer]
- * expects [TrickleTimer.onSighting] called once per ACTUAL neighbour broadcast heard, accumulated
- * over however long the current window happens to be open — it is not itself time-aware. A naive
- * "call onSighting() `degree` times on every poll tick" (this engine's first draft) inflates the
- * count by the poll/window ratio, not just degree: at a 1 s poll and a 60 s backed-off window that
- * is up to 60 injections of `degree` sightings each in a SINGLE window, so even an isolated D=2
- * node registers ~120 sightings — hopelessly over threshold, permanently "suppressed" regardless
- * of real degree. Fixed here by injecting sightings only once every [sightingIntervalMs] (default
- * [TrickleTimer]'s own `minIntervalMs`, the fastest any real neighbour could plausibly re-announce)
- * and capping the count per injection at `degree.coerceAtMost(sightingCap)` rather than raw degree
- * — a crowd should read as "clearly over the redundancy constant," not as an unbounded number.
+ * Sighting model, and TWO real bugs this caught across two sessions (decisions 23 and 25,
+ * `docs/DECISIONS.md`) — both in the harness, neither in [TrickleTimer] itself:
+ *
+ * 1. (decision 23) [TrickleTimer.onSighting] must be called once per ACTUAL neighbour broadcast
+ *    heard, accumulated over however long the current window happens to be open — it is not itself
+ *    time-aware. This engine's first draft called it `degree` times on every 1 s poll tick, which
+ *    inflated the count by the poll/window ratio. Fixed by injecting only once every
+ *    [sightingIntervalMs] (default [TrickleTimer]'s own `minIntervalMs`, the fastest any real
+ *    neighbour could plausibly re-announce) and capping the count per injection at
+ *    `degree.coerceAtMost(sightingCap)`.
+ * 2. (decision 25) [TrickleTimer.onSighting] takes a `sourceId` and dedupes within a window — it
+ *    counts DISTINCT sources, not raw calls, because a real neighbour's continuously-running
+ *    advertising set generates many packets from the same device per window, not one. This engine
+ *    must pass a distinct, stable-within-the-window id per simulated neighbour (`"neighbor-$i"` for
+ *    `i` in `0 until degree`) rather than an untagged call — re-injecting the SAME `degree` ids on
+ *    every [sightingIntervalMs] tick is exactly what makes fix #1's periodic re-injection safe now:
+ *    the set simply stays at `degree` distinct entries no matter how many times each tick repeats
+ *    them, so [sightingIntervalMs]/[sightingCap] no longer need to be tuned to avoid inflating the
+ *    count the way decision 23's fix did — they now only control how quickly a newly-arrived
+ *    neighbour's id shows up when [degreeAt] changes mid-window.
+ *
  * Uses [TrickleTimer.isSuppressed]'s level-style read, matching how a continuously-running BLE
  * advertising set is actually driven in production (see that method's own doc, and `BeaconRadio`'s
  * long-range channel) — not [TrickleTimer.shouldTransmit]'s one-shot pulse, which fits a per-packet
@@ -78,7 +88,8 @@ class BroadcastTierEngine(
             for (node in nodes) {
                 val last = lastSightingAt[node.id]
                 if (last == null || t - last >= tuning.sightingIntervalMs) {
-                    repeat(degreeAt(node.id, t).coerceAtMost(tuning.sightingCap)) { node.trickle.onSighting() }
+                    val degree = degreeAt(node.id, t).coerceAtMost(tuning.sightingCap)
+                    repeat(degree) { i -> node.trickle.onSighting("neighbor-$i") }
                     lastSightingAt[node.id] = t
                 }
                 node.trickle.shouldTransmit() // lets the window advance/decide on its own cadence
