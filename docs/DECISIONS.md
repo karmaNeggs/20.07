@@ -1446,3 +1446,100 @@ as decisions 26-28 in full.
 logged, named above); multi-hop position propagation over broadcast; thumbnails and catalogue
 digests. Tier 2/3 hardware gates remain not started for all of P2.
 
+## 30. Fourth live test (v0.7.0-dev, 3 phones): two real bugs found and fixed, one report explained, one non-bug ruled out
+
+First hardware round on decisions 23-29's Tier B work (2026-08-06), 3-phone setup: phones 1 and 3 in
+the same group, phone 2 in no group at all (pure blind relay). Four things reported; diagnosed by
+reading code (`BeaconRadio`/`HopTracker`/`PositionTracker`/`RelayResponder`) and cross-referencing
+`DiagnosticsLog` exports, not by guessing.
+
+**Real bug, fixed: presence hop count read 3-4 between two phones that should never see more than
+1-2.** The user's own follow-up detail — phone 2 held no group key and was doing nothing but
+relaying, yet 1 and 3 still showed each other at 4 hops — ruled out `PositionTracker`'s already-
+understood `maxPositionRelayHops` ceiling (that only bounds position, and needs several distinct
+devices to reach 4 anyway) and pointed at presence instead. Root cause, found in this session's own
+decision 26 code: `BeaconRadio.handleResult` called `HopTracker.considerNeighborReport` TWICE per
+scan result with the identical `sourceId` — once for the direct 1-hop hearing, once for the
+propagated `presenceHop + 1` value. `HopTracker.updateHop`'s ownership rule (a worse reading is
+accepted over the current one only from the SAME source that currently owns the key — legitimate for
+"my route degraded," see decision 22's own note on this exact mechanism) doesn't distinguish "the
+same peer reporting again later" from "the same peer's two calls in one event," so the second,
+worse call could immediately overwrite the first, better one it had just set. **Fix:** merge the two
+candidate hop values (`minOf(DIRECT_HEARING_HOP, propagatedHop)`) before calling
+`considerDirectHop` once, not twice, per scan result — same output when only one value would have
+won anyway, but no longer lets one event's second call undercut its own first. Two regression tests
+added directly at the `HopTracker` level (one reproducing the bug pattern, one proving the merge
+fixes it) rather than only at `BeaconRadio`'s level, since the vulnerable rule lives in
+`HopTracker.updateHop`, not in the caller.
+
+**Real bug, fixed: a deleted group's last-known member positions kept showing on the radar for a
+long time afterward.** "Delete a group member" maps to this app's only deletion primitive —
+`GroupChatScreen`'s "Delete group" (there is no per-member kick by design; a group is a shared key,
+not individually revocable membership) — which calls `GroupRepository.dismantleGroup`. That method
+correctly wipes evidence/SOS/nicknames/peerKeys/group/key from Room, but has no way to reach
+`PositionTracker`: it's in-memory-only, owned by `MeshService` in the ble layer, a different package
+`GroupRepository`'s data layer was never wired to. Without a fix, a dismantled group's positions sat
+in the table until their own ordinary staleness window expired on its own (180s, plus up to 45s per
+hop — see `PositionTracker`'s class doc) — which reads as "stale position" exactly as reported, even
+though nothing was actually stale about the mechanism, just orphaned. **Fix, two parts:** an
+immediate `PositionTracker.clearForGroup(groupId)` call added at the delete-group dialog's confirm
+button in `GroupChatScreen`, alongside the existing `dismantleGroup` call; and a periodic
+`PositionTracker.pruneOrphaned(activeGroupIds)` safety net added to `MeshService.startPruning`'s
+existing sweep loop (same shape as `GroupRepository.sweepOrphanKeys`), which also catches automatic
+`expireGroups()` dismantling — a path with no single call site to hook an immediate clear into.
+
+**Real gap, fixed: a nickname set after a P3 persistent link was already open never reached that
+peer.** Traced by reading code, not logs — `DiagnosticsLog` deliberately never records nickname/
+message content, so this needed tracing from `GroupChatScreen`'s UI fallback (raw id shown when no
+nickname was known) upstream through storage (fine) to the actual gap: nickname content was only
+ever pushed via `framesToPushOnConnect`'s once-per-connection catalog-filter exchange, never via the
+periodic `refreshFramesToPush` decision 20 already built for presence/position specifically because
+P3 links can now stay open for minutes, not seconds. This exact gap was pre-flagged in decision 18's
+own text ("deferred, same mechanical pattern") and sat unaddressed until this report reproduced it
+live. **Fix:** `RelayResponder.presenceAndPositionFrames` (the private function backing
+`refreshFramesToPush`) now also pushes `relay.nicknamesForGroup(g.id)` per active group, unconditionally
+every refresh rather than tracked for whether it changed — this app's groups are small (3-8 people,
+PLAN-v2.md §5.5), so the cost of pushing unconditionally is bounded and not worth a change-tracking
+mechanism. No dedicated new test: `refreshFramesToPush`'s per-group loop calls `GroupRepository.
+getGroupKey`, which touches Android Keystore-backed `EncryptedSharedPreferences` — already documented
+as unavailable under Robolectric (`RelayEngineTest`'s and `RelayResponderTest`'s own class docs both
+call this out and design their coverage around it) — so this function has never had integration-level
+test coverage for ANY of its frames, not just nicknames. The change itself reuses `relay.
+nicknamesForGroup`/`MeshFrameCodec.encodeNickname` verbatim from the already-tested
+`framesToPushOnConnect` path (same call, same line, added to a second call site) — full suite still
+342 tests, detekt clean, both variants compile/test/assemble green.
+
+**Reported, explained, not a bug: position sometimes read 3-4 hops, "should be maximum 2."** Isolated
+via `DiagnosticsLog` (grepping `member=true` SOS senders to separate the real 3-phone group's traffic
+from other nearby phones' blind-relay traffic passing through) — the extra hop count came from
+devices outside the 3-phone group relaying position for each other, combined with
+`maxPositionRelayHops = 4`'s existing, deliberate ceiling (PLAN-v2.md's own design cap on how far a
+position is allowed to propagate). Correct behavior for a mesh with more than 3 devices in range,
+not a defect in this 3-phone test. No code change.
+
+**Reported, not investigated further this pass: reconnection after a disconnect takes a while on
+radar before it "eventually works well."** In the user's own words, this already resolves correctly
+— read as within the existing, deliberate reconnect-cooldown/backstop timing P3 already documents
+(decisions 19-20), not a new finding. Left alone; revisit only if a future round reports it as
+broken rather than just slow.
+
+**UI polish, also from this round's notes ("contrast/brightness of grays and greens needs
+increasing... more whiter... in radar more green, more luminiscent, bright... dots blink well, could
+be a bit sharper"):** `Theme.kt`'s `DarkOnSurfaceMuted` brightened a second time (0xA3ADB8 ->
+0xC3CCD4) and the app-wide reserved `Safe` green brightened (0x34D399 -> 0x6EE7B7, Tailwind
+emerald-300) — a single shared constant, so the boost lifts every use of it, not just the radar.
+`RadarView.kt`'s own green elements (background wash, sweep, glow rings, label, crosshair, cardinal
+ticks) all raised a second time on top of an earlier pass. Dot sharpness: blink cadence/frequency
+left untouched per the "blink well" feedback, but the halo tightened (+6f/0.25 alpha -> +4f/0.18
+alpha) and the core's alpha floor raised (0.5 -> `DOT_BLINK_MIN_ALPHA` 0.65) so the pulse dips softer
+without ever reading as washed-out, leaving the core as the crisp edge the eye locks onto.
+
+342 tests (up from 337: +5 net, two new `HopTrackerTest` cases, three new `PositionTrackerTest`
+cases, no new `RelayResponderTest` case for the reason given above). detekt clean, both variants
+compile/test/assemble green. **Production code touched:** `BeaconRadio.kt` (presence-hop merge
+fix), `PositionTracker.kt` (`clearForGroup`/`pruneOrphaned`), `GroupChatScreen.kt` (wires
+`clearForGroup` into the delete-group flow), `MeshService.kt` (wires `pruneOrphaned` into the
+existing pruning loop), `RelayResponder.kt` (nicknames added to periodic refresh), `Theme.kt`/
+`RadarView.kt` (contrast/brightness/sharpness). **These fixes are NOT yet hardware-confirmed** — the
+bugs they address were; the fixes themselves are new this pass and need their own live round.
+

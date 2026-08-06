@@ -182,6 +182,10 @@ private const val STALE_FADE_START_SECONDS = 30f
 private const val STALE_FADE_END_SECONDS = 180f
 private const val STALE_FADE_MIN_ALPHA = 0.2f
 
+// A blinking dot's alpha never dips below this floor (live feedback 2026-08-06: blink cadence was
+// fine, but the dip on each cycle read as too soft — see the dot-drawing loop below).
+private const val DOT_BLINK_MIN_ALPHA = 0.65f
+
 private fun ringScaleFor(farthestMeters: Float): Int =
     ringScaleLadder.firstOrNull { it >= farthestMeters } ?: ringScaleLadder.last()
 
@@ -216,12 +220,13 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
             // map linearly onto that same 0–360° span, so 0.5/0.75/1.0 land exactly on those three
             // points — the two ends (180°/9-o'clock and 360°/3-o'clock) stay fully transparent, only
             // the peak at 270°/straight-ahead carries any color. Same green as everything else on the
-            // radar, peak alpha 0.16 (doubled from an earlier 0.08 — still a background hint, not
-            // something that competes with ring lines or dot colors for attention).
+            // radar, peak alpha 0.26 (0.08 -> 0.16 -> this, live feedback 2026-08-06 wanted the
+            // radar reading as more green/luminous overall — still a background hint, not something
+            // that competes with ring lines or dot colors for attention).
             drawArc(
                 brush = Brush.sweepGradient(
                     0.5f to Color.Transparent,
-                    0.75f to AppColors.Safe.copy(alpha = 0.16f),
+                    0.75f to AppColors.Safe.copy(alpha = 0.26f),
                     1.0f to Color.Transparent,
                     center = center
                 ),
@@ -236,7 +241,7 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                     brush = Brush.sweepGradient(
                         0f to Color.Transparent,
                         0.85f to Color.Transparent,
-                        1f to AppColors.Safe.copy(alpha = 0.16f),
+                        1f to AppColors.Safe.copy(alpha = 0.26f),
                         center = center
                     ),
                     startAngle = 0f, sweepAngle = 360f, useCenter = true,
@@ -252,14 +257,17 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
             val labelAngleRad = Math.toRadians((45 - 90).toDouble())
             for (i in 1..4) {
                 val r = maxRadius * i / 4
-                // Alphas raised from an original 0.06/0.35 (fine in a dim room, close to invisible
-                // in direct sun or screen glare) — brighter still stays a background hint, not
-                // something that competes with dot colors, which sit well above these.
+                // Alphas raised twice now: an original 0.06/0.35 (close to invisible in direct sun
+                // or screen glare), then 0.14/0.5, then this (live feedback 2026-08-06 wanted more
+                // green, more luminous specifically on the radar) — brighter still stays a
+                // background hint, not something that competes with dot colors, which sit well
+                // above these.
                 drawCircle(
-                    color = AppColors.Safe.copy(alpha = 0.14f), radius = r, center = center, style = Stroke(width = 7f)
+                    color = AppColors.Safe.copy(alpha = 0.24f), radius = r, center = center, style = Stroke(width = 7f)
                 )
                 drawCircle(
-                    color = AppColors.Safe.copy(alpha = 0.5f), radius = r, center = center, style = Stroke(width = 1.4f)
+                    color = AppColors.Safe.copy(alpha = 0.68f), radius = r, center = center,
+                    style = Stroke(width = 1.4f)
                 )
             }
             run {
@@ -269,18 +277,18 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                     textMeasurer = textMeasurer,
                     text = "${maxDistance.toInt()}m",
                     topLeft = Offset(lx + 3f, ly - 12f),
-                    style = TextStyle(color = AppColors.Safe.copy(alpha = 0.6f), fontSize = 9.sp)
+                    style = TextStyle(color = AppColors.Safe.copy(alpha = 0.78f), fontSize = 9.sp)
                 )
             }
 
-            // Center crosshair — alpha raised from 0.25 for the same outdoor-legibility reason as
-            // the rings above.
+            // Center crosshair — alpha raised twice now: 0.25, then 0.4, then this, same
+            // outdoor-legibility / "more luminous green" reasoning as the rings above.
             drawLine(
-                AppColors.Safe.copy(alpha = 0.4f),
+                AppColors.Safe.copy(alpha = 0.55f),
                 Offset(center.x - maxRadius, center.y), Offset(center.x + maxRadius, center.y), strokeWidth = 1f
             )
             drawLine(
-                AppColors.Safe.copy(alpha = 0.4f),
+                AppColors.Safe.copy(alpha = 0.55f),
                 Offset(center.x, center.y - maxRadius), Offset(center.x, center.y + maxRadius), strokeWidth = 1f
             )
 
@@ -289,7 +297,7 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                 val rad = Math.toRadians((deg - 90).toDouble())
                 val inner = Offset(center.x + (maxRadius - 8f) * cos(rad).toFloat(), center.y + (maxRadius - 8f) * sin(rad).toFloat())
                 val outer = Offset(center.x + (maxRadius + 6f) * cos(rad).toFloat(), center.y + (maxRadius + 6f) * sin(rad).toFloat())
-                drawLine(AppColors.Safe.copy(alpha = 0.6f), inner, outer, strokeWidth = 2f)
+                drawLine(AppColors.Safe.copy(alpha = 0.75f), inner, outer, strokeWidth = 2f)
             }
 
             // "you" marker — deliberately neutral (theme's own primary content color), not red or
@@ -344,7 +352,9 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                 // Closer = faster blink: ~2.5Hz when right next to you, ~0.4Hz far out.
                 val freqHz = (1.0 / (0.3 + dot.distanceMeters / 40.0)).coerceIn(0.4, 2.5)
                 val phase = (sin(2 * PI * freqHz * elapsedMs / 1000.0).toFloat() + 1f) / 2f
-                val alpha = 0.5f + 0.5f * phase
+                // Alpha floor raised from 0.5 to DOT_BLINK_MIN_ALPHA — the core never gets dim
+                // enough to look washed out, only the halo below carries the softer look.
+                val alpha = DOT_BLINK_MIN_ALPHA + (1f - DOT_BLINK_MIN_ALPHA) * phase
                 val radius = 7f + 5f * phase
                 // A position this stale isn't necessarily wrong, but it's not "live" either — fade
                 // it down rather than let it read exactly as fresh as one just received. Full
@@ -355,8 +365,11 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                     (STALE_FADE_END_SECONDS - STALE_FADE_START_SECONDS)).coerceIn(0f, 1f)
                 val staleFade = 1f - staleProgress * (1f - STALE_FADE_MIN_ALPHA)
 
+                // Halo tightened from +6f/0.25 alpha (live feedback 2026-08-06: dots wanted to read
+                // "a bit sharper") — a smaller, fainter glow leaves the core circle below as the
+                // crisp edge the eye actually locks onto, instead of the blur dominating it.
                 drawCircle(
-                    color = dot.color.copy(alpha = 0.25f * staleFade), radius = radius + 6f, center = Offset(x, y)
+                    color = dot.color.copy(alpha = 0.18f * staleFade), radius = radius + 4f, center = Offset(x, y)
                 )
                 drawCircle(color = dot.color.copy(alpha = alpha * staleFade), radius = radius, center = Offset(x, y))
             }

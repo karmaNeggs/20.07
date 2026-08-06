@@ -799,12 +799,27 @@ class BeaconRadio(
         broadcastTierRecentAddresses[result.device.address] = System.currentTimeMillis()
         if (beacon.type != MeshProtocol.ADV_TYPE_GROUP) return
         val groupId = matchTable[beacon.rotatingGroupId.toHex()] ?: return
-        // Direct hearing: the broadcaster is by definition 1 hop away — same shape as scanCallback.
-        hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
-        // Propagated multi-hop gradient: the broadcaster's OWN best-known presence distance, +1 —
-        // see MeshProtocol.encodeBroadcastTierBeacon's doc for why this composes correctly for
-        // presence specifically (one target per group).
-        hopTracker.considerNeighborReport(groupId, "PRESENCE", beacon.presenceHop, result.device.address)
+        // Best of two candidates for MY distance to presence via this broadcaster — direct hearing
+        // (I hear them, so they're 1 hop from me) vs. their own propagated best-known distance
+        // (+1) — combined into ONE call, not two. Decision 30 (docs/DECISIONS.md, hardware-
+        // confirmed 2026-08-06): an earlier version called considerNeighborReport TWICE here, same
+        // groupId/target/sourceId, once for each candidate. HopTracker.updateHop's ownership rule
+        // (a worse reading is accepted from whichever source currently "owns" the value, so that
+        // source can legitimately revise it upward LATER) doesn't distinguish "this source
+        // reporting a change over time" from "this call's own sibling call a moment ago" — the
+        // first call claims ownership, so the second call's ownedBySameSource check passes
+        // automatically and lets a worse propagated value silently overwrite the correct direct
+        // value it should have been COMPARED against, not authorized to replace. Self-reinforcing
+        // across the mesh (a corrupted value gets rebroadcast, corrupting whoever hears it next) —
+        // confirmed live: two directly-adjacent phones climbing to "4 hops away" over a session.
+        val propagatedHop = if (beacon.presenceHop < MeshProtocol.UNKNOWN_HOP) {
+            (beacon.presenceHop + 1).coerceAtMost(MeshProtocol.UNKNOWN_HOP - 1)
+        } else {
+            MeshProtocol.UNKNOWN_HOP
+        }
+        hopTracker.considerDirectHop(
+            groupId, "PRESENCE", minOf(DIRECT_HEARING_HOP, propagatedHop), result.device.address,
+        )
         // Same shape, real per-SOS-id key (decision 28) — just another source for the SAME exact
         // key GATT flood-forward already uses, composing via ordinary distance-vector relaxation.
         // Only ever set when activeSos was actually encoded (see encodeBroadcastTierBeacon's own
@@ -899,6 +914,10 @@ class BeaconRadio(
         // advertising-data update (cheap, but not free) on top of the AES-GCM reseal itself.
         internal const val BROADCAST_TIER_POSITION_REFRESH_MS = 20_000L
         private const val MILLIS_PER_SECOND = 1000L
+
+        // See handleResult's own doc (decision 30) for why this is computed once and combined with
+        // the propagated candidate, rather than each being fed to HopTracker independently.
+        private const val DIRECT_HEARING_HOP = 1
 
         /** `internal`, pure — same testability shape as [roundRobinDwellMs]. Returns the
          *  [ScanSettings.setReportDelay] value to use for the current measured [degree] of distinct

@@ -354,6 +354,15 @@ class RelayResponder(
                 )
             }
             frames += positionFramesToPush(g.id, toPeer)
+            // Decision 30 (docs/DECISIONS.md, hardware-confirmed 2026-08-06): nickname content was
+            // ONLY ever pushed via framesToPushOnConnect's once-per-connection catalog-filter
+            // exchange — never refreshed on an already-open link the way presence/position were in
+            // decision 20. A nickname set after a P3 persistent link had already connected could
+            // never reach that peer until the link happened to drop and reconnect, which — same as
+            // decision 20's own finding — could now be indefinitely long. Small and bounded (this
+            // app's groups are 3-8 people, PLAN-v2.md §5.5), so pushed unconditionally every
+            // refresh, same as presence, rather than tracked for whether it actually changed.
+            for (n in relay.nicknamesForGroup(g.id)) frames += MeshFrameCodec.encodeNickname(n)
         }
         // Positions/presence we're carrying for groups we aren't in. Outside the per-group loop
         // above on purpose: these belong to groups absent from getActiveGroups() precisely because
@@ -375,11 +384,13 @@ class RelayResponder(
 
     /** Call periodically (~15-20s, see `MeshGattClient`'s refresh loop) on an already-open,
      *  persistent link — PLAN-v2.md P3 kept links open far past the moment
-     *  [framesToPushOnConnect] used to be the only chance presence/position ever had to cross one.
-     *  Confirmed live (2026-08-05, docs/DECISIONS.md decision 20): without this, a peer's radar
-     *  dot only ever refreshed when a connection happened to drop and reopen, which — now that
-     *  links can stay up for 10-20 minutes — read as "the radar doesn't work" for the entire
-     *  life of a healthy link. */
+     *  [framesToPushOnConnect] used to be the only chance presence/position/nicknames ever had to
+     *  cross one. Confirmed live (2026-08-05, docs/DECISIONS.md decision 20): without this, a
+     *  peer's radar dot only ever refreshed when a connection happened to drop and reopen, which —
+     *  now that links can stay up for 10-20 minutes — read as "the radar doesn't work" for the
+     *  entire life of a healthy link. Nicknames got the same fix later (decision 30,
+     *  2026-08-06) after the identical symptom showed up for them: a nickname set after a link was
+     *  already open never reached that peer. */
     suspend fun refreshFramesToPush(toPeer: String?): List<ByteArray> = presenceAndPositionFrames(toPeer)
 
     /** My own fix, plus whatever I'm holding on behalf of other group members, one hop further out

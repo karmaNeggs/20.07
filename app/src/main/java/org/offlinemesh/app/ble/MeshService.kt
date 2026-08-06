@@ -283,6 +283,11 @@ class MeshService : Service() {
                 // left dangling until the next one 30 minutes later.
                 repo.expireGroups()
                 relay.pruneExpired()
+                // positionTracker is in-memory and expireGroups' dismantleGroup calls can't reach it
+                // themselves (decision 30) — this periodic sweep is the safety net for automatic
+                // expiry; a manual delete already clears its own group immediately (GroupChatScreen).
+                val activeGroupIds = repo.groupDao.getActiveGroups().map { it.id }.toSet()
+                positionTracker.pruneOrphaned(activeGroupIds)
                 delay(30 * 60 * 1000L) // every 30 min — this is housekeeping, not latency-sensitive
             }
         }

@@ -72,6 +72,35 @@ class HopTrackerTest {
     }
 
     @Test
+    fun `two considerNeighborReport calls from the same source in one event let a worse one win`() {
+        // Documents the actual live-confirmed bug (decision 30, docs/DECISIONS.md): BeaconRadio's
+        // Tier B presence handling used to call considerNeighborReport TWICE per received beacon —
+        // once for direct hearing (candidate 1), once for the broadcaster's own propagated distance
+        // (candidate 3, say) — with the SAME sourceId both times, because both numbers describe the
+        // same physical neighbor. The FIRST call claims ownership for that source; the SECOND call's
+        // "the owning source can revise its own value" rule (meant for a source reporting a genuine
+        // change over TIME) fires immediately instead, since it can't tell "this source, later" apart
+        // from "this call's own sibling call, a moment ago" — so a worse reading silently wins. This
+        // test pins the bug down at the HopTracker level; BeaconRadio no longer calls it this way.
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // direct: candidate=1
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "peerA") // propagated: candidate=3
+        assertEquals(3, t.myHop("group-1", "PRESENCE")) // the bug: worse value won, same event
+    }
+
+    @Test
+    fun `merging both candidates into one considerDirectHop call (the fix) keeps the better value`() {
+        // What BeaconRadio.handleResult does now: compute both candidates itself (direct hearing,
+        // and the broadcaster's propagated distance + 1), take the minimum, and report it via ONE
+        // considerDirectHop call — no ownership pass-through possible, since there's only one report.
+        val t = tracker()
+        val direct = 1
+        val propagated = 2 + 1 // broadcaster's own reported PRESENCE hop (2), +1
+        t.considerDirectHop("group-1", "PRESENCE", minOf(direct, propagated), sourceId = "peerA")
+        assertEquals(1, t.myHop("group-1", "PRESENCE")) // the fix: better value kept
+    }
+
+    @Test
     fun `presence goes stale after the base window of no update`() {
         // 180s, widened from 90s after live measurement showed 5-8% of position/presence refresh
         // gaps exceeding 90s and blanking the radar — see PositionTracker's maxAgeSeconds note.

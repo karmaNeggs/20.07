@@ -111,4 +111,34 @@ class PositionTrackerTest {
         t.offer("group-1", "sender-1", 1.0, 2.0, 5, timestampSec = 100, hop = 3, viaPeer = "far")
         assertEquals(1, t.forGroup("group-1")["sender-1"]!!.hop)
     }
+
+    // ---------- clearForGroup / pruneOrphaned (decision 30 — dismantled groups leaked positions) ----------
+
+    @Test
+    fun `clearForGroup removes only that group's positions, leaving others untouched`() {
+        val t = tracker()
+        offer(t, "sender-1", hop = 0)
+        t.offer("group-2", "sender-2", 1.0, 2.0, 5, timestampSec = clock, hop = 0)
+        t.clearForGroup("group-1")
+        assertTrue(t.forGroup("group-1").isEmpty())
+        assertTrue(t.forGroup("group-2").containsKey("sender-2"))
+    }
+
+    @Test
+    fun `pruneOrphaned removes positions for groups not in the active set`() {
+        val t = tracker()
+        offer(t, "sender-1", hop = 0)
+        t.offer("group-2", "sender-2", 1.0, 2.0, 5, timestampSec = clock, hop = 0)
+        t.pruneOrphaned(activeGroupIds = setOf("group-2")) // group-1 no longer active
+        assertTrue(t.forGroup("group-1").isEmpty())
+        assertTrue(t.forGroup("group-2").containsKey("sender-2"))
+    }
+
+    @Test
+    fun `pruneOrphaned with every group still active removes nothing`() {
+        val t = tracker()
+        offer(t, "sender-1", hop = 0)
+        t.pruneOrphaned(activeGroupIds = setOf("group-1"))
+        assertTrue(t.forGroup("group-1").containsKey("sender-1"))
+    }
 }

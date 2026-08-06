@@ -117,6 +117,27 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         stale.forEach { table.remove(it) }
     }
 
+    /** Call when a group is dismantled (decision 30, `docs/DECISIONS.md`) — this table is the one
+     *  piece of per-group state `GroupRepository.dismantleGroup` can't reach itself (in-memory,
+     *  owned by `MeshService`, not Room; different package layer), so it's the caller's job, not
+     *  something `offer`/`forGroup`'s own staleness pruning would ever clean up promptly on its
+     *  own. Without this, a dismantled group's last-known positions linger in memory until the
+     *  ordinary staleness window (180s, plus up to 45s/hop) expires on its own — harmless once the
+     *  group is gone from the UI's own group list, but no reason to hold onto it. */
+    fun clearForGroup(groupId: String) {
+        table.keys.filter { it.groupId == groupId }.forEach { table.remove(it) }
+    }
+
+    /** Periodic safety net alongside [clearForGroup]'s immediate per-group clear (decision 30) —
+     *  removes any tracked position whose groupId isn't in [activeGroupIds]. Catches automatic
+     *  expiry (`GroupRepository.expireGroups`, which reuses `dismantleGroup` the same way a manual
+     *  delete does but has no single call site to hook a `clearForGroup` into) and any other future
+     *  dismantle path, without needing every caller to remember this table exists — same "orphan
+     *  sweep" shape as `GroupRepository.sweepOrphanKeys`. */
+    fun pruneOrphaned(activeGroupIds: Set<String>) {
+        table.keys.filter { it.groupId !in activeGroupIds }.forEach { table.remove(it) }
+    }
+
     companion object {
         // See PositionTracker's class doc / HopTracker.PER_HOP_SLACK_MS (same value, same
         // reasoning — kept in sync by doc only, this file has no ble-internal dependency either).

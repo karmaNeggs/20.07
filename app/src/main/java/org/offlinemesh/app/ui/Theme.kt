@@ -43,12 +43,13 @@ object AppColors {
     private val DarkSurface = Color(0xFF14181C)
     private val DarkSurfaceVariant = Color(0xFF1C2126)
     private val DarkOnSurface = Color(0xFFEDEFF1)
-    // Brightened from an original 0x8B95A1 — muted text/icons (dim toggle-tile state, secondary
-    // labels) were losing too much contrast in bright/outdoor light against the near-black
-    // background above.
+    // Brightened twice now: 0x8B95A1 -> 0xA3ADB8 (first pass) -> this. Live-tested finding
+    // (2026-08-06, hardware test round 2, decision 30): still read as too dim/gray against direct
+    // sun compared to DarkOnSurface's near-white — muted text/icons need to sit noticeably closer
+    // to white, not just a step up from the original, to hold contrast outdoors.
     @Suppress("MagicNumber") // color literal — see the class doc's note on why only lines changed
     // this pass trip this rule; every other color constant in this object is the same shape.
-    private val DarkOnSurfaceMuted = Color(0xFFA3ADB8)
+    private val DarkOnSurfaceMuted = Color(0xFFC3CCD4)
 
     // Color literals below, same reasoning as DarkOnSurfaceMuted above — this whole light-mode
     // palette is new this pass, so none of it is baseline-grandfathered like the dark one above.
@@ -58,7 +59,13 @@ object AppColors {
     @Suppress("MagicNumber") private val LightOnSurface = Color(0xFF14181C)
     @Suppress("MagicNumber") private val LightOnSurfaceMuted = Color(0xFF5B6470)
 
-    val Safe = Color(0xFF34D399)       // presence / connected / "you're in range" — nothing else
+    // Brightened from 0x34D399 (2026-08-06, hardware test round 2, decision 30) — live feedback
+    // was "more green, more luminous" specifically on the radar, where this is the only color in
+    // play; a single shared constant means the same boost also lifts every other presence/"safe"
+    // use of it (toggle tiles, connection dots) rather than forking a radar-only shade.
+    @Suppress("MagicNumber") // color literal — see the class doc's note on why only lines changed
+    // this pass trip this rule; every other color constant in this object is the same shape.
+    val Safe = Color(0xFF6EE7B7)       // presence / connected / "you're in range" — nothing else
     val Danger = Color(0xFFEF4444)     // SOS only — nothing else ever uses this color
     val Warning = Color(0xFFF59E0B)    // low-confidence / degraded-signal warnings
     val Accent = Color(0xFF818CF8)     // generic interactive accent — default buttons, links

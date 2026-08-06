@@ -235,6 +235,9 @@ fun GroupChatScreen(
                 TextButton(onClick = {
                     scope.launch {
                         repo.dismantleGroup(groupId)
+                        // PositionTracker is in-memory, owned by MeshService, not Room - dismantleGroup
+                        // can't reach it itself (see PositionTracker.clearForGroup's own doc, decision 30).
+                        meshService?.positionTracker?.clearForGroup(groupId)
                         showDeleteDialog = false
                         onDeleted()
                     }
