@@ -21,7 +21,9 @@ import androidx.room.RoomDatabase
     // degree-aware relay may now drop by more than 1 per hop; see docs/DECISIONS.md decision 16).
     // v8: added SosEntity.isAlert (docs/DECISIONS.md decision 35) — splits the loud/broadcast alert
     // treatment from ordinary quiet messages, which share this same table/entity unchanged.
-    version = 8,
+    // v9: SosEntity.mac/signature replaced with `sealed` (docs/DECISIONS.md decision 37) — SOS
+    // message content is now AES-GCM sealed, not cleartext-plus-HMAC.
+    version = 9,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

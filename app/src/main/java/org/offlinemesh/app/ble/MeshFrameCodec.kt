@@ -85,11 +85,23 @@ object MeshFrameCodec {
     // v5: SOS frames gained isAlert (see SosEntity.isAlert's doc, docs/DECISIONS.md decision 35) —
     // splits the loud/broadcast alert treatment from ordinary quiet messages sharing this same
     // entity/frame.
-    const val VERSION: Int = 5
+    // v6: SOS frames now AES-GCM seal senderId/message/timestamp/isAlert under the group key
+    // instead of cleartext-plus-HMAC (see SosEntity.sealed's doc, docs/DECISIONS.md decision 37) —
+    // any nearby non-member relay could previously read the message text directly.
+    const val VERSION: Int = 6
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
-        data class Sos(val sos: SosEntity) : Frame()
+        /** Envelope only — RelayResponder opens [sealed] with the group key via [openSos]. Same
+         *  shape as [PositionSealed] and the same reasoning: [id]/[ttl]/[hop] live out here in the
+         *  cleartext envelope so a phone holding no key for [groupId] can still dedup, flood-control,
+         *  and carry this frame onward without ever learning its content — see [SosEntity.sealed]'s
+         *  own doc (decision 37, `docs/DECISIONS.md`) for why this replaced the old cleartext-
+         *  message-plus-HMAC shape. [id] specifically has to stay cleartext (not just inside the
+         *  seal) because it's what both a member's `seenDao` dedup AND a blind relay's own
+         *  ciphertext-independent dedup key off — see [RelayResponder]'s `takeOpaqueSosCustody`. */
+        data class SosSealed(val groupId: String, val id: String, val ttl: Int, val hop: Int, val sealed: ByteArray) :
+            Frame()
         data class EvidMeta(val meta: EvidenceEntity) : Frame()
         data class EvidChunk(val chunk: EvidenceChunkEntity) : Frame()
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
@@ -190,45 +202,45 @@ object MeshFrameCodec {
         val signedBytes: ByteArray,
     )
 
+    /** Decrypted inner of a sealed SOS frame (decision 37, `docs/DECISIONS.md`) — same shape and
+     *  reasoning as [PositionBody]: [signature] travels inside the seal rather than alongside it,
+     *  verified once by the caller against the pinned public key for [senderId] and never persisted
+     *  ([SosEntity] stores the plaintext fields directly, not this intermediate). [signedBytes] is
+     *  captured verbatim from the decrypted buffer for the same reason [PositionBody.signedBytes]
+     *  is — a signature must verify against the EXACT bytes it was computed over, not a re-derived
+     *  encoding that could drift (SOS's own fields are all strings/longs/booleans here, no lossy
+     *  float round-trip like position's lat/lon, but capturing verbatim costs nothing and keeps both
+     *  body types following the identical, easy-to-audit pattern). */
+    data class SosBody(
+        val senderId: String, val message: String, val timestamp: Long, val isAlert: Boolean,
+        val signature: ByteArray?,
+        val signedBytes: ByteArray,
+    )
+
     // ---------- canonical byte layouts the auth tags are computed over ----------
     // These MUST stay byte-for-byte stable: the sender computes the tag over these exact bytes and
     // every receiver recomputes it the same way. Deliberately excludes ttl (mutated per hop).
+    //
+    // sosMacInput (the old cleartext-plus-HMAC scheme) removed in decision 37, docs/DECISIONS.md —
+    // superseded by sealSos's AES-GCM seal, whose own tag now provides this authentication.
 
-    // writeStr16, not writeStr — writeStr is 1-byte-length-prefixed and silently truncates at 255
-    // bytes, while encodeSos below puts the FULL message on the wire via writeStr16. Using writeStr
-    // here previously meant the MAC covered only the first 255 bytes of the message: any relay —
-    // including a non-member blind carrier with no group key at all, since authOk lets an
-    // unverifiable frame through for relaying — could rewrite everything past byte 255 and every
-    // member would still verify the forged message as authentic. See MAX_SOS_MESSAGE_BYTES for the
-    // matching decode-time bound that keeps this field's size actually meaningful.
-    // isAlert covered here (decision 35, docs/DECISIONS.md) so a relay can't flip it undetected in
-    // either direction — silencing a real emergency (isAlert true -> false) or manufacturing a
-    // false alarm (false -> true) for content it never actually authored.
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's identical suppress
-    fun sosMacInput(
-        id: String,
-        groupId: String,
-        senderId: String,
-        message: String,
-        timestamp: Long,
-        isAlert: Boolean,
-    ): ByteArray =
-        build { d ->
-            d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId)
-            d.writeSosMessage(message); d.writeLong(timestamp); d.writeByte(if (isAlert) 1 else 0)
-        }
-
-    /** Broadcast-tier counterpart to [sosMacInput] (decision 29, `docs/DECISIONS.md`) — deliberately
-     *  excludes [senderId]. `BeaconRadio`'s Tier B SOS content broadcast is passively readable by
-     *  ANY nearby BLE scanner (no connection needed), unlike a GATT [Frame.Sos] which at least
-     *  requires connecting first — carrying a per-install `senderId` there would be a meaningfully
-     *  larger, purely passive tracking surface than this app currently broadcasts anywhere else
-     *  (position's own `senderId` stays inside the AES-GCM seal; this field has no seal to hide
-     *  behind, SOS content is cleartext-by-design even over GATT — see `NEXT_STEPS.md`'s open
-     *  decision on that). A SEPARATE mac from [sosMacInput]'s own — not reusable, not
-     *  interchangeable, computed fresh under the same group key at broadcast time from whichever
-     *  `SosEntity` is being mentioned, regardless of whether this device originated it or is
-     *  holding a relayed copy (the content was already verified once, under [sosMacInput]'s own
+    /** Broadcast-tier counterpart to the GATT-authoritative SOS scheme (decision 29,
+     *  `docs/DECISIONS.md`) — deliberately excludes [senderId]. `BeaconRadio`'s Tier B SOS content
+     *  broadcast is passively readable by ANY nearby BLE scanner (no connection needed), unlike a
+     *  GATT [Frame.SosSealed] which now requires both connecting AND holding the group key (decision
+     *  37) — carrying a per-install `senderId` here would still be a meaningfully larger, purely
+     *  passive tracking surface than this app broadcasts anywhere else (position's own `senderId`
+     *  stays inside its own AES-GCM seal; this field has no seal to hide behind).
+     *
+     *  **Deliberately still cleartext-by-design, unlike GATT's now-sealed content** — this isn't an
+     *  oversight decision 37 left behind, it's a different purpose: decision 29's whole point was
+     *  that an emergency alert being loud/discoverable to anyone nearby, member or not, is a
+     *  legitimate feature (a bystander should be able to tell something's wrong), while decision 37
+     *  is specifically about the AUTHORITATIVE record used for actual group coordination, which has
+     *  no reason to be readable by a non-member. A SEPARATE mac from the GATT scheme's own — not
+     *  reusable, not interchangeable, computed fresh under the same group key at broadcast time from
+     *  whichever `SosEntity` is being mentioned, regardless of whether this device originated it or
+     *  is holding a relayed copy (the content was already verified once, under `sealSos`'s own
      *  scheme, before being stored — see `RelayResponder.handleSos`). */
     fun broadcastSosMacInput(id: String, groupId: String, message: String, timestamp: Long): ByteArray =
         build { d -> d.writeStr(id); d.writeStr(groupId); d.writeSosMessage(message); d.writeLong(timestamp) }
@@ -276,16 +288,55 @@ object MeshFrameCodec {
 
     // ---------- encode ----------
 
-    fun encodeSos(sos: SosEntity): ByteArray = frame(FRAME_SOS) { d ->
-        d.writeStr(sos.id); d.writeStr(sos.groupId); d.writeStr(sos.senderId)
-        d.writeByte(sos.ttl.coerceIn(0, 255)); d.writeLong(sos.timestamp)
-        d.writeSosMessage(sos.message); d.writeBlob(sos.mac); d.writeBlob(sos.signature)
-        // Cleartext envelope byte, same treatment as PositionSealed.hop — see SosEntity.hop's doc
-        // for why this must never be derived from ttl.
-        d.writeByte(sos.hop.coerceIn(0, 255))
-        // v5 (decision 35, docs/DECISIONS.md) — see SosEntity.isAlert's own doc.
-        d.writeByte(if (sos.isAlert) 1 else 0)
+    // SOS frames are the second place in this app that repeatedly encrypts under a single, never-
+    // rotated group key (decision 37, docs/DECISIONS.md) — same birthday-bound reasoning
+    // positionNonceCounter's own doc gives, so this needs the identical deterministic-nonce
+    // treatment position already has. Unlike position (resealed on every ~20s periodic push, so its
+    // nonce needs a counter to disambiguate same-second sends from the same sender), a given SOS
+    // [id] is sealed EXACTLY ONCE, ever — content is immutable once created (decision 29's own
+    // note) — so hashing [id] alone into a nonce is sufficient: re-sealing the same id always
+    // reproduces the same nonce AND the same plaintext, which is a no-op for GCM's safety property
+    // (nonce reuse is only catastrophic across DIFFERENT plaintexts), and gives the same "same
+    // content -> same ciphertext" stability `reframeSosForRelay` depends on to forward verbatim
+    // without re-encrypting on every hop.
+    private fun sosNonce(id: String): ByteArray = CryptoUtils.sha256(id.toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
+
+    /** Seals the sensitive body with the group key before framing — same shape as [encodePosition]:
+     *  only a member holding the key can produce or read this, non-members that relay it move
+     *  opaque bytes. [signingPrivateKey] optional for the same reason [encodePosition]'s is (this
+     *  device may have no sender identity for [groupId] yet). */
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    fun sealSos(
+        groupId: String,
+        key: ByteArray,
+        id: String,
+        senderId: String,
+        message: String,
+        timestamp: Long,
+        isAlert: Boolean,
+        ttl: Int,
+        hop: Int,
+        signingPrivateKey: ByteArray? = null,
+    ): ByteArray {
+        val inner = build { d ->
+            d.writeStr(senderId); d.writeSosMessage(message); d.writeLong(timestamp)
+            d.writeByte(if (isAlert) 1 else 0)
+        }
+        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
+        val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
+        val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, sosNonce(id))
+        return reframeSosForRelay(groupId, id, ttl, hop, sealed)
     }
+
+    /** Re-frames an already-sealed SOS for another hop **without needing the group key** — a blind
+     *  relay (or a member forwarding someone else's SOS) moves the exact same opaque ciphertext
+     *  along, only the envelope's ttl/hop differ, so it never learns the message while still
+     *  carrying it. Same role [reframePositionForRelay] plays for position. */
+    fun reframeSosForRelay(groupId: String, id: String, ttl: Int, hop: Int, sealed: ByteArray): ByteArray =
+        frame(FRAME_SOS) { d ->
+            d.writeStr(groupId); d.writeStr(id); d.writeByte(ttl.coerceIn(0, MAX_UNSIGNED_BYTE))
+            d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
+        }
 
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
         d.writeStr(e.id); d.writeStr(e.groupId); d.writeStr(e.senderId); d.writeLong(e.timestamp)
@@ -474,6 +525,26 @@ object MeshFrameCodec {
         }
     }
 
+    /** Opens a sealed SOS body. Null if the key is wrong / not our group / tampered (GCM tag) —
+     *  this replaces the old separate `sosMacInput`+`authOk` check entirely (decision 37): a
+     *  failure to decrypt IS the auth failure now, same as [openPosition]. */
+    fun openSos(sealed: ByteArray, key: ByteArray): SosBody? {
+        val inner = CryptoUtils.decrypt(key, sealed) ?: return null
+        return try {
+            val buf = ByteBuffer.wrap(inner)
+            val senderId = buf.readStr()
+            val message = buf.readStr16()
+            if (message.toByteArray(UTF8).size > MAX_SOS_MESSAGE_BYTES) return null
+            val timestamp = buf.long
+            val isAlert = buf.get().toInt() != 0
+            val signedBytes = inner.copyOfRange(0, buf.position()) // see SosBody.signedBytes' doc
+            val signature = buf.readBlob()
+            SosBody(senderId, message, timestamp, isAlert, signature, signedBytes)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // ---------- decode (keyless: no crypto here, only envelope parsing) ----------
 
     fun decode(bytes: ByteArray): Frame? {
@@ -485,21 +556,14 @@ object MeshFrameCodec {
         return try {
             when (type) {
                 FRAME_SOS -> {
-                    val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()
+                    // Envelope only (decision 37, docs/DECISIONS.md) — sealed is opened separately
+                    // via openSos, once a caller has the group key; see Frame.SosSealed's own doc.
+                    val groupId = buf.readStr()
+                    val id = buf.readStr()
                     val ttl = buf.get().toInt() and 0xFF
-                    val timestamp = buf.long
-                    val message = buf.readStr16()
-                    // Matches the cap RelayEngine.createSos enforces at authorship — see
-                    // MAX_SOS_MESSAGE_BYTES's doc. Checked on UTF-8 byte length (what the wire
-                    // format and the MAC both actually operate on), not String.length.
-                    if (message.toByteArray(UTF8).size > MAX_SOS_MESSAGE_BYTES) return null
-                    val mac = buf.readBlob()
-                    val signature = buf.readBlob()
                     val hop = buf.get().toInt() and 0xFF
-                    val isAlert = buf.get().toInt() != 0
-                    Frame.Sos(
-                        SosEntity(id, groupId, senderId, false, message, timestamp, ttl, hop, isAlert, mac, signature)
-                    )
+                    val sealed = buf.readStr16Bytes()
+                    Frame.SosSealed(groupId, id, ttl, hop, sealed)
                 }
                 FRAME_EVID_META -> {
                     val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()

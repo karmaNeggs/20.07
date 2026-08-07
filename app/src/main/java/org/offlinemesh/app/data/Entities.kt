@@ -60,21 +60,23 @@ data class SosEntity(
     // two: false (default — the normal "Send" action) is a quiet message, relayed and catalog-
     // filter-synced exactly like today but with none of the alert-only side effects; true (a
     // dedicated SOS action) gets all of them, same as every SosEntity did before this decision.
-    // Authenticated by [mac] (part of sosMacInput's covered bytes) so a relay can't flip it
-    // undetected in either direction — silencing a real emergency or manufacturing a false alarm.
+    // Sealed inside the AES-GCM body (decision 37) so a relay can't flip it undetected in either
+    // direction — silencing a real emergency or manufacturing a false alarm.
     val isAlert: Boolean = false,
-    // HMAC(group_key) over the immutable fields (everything but ttl/hop). A member verifies this
-    // before ever showing or acting on the SOS, so a phone without the key can't inject a fake
-    // emergency. Stored (not just recomputed) so a non-member blind carrier can relay it onward
-    // byte-for-byte.
-    val mac: ByteArray? = null,
-    // Ed25519 sender-identity signature over the exact same bytes [mac] covers, under
-    // this sender's per-group keypair — additive, not a replacement: [mac] alone still proves
-    // "someone holding the group key," this additionally proves "specifically this sender," once
-    // RelayResponder has pinned their key. Null is a tolerated, not a failure, state — see
-    // RelayResponder's pin-on-first-sight doc for when a null vs. a present-but-wrong signature are
-    // treated differently.
-    val signature: ByteArray? = null
+    // Decision 37 (docs/DECISIONS.md): [message]/[senderId]/[timestamp]/[isAlert] used to travel in
+    // the wire frame as cleartext plus a separate HMAC (`mac`) and an optional Ed25519 [signature] —
+    // any nearby non-member relay could read the message text directly. Replaced with an AES-GCM
+    // seal under the group key, mirroring [org.offlinemesh.app.ble.PositionTracker.Record.sealed]'s
+    // exact shape and reasoning: this is the ORIGINAL sealed bytes (our own fresh seal at authorship,
+    // or exactly what we received when relaying someone else's), kept so relaying forwards them
+    // verbatim instead of re-encrypting — re-encrypting would mint a fresh ciphertext every hop,
+    // breaking downstream blind-relay dedup the same way it would have for position (see that
+    // field's own doc). The GCM tag baked into this IS the authentication (replacing the old
+    // separate `mac`); an optional Ed25519 signature travels INSIDE the seal (replacing the old
+    // separate `signature` column), verified once at ingest and not re-checked afterward — same as
+    // `PositionBody.signature`'s handling, never persisted as its own field once verified. Null only
+    // transiently during construction before a fresh seal is computed; every stored row has one.
+    val sealed: ByteArray? = null,
 ) {
     private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl, hop, isAlert)
 
@@ -82,12 +84,10 @@ data class SosEntity(
         if (this === other) return true
         if (other !is SosEntity) return false
         return scalars() == other.scalars() &&
-            (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
-            (signature?.contentEquals(other.signature) ?: (other.signature == null))
+            (sealed?.contentEquals(other.sealed) ?: (other.sealed == null))
     }
 
-    override fun hashCode(): Int =
-        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
+    override fun hashCode(): Int = 31 * scalars().hashCode() + (sealed?.contentHashCode() ?: 0)
 }
 
 @Entity(tableName = "evidence")

@@ -108,21 +108,23 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val id = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
         val senderId = repo.deviceId
-        // Caps to the same bound MeshFrameCodec.decode enforces on the receiving end — truncating
-        // by UTF-8 byte length (what the wire format and MAC actually measure), not by String
+        // Caps to the same bound MeshFrameCodec.decode/openSos enforce on the receiving end —
+        // truncating by UTF-8 byte length (what the wire format actually measures), not by String
         // length, so this can never author a message the codec's own guard would then reject.
         val truncated = truncateToUtf8Bytes(text, MeshFrameCodec.MAX_SOS_MESSAGE_BYTES)
-        val key = repo.getGroupKey(groupId)
-        val macInput = MeshFrameCodec.sosMacInput(id, groupId, senderId, truncated, timestamp, isAlert)
-        val mac = key?.let { CryptoUtils.authTag(it, macInput) }
-        // Additive on top of the group-key mac above, never a replacement — see SosEntity.
-        // signature's doc. Null exactly when mac is (no group key => no sender identity either;
-        // see GroupRepository.ensureSenderIdentity, established alongside the key on join/create).
-        val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
+        // Same pattern createEvidence already uses — authoring content for a group we hold no key
+        // to can't happen in practice (a user can't type into a group whose key they don't have),
+        // and there's nothing valid to seal without one, unlike the old cleartext-plus-HMAC scheme
+        // where a null mac was at least a representable (if useless) state.
+        val key = repo.getGroupKey(groupId) ?: error("no key for group")
+        val signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
+        val sealed = MeshFrameCodec.sealSos(
+            groupId, key, id, senderId, truncated, timestamp, isAlert, DEFAULT_TTL, hop = 0, signingPrivateKey,
+        )
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, isAlert = isAlert,
-            mac = mac, signature = signature
+            sealed = sealed,
         )
         sosDao.insert(sos)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))

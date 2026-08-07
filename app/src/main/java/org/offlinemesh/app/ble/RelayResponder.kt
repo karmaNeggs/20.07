@@ -78,12 +78,17 @@ class RelayResponder(
 
     // Blind-relay custody for frames belonging to groups we hold no key for — see
     // OpaqueFrameRelay's class doc for why positions and presence both needed this while content
-    // never did. Two stores, not one, purely so each can be reasoned about (and counted) separately.
+    // never did. Three stores, not one, purely so each can be reasoned about (and counted)
+    // separately.
     private val opaquePositions = OpaqueFrameRelay()
     // Presence gets a shorter carry window than positions: a receiver's skew gate is
     // PRESENCE_MAX_SKEW_MS plus per-hop slack, so holding a heartbeat longer than the base skew
     // window just spends airtime on frames the far end will reject as replays.
     private val opaquePresence = OpaqueFrameRelay(maxAgeMillis = PRESENCE_MAX_SKEW_MS)
+    // SOS content is now sealed (decision 37, docs/DECISIONS.md) — a non-member can no longer read
+    // it, so it needs the same blind-custody treatment position/presence already had. Default
+    // maxAgeMillis (matches position's own, generous enough for an SOS's own longer useful life).
+    private val opaqueSos = OpaqueFrameRelay()
 
     // See framesToPushOnConnect's doc for what this default is for. 517 matches the MTU every
     // connection actually requests (MeshGattClient.onConnectionStateChange's requestMtu(517)) —
@@ -328,7 +333,12 @@ class RelayResponder(
                 "catalog filter (${filterFrame.size}B) exceeds this connection's ${maxFrameBytes}B " +
                     "budget — falling back to eager push of ${keys.size} item(s)"
             )
-            for (sos in relay.relayableSos()) frames += MeshFrameCodec.encodeSos(sos)
+            // Decision 37 (docs/DECISIONS.md): forwards the ORIGINAL sealed bytes verbatim, same
+            // "never re-encrypt a relayed item" reasoning position/nickname relay already follow —
+            // sealed is null only transiently during construction, never for a stored row.
+            for (sos in relay.relayableSos()) {
+                sos.sealed?.let { frames += MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, it) }
+            }
             for (meta in relay.relayableEvidenceMeta()) frames += MeshFrameCodec.encodeEvidMeta(meta)
             for (g in repo.groupDao.getActiveGroups()) {
                 for (n in relay.nicknamesForGroup(g.id)) frames += MeshFrameCodec.encodeNickname(n)
@@ -494,30 +504,38 @@ class RelayResponder(
     // branches had, since nothing followed the `when` inside handleIncoming's try block either) —
     // splitting these out changes nothing about behavior, only where the dispatch decision lives.
 
-    private suspend fun handleSos(frame: MeshFrameCodec.Frame.Sos, peerAddress: String) {
-        val macInput = MeshFrameCodec.sosMacInput(
-            frame.sos.id, frame.sos.groupId, frame.sos.senderId, frame.sos.message, frame.sos.timestamp,
-            frame.sos.isAlert,
-        )
-        // If this is a group we hold the key to, the SOS must authenticate or we neither show it
-        // nor pass it on — that's what stops a phone without the key from injecting a fake
-        // emergency people would run toward. If we're not a member (no key), we can't verify, so
-        // we relay it blind; a member downstream will reject it if it's forged.
-        if (!authOk(frame.sos.groupId, frame.sos.mac) { macInput }) {
-            Log.w("RelayResponder", "SOS failed auth for a group we hold — dropping")
+    /** Decision 37 (docs/DECISIONS.md): SOS content is now AES-GCM sealed, not cleartext-plus-HMAC
+     *  — a phone with no key for [frame]'s group can no longer read OR authenticate it, so it takes
+     *  opaque custody instead of attempting the old vacuous-pass auth check. Same split
+     *  [handlePositionSealed] already makes between the member path (this function) and
+     *  [takeOpaqueSosCustody] (the blind-relay path). */
+    private suspend fun handleSos(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
+        val key = repo.getGroupKey(frame.groupId)
+        if (key == null) {
+            takeOpaqueSosCustody(frame, peerAddress)
             return
         }
-        // Additive per-sender check: the group-key mac above only proves SOME member
+        // A failed decrypt (wrong key — can't happen, we just looked it up for this exact group —
+        // tampered ciphertext, or a GCM tag mismatch) IS the auth failure now; there is no separate
+        // mac to check. Replaces the old authOk(...) call entirely.
+        val body = MeshFrameCodec.openSos(frame.sealed, key) ?: run {
+            Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
+            return
+        }
+        // Additive per-sender check: decrypting under the group key only proves SOME member
         // produced this; a pinned sender key catches a different member forging this one's SOS.
-        if (!verifySignatureIfPinned(frame.sos.groupId, frame.sos.senderId, frame.sos.signature, macInput)) {
+        if (!verifySignatureIfPinned(frame.groupId, body.senderId, body.signature, body.signedBytes)) {
             Log.w(
                 "RelayResponder",
                 "SOS signature failed verification for a pinned sender — dropping (possible impersonation)"
             )
             return
         }
-        val isMember = repo.getGroupKey(frame.sos.groupId) != null
-        val isNew = relay.ingestSos(frame.sos)
+        val sos = SosEntity(
+            frame.id, frame.groupId, body.senderId, senderIsMe = false, body.message, body.timestamp,
+            frame.ttl, frame.hop, body.isAlert, sealed = frame.sealed,
+        )
+        val isNew = relay.ingestSos(sos)
         // The receive half of relay. Without this the diagnostics log only showed what we PUSHED,
         // which made it impossible to tell "relay isn't happening" from "relay happened and we
         // simply had nothing new to offer" — the two look identical from the push side alone.
@@ -525,39 +543,38 @@ class RelayResponder(
         // Hop-tracking runs on every receipt, not gated behind ingestSos's dedup return — a shorter
         // path found on a later sighting of the same sos.id must still improve our estimate;
         // considerDirectHop keeps it only if better.
-        // frame.sos.hop + 1, NOT ttl-derived (PLAN-v2.md P1 / docs/DECISIONS.md decision 16): a
+        // frame.hop + 1, NOT ttl-derived (PLAN-v2.md P1 / docs/DECISIONS.md decision 16): a
         // degree-aware relay may drop ttl by more than 1 in a single hop for flood control, which
         // would silently corrupt a ttl-derived hop count. hop is a dedicated cleartext envelope
         // field, incremented by exactly +1 on every RelayEngine.ingestSos, immune to that.
-        // frame.sos.hop AS RECEIVED is the SENDER's own distance from origin (their stored, already-
+        // frame.hop AS RECEIVED is the SENDER's own distance from origin (their stored, already-
         // incremented value) — mine is exactly one more, the same "+1" the old ttl formula baked in
         // (DEFAULT_TTL - ttl + 1) and what RelayEngine.ingestSos's `hop = sos.hop + 1` also stores,
         // so the value shown here and the value persisted for this SOS's own next relay agree.
-        val hopsFromOrigin = frame.sos.hop + 1
+        val hopsFromOrigin = frame.hop + 1
         if (isNew) {
             DiagnosticsLog.event(
                 "recv",
-                "NEW sos from ${frame.sos.senderId.take(SENDER_ID_LOG_CHARS)} " +
-                    "hop=$hopsFromOrigin member=$isMember"
+                "NEW sos from ${body.senderId.take(SENDER_ID_LOG_CHARS)} hop=$hopsFromOrigin"
             )
         }
         // Sourced on senderId (stable, global per device — see PeerIdentityResolver's class doc),
         // not peerAddress (rotates ~every 15min and would strand HopTracker's route ownership on
-        // an address that no longer exists — PLAN-v2.md §1.3 / P0b). Both frame.sos.senderId and
-        // this MAC are already authenticated by authOk above, so learning it here is no less
-        // trustworthy than the routing decision this same value already drives.
-        learnPeerIdentity(peerAddress, frame.sos.senderId)
+        // an address that no longer exists — PLAN-v2.md §1.3 / P0b). body.senderId is already
+        // authenticated by the successful decrypt-under-the-group-key above, so learning it here is
+        // no less trustworthy than the routing decision this same value already drives.
+        learnPeerIdentity(peerAddress, body.senderId)
         // Both gated on isAlert (decision 35, docs/DECISIONS.md) — an ordinary quiet message still
         // relays/syncs exactly like before (floodForwardSos below is unconditional), but has no
         // business feeding the SOS hop-gradient or firing the alarm-style notification, both of
         // which only make sense for a genuine flagged emergency.
-        if (frame.sos.isAlert) {
-            hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, frame.sos.senderId)
-            // Only notify for groups we're actually in — a blind carrier ingests and relays SOS for
-            // groups it isn't a member of too, but has no business alerting on them.
-            if (isNew && isMember) {
-                val groupName = repo.groupDao.getGroup(frame.sos.groupId)?.name ?: frame.sos.groupId
-                onSosReceived(frame.sos, groupName)
+        if (sos.isAlert) {
+            hopTracker.considerDirectHop(frame.groupId, frame.id, hopsFromOrigin, body.senderId)
+            // Reaching this branch already means we hold the key (we're a member) — the old
+            // separate isMember check is no longer needed, a blind relay can't reach this far.
+            if (isNew) {
+                val groupName = repo.groupDao.getGroup(frame.groupId)?.name ?: frame.groupId
+                onSosReceived(sos, groupName)
             }
         }
         // PLAN-v2.md P1 §5.3: immediate forward across every OTHER currently-open link, instead of
@@ -571,7 +588,27 @@ class RelayResponder(
         // ConnectionRegistry's registeredKey/activeTrackerKey docs). Worst case is a redundant
         // echo back to the sender, which their own ingestSos dedup silently absorbs — not a
         // correctness bug.
-        if (isNew) floodForwardSos(frame.sos, hopsFromOrigin, excludeKey = peerIdentity.resolve(peerAddress))
+        if (isNew) floodForwardSos(sos, hopsFromOrigin, excludeKey = peerIdentity.resolve(peerAddress))
+    }
+
+    /** Blind-relay custody for an SOS we hold no key for — see [OpaqueFrameRelay]'s class doc and
+     *  [takeOpaqueCustody]/[takeOpaquePresenceCustody]'s identical shape for position/presence.
+     *  Decision 37 (docs/DECISIONS.md) is what makes this possible at all: before SOS content was
+     *  sealed, a non-member could already read it in cleartext via [handleSos]'s old vacuous-pass
+     *  auth check, so there was never a reason for a separate opaque path. [maxHops] reuses
+     *  [RelayEngine.DEFAULT_TTL] as a reasonable blind-relay depth ceiling — matching the scale a
+     *  member's own degree-aware flood-forward would naturally reach, since a blind relay has no
+     *  group-key-derived signal of its own to size this from. */
+    private fun takeOpaqueSosCustody(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
+        val accepted = opaqueSos.offer(
+            dedupKey = OpaqueFrameRelay.dedupKey(frame.sealed),
+            hop = frame.hop,
+            maxHops = RelayEngine.DEFAULT_TTL,
+            viaPeer = peerAddress,
+        ) { MeshFrameCodec.reframeSosForRelay(frame.groupId, frame.id, frame.ttl, frame.hop + 1, frame.sealed) }
+        if (accepted) {
+            DiagnosticsLog.event("relay", "carrying opaque sos hop=${frame.hop} (not a member)")
+        }
     }
 
     /** Call right after [RelayEngine.createSos] succeeds for a message THIS device originated —
@@ -592,6 +629,10 @@ class RelayResponder(
      *  as gated in the P0a/P1 simulator (`ForwardingPlaneEngine`) before this was trusted with
      *  production wiring. */
     private suspend fun floodForwardSos(sos: SosEntity, hopsFromOrigin: Int, excludeKey: String?) {
+        // sealed is null only transiently during construction (see SosEntity.sealed's own doc) —
+        // never for anything that reached here, which is always either freshly created (createSos
+        // seals before storing) or freshly ingested (handleSos constructs with sealed set).
+        val sealed = sos.sealed ?: return
         val openLinkCount = connectionRegistry.openLinkCount()
         val forwardedTtl = ForwardingPolicy.forwardedTtl(sos.ttl, openLinkCount)
         if (forwardedTtl <= 0) return
@@ -600,7 +641,10 @@ class RelayResponder(
         val targets = ForwardingPolicy.linksToForwardOn(
             candidates, messageIdSeed = sos.id.hashCode().toLong(), openLinkCount = openLinkCount,
         )
-        val outgoing = MeshFrameCodec.encodeSos(sos.copy(hop = hopsFromOrigin, ttl = forwardedTtl))
+        // Decision 37 (docs/DECISIONS.md): forwards the ORIGINAL sealed bytes verbatim, only the
+        // envelope's hop/ttl change — same "never re-encrypt a relayed item" reasoning position's
+        // own reframePositionForRelay already follows, and for the same dedup-stability reason.
+        val outgoing = MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, forwardedTtl, hopsFromOrigin, sealed)
         delay(ForwardingPolicy.pickJitterMs(openLinkCount))
         val liveTargets = connectionRegistry.others(excludeKey)
         for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)
@@ -851,7 +895,10 @@ class RelayResponder(
         // filter-skipped item (see CatalogFilter's own class doc on why that's safe).
         val wantToPush = sosToPush.size + evidToPush.size + nicknamesToPush.size
         val allowedToPush = consumeCatalogItemBudget(peerAddress, wantToPush)
-        var pushed = pushUpTo(sosToPush, allowedToPush, MeshFrameCodec::encodeSos, respond)
+        // Decision 37 (docs/DECISIONS.md): forwards each SOS's ORIGINAL sealed bytes verbatim, same
+        // "never re-encrypt a relayed item" reasoning as floodForwardSos above. sealed is null only
+        // transiently during construction, never for a stored row — see SosEntity.sealed's own doc.
+        var pushed = pushUpTo(sosToPush, allowedToPush, ::reframeStoredSos, respond)
         pushed += pushUpTo(evidToPush, allowedToPush - pushed, MeshFrameCodec::encodeEvidMeta, respond)
         pushed += pushUpTo(nicknamesToPush, allowedToPush - pushed, MeshFrameCodec::encodeNickname, respond)
         val budgetSkipped = wantToPush - pushed
@@ -888,6 +935,13 @@ class RelayResponder(
         }
         return toPush to skipped
     }
+
+    /** Re-frames a stored, already-sealed SOS for push — decision 37 (docs/DECISIONS.md), same
+     *  "forward the original ciphertext verbatim" reasoning as [floodForwardSos]. `sealed` is null
+     *  only transiently during construction, never for a stored row (see [SosEntity.sealed]'s own
+     *  doc), so `!!` here documents an invariant rather than papering over a real null case. */
+    private fun reframeStoredSos(sos: SosEntity): ByteArray =
+        MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, sos.sealed!!)
 
     /** Pushes [items] one at a time via [encode]/[respond] until either [items] is exhausted or
      *  [remainingBudget] items have been pushed — the shared shape behind each of
@@ -958,7 +1012,7 @@ class RelayResponder(
         val frame = MeshFrameCodec.decode(bytes) ?: return
         try {
             when (frame) {
-                is MeshFrameCodec.Frame.Sos -> handleSos(frame, peerAddress)
+                is MeshFrameCodec.Frame.SosSealed -> handleSos(frame, peerAddress)
                 is MeshFrameCodec.Frame.EvidMeta -> handleEvidMeta(frame, respond)
                 is MeshFrameCodec.Frame.EvidChunk -> handleEvidChunk(frame)
                 is MeshFrameCodec.Frame.PositionSealed -> handlePositionSealed(frame, peerAddress)
