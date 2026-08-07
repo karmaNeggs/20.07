@@ -6,6 +6,13 @@ document (including inline "STATUS" notes inside Part 7 below) is detail underne
 competing source. If a phase's own section below ever seems to disagree with this block, this block
 is current and that section is what's stale.
 
+- **2026-08-07, user directive (decision 36, `docs/DECISIONS.md`): Tier 2 (synthetic radio load,
+  ESP32/BlueZ boards) REMOVED from this project's testing methodology entirely** — never had a
+  realistic path to actually happening, had become pure process weight. §6.4 now defines a two-tier
+  model (Tier 1 simulator + Tier 3 three real phones only); every remaining "Tier 2" reference in
+  this document is either historical or has been struck. **Same directive marks P2 STATUS = PASSED**
+  — code-complete and Tier 1-verified, AWAITING (not blocked on) Tier 3 confirmation, which is in
+  progress as of this edit on the v0.7.3-dev APK. Full detail in Part 7's own P2 entry.
 - **Shipped and committed, on `main`, PUSHED to origin (public):** P0a (crowd simulator), P0b (peer
   identity), P1 (SOS flood-forward), P3 (persistent links) — v0.6.0-dev through v0.6.3-dev.
 - **Hardware-confirmed across four live 3-phone test rounds** (2026-08-05): message-delay fix,
@@ -643,24 +650,25 @@ S11 is the pillar that separates us from bitchat, and it is completely unmeasure
 
 ### 6.4 Three gate tiers — and the missing middle
 
-The gap between "JVM simulator" and "3 real phones" is precisely where every v1 bug lived. Close it
-with a cheap third tier:
+The gap between "JVM simulator" and "3 real phones" is precisely where every v1 bug lived. Originally
+closed with a third tier — synthetic radio load (ESP32s/BlueZ boards, D=200-400 real BLE traffic) —
+but that tier is REMOVED as of 2026-08-07 (user directive, `docs/DECISIONS.md` decision 36): it never
+had a realistic path to actually happening (no hardware acquired across this entire v2 effort, every
+phase that named it as a gate treated it as "open, not blocking" in practice anyway per the Part 7
+preamble below) and had become pure process weight — scope creep on a methodology, not a real
+validation step. This project now runs a two-tier model:
 
 - **Tier 1 — Simulator.** D = 3 → 400. Everything in §6.1–6.3 that is logic, timing and state
   machines. Cannot tell us anything about a real radio.
-- **Tier 2 — Synthetic radio load (new).** A handful of ESP32s or a Linux box with BlueZ, each
-  advertising and responding as many virtual nodes, producing **real BLE traffic at real density**
-  against real phones. Precedent exists: `fvolcic/bitchat-relay` is exactly this shape for bitchat —
-  an ESP32 node holding up to 8 concurrent BLE connections. Two or three boards emulating dozens of
-  advertisers costs about the price of a takeaway and catches the entire class the simulator cannot:
-  scan-callback storms, OS-level scan throttling, advertising-set limits, chipset churn under load.
-  **This is the highest-value new piece of test infrastructure in the plan**, because §9.2 item 1
-  (the scan storm) is currently a prediction we cannot otherwise verify without 400 phones.
 - **Tier 3 — Three real phones.** The final word on chipset behaviour, callback ordering and battery.
-  Per §5.4, this is where all adaptations are off, so it is a clean test of core logic.
+  Per §5.4, this is where all adaptations are off, so it is a clean test of core logic. (Numbered 3,
+  not 2, kept as-is rather than renumbered — every existing decision/status reference in this
+  document already calls it "Tier 3," and renumbering would just create a second thing to keep in
+  sync for no real benefit.)
 
-A phase is done when all three tiers that apply to it pass. Tier 2 is what makes the 200–400 target
-honest rather than aspirational.
+A phase is done when both tiers that apply to it pass. The 200-400 target itself is now trusted on
+Tier 1 (simulator) plus real-world Tier 3 rounds alone — no synthetic-load cross-check, a real,
+named tradeoff, not silently dropped.
 
 ---
 
@@ -670,10 +678,10 @@ Same discipline as v1: **one phase, one APK, hardware-gated, nothing else lands 
 That rule is not bureaucracy — three separate v1 rounds shipped an unverified radio change and each
 broke something.
 
-**Every phase is gated on the three tiers in §6.4** — simulator, synthetic radio load, three real
-phones — for whichever apply. No tier is sufficient alone: the simulator cannot see a radio, the load
-generator cannot see chipset-specific behaviour, and three phones cannot produce density. Gates below
-name the tiers explicitly; scenario IDs refer to §6.3.
+**Every phase is gated on the two tiers in §6.4** — simulator, three real phones — for whichever
+apply (Tier 2/synthetic radio load removed 2026-08-07, `docs/DECISIONS.md` decision 36 — see §6.4's
+own note). No tier is sufficient alone: the simulator cannot see a radio, and three phones cannot
+produce crowd density. Gates below name the tiers explicitly; scenario IDs refer to §6.3.
 
 **How hardware gates actually get checked (2026-08-05 clarification).** This has never meant real-time
 supervision — every hardware-verified fix since pass 10 has worked the same asynchronous way: a
@@ -683,26 +691,25 @@ see its class doc) captures what the sim gate's claim predicts. The user exports
 (or describes what they observed) back for review. **A hardware gate is a checkpoint on the claim, not
 a precondition for writing the next phase's code** — implementation keeps moving on the sim/compile/
 test-verified track; a phase is only marked *hardware-confirmed* once that log/report comes back,
-same as decisions 8-13's confirmation trail in `docs/DECISIONS.md`. Where a phase's hardware gate
-needs infrastructure nobody has yet (P0a's Tier 2 ESP32/BlueZ boards), that gate stays open and
-explicitly flagged — sim-verified, not hardware-verified — rather than blocking the phases after it.
+same as decisions 8-13's confirmation trail in `docs/DECISIONS.md`. A phase can be marked **PASSED**
+(code-complete, Tier 1-verified) while still *awaiting* Tier 3 confirmation — awaiting is not
+blocking, per this same asynchronous discipline (first applied explicitly to P2 itself, decision 36).
 
 **P0a — Test rig (prerequisite, no APK). Specified in full in Part 6.**
 **STATUS (2026-08-05): Tier 1 harness built and gated, `app/src/test/java/org/offlinemesh/app/sim/`
-— see `docs/DECISIONS.md` decision 14. Tier 2 (ESP32/BlueZ boards) not started — needs physical
-hardware nobody has yet; stays open, not a blocker on later phases per the Part 7 preamble. 7 of 11
+— see `docs/DECISIONS.md` decision 14. 7 of 11
 §6.3 scenarios implemented (S1/S2/S6/S7/S8/S9/S11); S3/S4/S5/S10 documented as blocked on P2/P4/P5.**
-Tier 1 headless JVM harness plus the Tier 2 synthetic-load boards. The harness drives the *real*
-routing classes and is tractable because the decision logic is already extracted into Android-free
-classes (`ConnectionAttemptTracker`, `CatalogFilter`, `TrickleTimer`, `HopTracker`,
-`OpaqueFrameRelay`). Crowd-scale simulation was explicitly dropped in v1; v2 is a scaling project and
-**every claim in it is unfalsifiable without this.** Must come first. D = 3 and D = 400 are both
-first-class configurations from day one, along with the §6.1 injection list and the §6.2 invariants.
+Tier 1 headless JVM harness. The harness drives the *real* routing classes and is tractable because
+the decision logic is already extracted into Android-free classes (`ConnectionAttemptTracker`,
+`CatalogFilter`, `TrickleTimer`, `HopTracker`, `OpaqueFrameRelay`). Crowd-scale simulation was
+explicitly dropped in v1; v2 is a scaling project and **every claim in it is unfalsifiable without
+this.** Must come first. D = 3 and D = 400 are both first-class configurations from day one, along
+with the §6.1 injection list and the §6.2 invariants.
 *Gate: reproduce v1's measured behaviour at D = 3 (93 % empty syncs, one connection per ~50 s) and
 project it to D = 400 (~8 min sync round). If the harness cannot reproduce the known-bad numbers it
-is not modelling anything, and nothing built on it can be trusted. Tier 2 boards must independently
-reproduce the scan-callback storm predicted in §9.2 item 1 — that prediction is currently unverified
-and gates P2's design.*
+is not modelling anything, and nothing built on it can be trusted. §9.2 item 1's scan-callback storm
+prediction now rests on Tier 1 (simulator) plus real-world Tier 3 rounds alone, per the two-tier
+model — no independent synthetic-load cross-check (decision 36's named tradeoff).*
 
 **P0b — Stable peer identity (§5.2).**
 **STATUS (2026-08-05): implemented, compile/test-verified (270 tests), NOT hardware-confirmed —
@@ -922,27 +929,27 @@ direction to maximize position reach and fix a real architectural miss:**
   separate from its now-quiet default Send. Landed alongside this: the SOS preview cap trimmed
   100 -> 65 bytes (`"SOS: "` + ~60 chars), now that it only ever governs genuine emergencies.
 
-**No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
-note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
-comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
-Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
-measured — unaffected by any of the above. **Still not started**: thumbnails (P5, not actually P2's
+**P2: STATUS = PASSED (2026-08-07, user directive, decision 36) — code-complete and Tier
+1-verified, AWAITING Tier 3 confirmation, not blocking further work.** Per the Part 7 preamble's own
+asynchronous-gate discipline: implementation does not wait on a hardware round that's already
+scheduled, and per user direction P2 itself is the first phase explicitly marked PASSED under that
+rule rather than left in limbo pending a live round. The sustained multi-hour field session is still
+planned for AFTER P2 is built, as the one comprehensive validation of the whole v2 stack — this
+PASSED status doesn't change that plan, it just stops treating "no live round yet" as an open
+question about whether to keep building. **Still not started**: thumbnails (P5, not actually P2's
 scope) and Tier B catalogue filter receive-side consumption (decision 34's own named follow-up — the
 filter is broadcast and decoded, nothing yet tests a peer's holdings against it or acts on the
-result). The Tier 2/3 hardware gates remain not started for all of P2. 367 tests, detekt clean, both
-variants compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green.
-**Partially hardware-confirmed as of decision 30** (2026-08-06, 3 phones): presence hop-gradient and
-single-hop position both ran
-live and surfaced the two real bugs + one gap fixed in decision 30 — SOS hop-gradient, SOS content
-preview, and decisions 31-35's work (UI surfacing, multi-hop position, the raised hop ceiling, the
-catalogue filter, and the SOS/message split) are all still untested on real hardware. Decision 35 in
-particular bumped the shared `MeshFrameCodec.VERSION` (4 -> 5) — no pre-decision-35 device can talk
-to a build past this checkpoint until reflashed. Decision 30's own fixes still need their own
-confirming round too.
+result). 367 tests, detekt clean, both variants compile/test/assemble (`assembleDebug`/
+`assembleRelease`, incl. `lintVitalRelease`) green. **Partially hardware-confirmed as of decision 30**
+(2026-08-06, 3 phones): presence hop-gradient and single-hop position both ran live and surfaced the
+two real bugs + one gap fixed in decision 30 — SOS hop-gradient, SOS content preview, and decisions
+31-35's work (UI surfacing, multi-hop position, the raised hop ceiling, the catalogue filter, and the
+SOS/message split) are all still awaiting their own live round on v0.7.3-dev, in progress as of this
+edit. Decision 35 in particular bumped the shared `MeshFrameCodec.VERSION` (4 -> 5) — no
+pre-decision-35 device can talk to a build past this checkpoint until reflashed.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
-*Tier 2: the scan storm is measured, not predicted, and the ScanFilter fix is shown to remove it.*
 *Tier 3: 3 phones — radar dots refresh at broadcast cadence with connections deliberately disabled,
 Trickle confirmed never firing, discovery latency unchanged (batching off below the floor).*
 

@@ -1870,3 +1870,36 @@ detekt clean, both variants compile/test/assemble green. **Production code touch
 means this needs its own fresh test round; no v0.7.x-era device can talk to a build past this point
 without updating.
 
+## 36. Tier 2 removed from the testing methodology; P2 marked PASSED, awaiting Tier 3
+
+Two related, explicit user directives, both process/methodology decisions rather than code changes.
+
+**Tier 2 (synthetic radio load — a few ESP32 boards or a BlueZ Linux box emulating dozens of virtual
+BLE devices, §6.4 of `PLAN-v2.md`) is removed from this project's testing methodology entirely.**
+User's framing: it had become scope creep — process weight with no realistic path to actually
+happening. Across this entire v2 effort, no hardware toward it was ever acquired, and every phase
+that named it as a gate (P0a explicitly, P2 implicitly via §9.2 item 1's scan-storm prediction)
+already treated it as "open, not blocking" in practice per the Part 7 preamble's own asynchronous-
+gate discipline — this decision just makes that permanent and explicit rather than leaving it as a
+perpetually-open, never-resolved line item. `PLAN-v2.md` §6.4 now defines a two-tier model (Tier 1
+simulator, Tier 3 three real phones); kept the "Tier 3" number as-is rather than renumbering it to
+"Tier 2," since every existing decision/status reference in this document already calls it Tier 3
+and renumbering would only create a second thing to keep in sync for no real benefit. The real,
+named cost: §9.2 item 1's crowd-scale scan-storm prediction (200-400 devices) now rests on Tier 1
+(simulator) plus real-world Tier 3 rounds (3 devices) alone — no independent synthetic-load
+cross-check at intermediate density. Not silently dropped; the tradeoff is written into §6.4 and
+P0a's own gate description directly.
+
+**P2 is marked STATUS = PASSED** — code-complete and Tier 1-verified, explicitly AWAITING (not
+blocked on) Tier 3 confirmation, which is in progress on the v0.7.3-dev APK as of this decision. This
+is the first phase explicitly marked PASSED under the Part 7 preamble's own "a hardware gate is a
+checkpoint on the claim, not a precondition for the next phase's code" rule — previously that rule
+was applied implicitly (implementation kept moving without ever formally declaring a phase "done"
+pending hardware); this decision makes the practice explicit and gives P2 the actual status label.
+Nothing about the code changed — this decision is purely process/documentation, updating
+`PLAN-v2.md`'s RESUME HERE block, §6.4, the Part 7 preamble, P0a's STATUS block, and P2's own closing
+summary to reflect both changes.
+
+No test/code impact — 367 tests unchanged, detekt clean, both variants compile/test/assemble green
+(same state as decision 35 left it). **Production code touched: none.** `PLAN-v2.md` only.
+
