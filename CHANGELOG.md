@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.7.6-dev] — Content-sealing epoch key (P6's third slice)
+
+Decision 39 (`docs/DECISIONS.md`), P6's third slice: seals AES-GCM bodies (SOS/position) and macs
+(evidence-meta/nickname/presence/Tier-B-SOS-preview) under a key derived from the group's root key
+rather than the root key directly — `CryptoUtils.contentEpochKey(rootKey, epoch)` =
+`HKDF-SHA256(rootKey, info = epoch)` via Tink's `subtle.Hkdf`, 24h epochs, fully stateless.
+
+**Corrects a claim in `PLAN-v2.md` §4.4**: the epoch key ratchet does not provide forward secrecy
+against phone seizure, contrary to what that section originally said. The group's root key must stay
+permanently retained regardless — decision 38's rotating wire handle and `GroupRepository.getShareCode`'s
+re-shareable invite code both need it forever — so any non-interactive derivation from it (this one
+included) is exactly as forward-secret as the root key's own confidentiality. Real forward secrecy
+needs an interactive Diffie-Hellman step, which this project already rejected for a mesh that
+partitions constantly. What this feature actually provides: domain separation from decision 38's
+(unchanged, unrelated) wire handle, and bounding one independently-leaked epoch key to ~24h of
+exposure instead of the group's whole multi-day-to-months life.
+
+`MeshFrameCodec.sealSos`/`encodePosition`/`encodePresence` each gained a second key parameter
+(`rootKey` for the wire handle, `contentKey` for the actual seal). No `MeshFrameCodec.VERSION` bump —
+wire byte layouts are unchanged, only which key opens/verifies them, so old-build/new-build interop
+now fails silently (open/verify failure) rather than via decode rejection.
+
+390 tests (up from 381), detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green — no `missing_rules.txt`, so the
+new `Hkdf` proguard keep rule is sufficient. **NOT hardware-confirmed** — same caveat as decisions
+37-38, next live round needed for all three together.
+
 ## [0.7.5-dev] — Rotating group handle (P6's second slice)
 
 Decision 38 (`docs/DECISIONS.md`), P6's second slice: closes `PLAN-v2.md` §4.4's cleartext-`groupId`

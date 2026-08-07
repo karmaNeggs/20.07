@@ -1,5 +1,6 @@
 package org.offlinemesh.app.crypto
 
+import com.google.crypto.tink.subtle.Hkdf
 import java.security.MessageDigest
 import java.security.SecureRandom
 import javax.crypto.Cipher
@@ -8,10 +9,24 @@ import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Group keys are random (see JoinCode.generate), not derived from a typed passphrase — nothing
- * here derives a key anymore, only uses one. No secret ever leaves the device in plaintext over
- * the mesh; only the rotating id derived from it does.
+ * Group keys are random (see JoinCode.generate), not derived from a typed passphrase. No secret
+ * ever leaves the device in plaintext over the mesh; only values derived from it do — the rotating
+ * discovery/wire-handle id, and (decision 39, docs/DECISIONS.md) the per-epoch content-sealing key
+ * [contentEpochKey] derives via HKDF. See that function's own doc for what it does and does NOT
+ * buy — it is deliberately NOT a forward-secrecy mechanism against phone seizure, despite
+ * `PLAN-v2.md` §4.4's original wording; the group's root key must stay permanently retained
+ * regardless (the rotating handle and `GroupRepository.getShareCode`'s re-shareable invite code
+ * both depend on it never changing), which makes any *non-interactive* per-epoch derivation from
+ * it — no matter how many hash-chain hops — trivially recomputable by anyone already holding that
+ * root key. Real forward secrecy needs an interactive key-agreement step, which this app
+ * deliberately doesn't do (PLAN-v2.md §4.4 rejected MLS/interactive schemes specifically because
+ * this mesh partitions constantly and can't rely on two members successfully coordinating).
  */
+@Suppress("TooManyFunctions")
+// One small, coherent set of crypto primitives (encrypt/decrypt/mac/hash/rotating-id/epoch-key) —
+// this app's entire symmetric-crypto surface deliberately lives in one object so there's a single
+// place to audit it (see this file's own class doc), not a candidate for splitting into several
+// objects just to dodge a function-count threshold.
 object CryptoUtils {
 
     private const val GCM_IV_LEN = 12
@@ -77,6 +92,81 @@ object CryptoUtils {
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(groupKey, "HmacSHA256"))
             mac.doFinal(w.toString().toByteArray()).copyOfRange(0, ROTATING_ID_LEN)
+        }
+    }
+
+    // decision 39 (docs/DECISIONS.md): 24h, not GATT_GROUP_HANDLE_WINDOW_SECONDS's 72h — this
+    // epoch serves a genuinely different purpose with a different tolerance shape. The wire handle
+    // needs a window WIDE enough that one value, computed once, stays matchable for a relayed
+    // frame's whole ~48h life. The content key instead needs to actually ROTATE within a group's
+    // real lifetime (4-5 days typical, up to JoinCode.MAX_LIFETIME_MILLIS's 180-day ceiling) to be
+    // worth anything at all — a 72h epoch would mean a DEFAULT-length (48h) group might never cross
+    // even one boundary, collapsing this to "no rotation, ever" in the common case. 24h matches
+    // this codebase's existing day-scale constant family (RelayEngine.CONTENT_MAX_AGE_MILLIS 48h,
+    // JoinCode.DEFAULT_LIFETIME_MILLIS 48h) and gives real rotation granularity instead.
+    const val CONTENT_EPOCH_SECONDS = 24L * 60 * 60
+
+    private const val CONTENT_EPOCH_KEY_LEN = 32
+
+    // 96h backward from "now" — comfortably exceeds GATT_GROUP_HANDLE_WINDOW_SECONDS's own 72h
+    // worst-case content-lifetime figure (SOS/position specifically, the only two frame types that
+    // need this candidate list at all — see candidateContentEpochKeys' own doc), with more margin
+    // than that figure itself used. +1 forward (in candidateContentEpochKeys below) mirrors
+    // candidateAdvertisementIds' own +/-1 clock-skew tolerance.
+    private const val CONTENT_EPOCH_BACKWARD_CANDIDATES = 3L
+
+    // Domain-separates this derivation from any other HKDF use that might ever share this app's
+    // "info" namespace, and versions it so a future format change can bump the tag rather than
+    // silently colliding with this one.
+    private const val CONTENT_EPOCH_INFO_PREFIX = "20.07-content-epoch-v1:"
+
+    /** `K_e = HKDF(rootKey, e)`, `e = floor(epochSeconds / epochLenSeconds)` — the non-interactive
+     *  per-epoch content-sealing key (`PLAN-v2.md` §4.4, decision 39, `docs/DECISIONS.md`). Every
+     *  member derives this independently from the same root key and their own wall clock; nothing
+     *  is transmitted or coordinated. Replaces the root key directly at every AES-GCM seal (SOS/
+     *  position/evidence bodies) and HMAC auth tag (evidence-meta/nickname/presence macs, Tier B's
+     *  SOS broadcast-preview mac) — see [org.offlinemesh.app.ble.MeshFrameCodec.groupHandle]'s own
+     *  doc for the SEPARATE, unrelated wire-obfuscation epoch this must never be confused with
+     *  (that one stays on the root key, unchanged, forever).
+     *
+     *  **This is NOT a forward-secrecy mechanism against phone seizure** — see this file's own
+     *  class doc for the full reasoning (the root key must stay permanently retained regardless,
+     *  which makes any non-interactive per-epoch value trivially recomputable by anyone who already
+     *  has it). What it actually buys, honestly: domain separation from the wire-handle derivation
+     *  (a bug or leak in one derivation doesn't hand over the other), and bounding a single leaked
+     *  `K_e` (e.g. a crash dump, a memory scrape while briefly unlocked) to about
+     *  [CONTENT_EPOCH_SECONDS] of exposure instead of the group's entire life — real, just
+     *  narrower than "forward secrecy" implies. Uses Tink's `subtle.Hkdf` directly (already a
+     *  pinned dependency, `tink-android`), matching [org.offlinemesh.app.crypto.SenderIdentity]'s
+     *  own established precedent of using Tink's `subtle.*` classes directly rather than the
+     *  `KeysetHandle`/registry API. */
+    fun contentEpochKey(
+        rootKey: ByteArray,
+        epochSeconds: Long = System.currentTimeMillis() / 1000,
+        epochLenSeconds: Long = CONTENT_EPOCH_SECONDS,
+    ): ByteArray {
+        val epoch = epochSeconds / epochLenSeconds
+        val info = "$CONTENT_EPOCH_INFO_PREFIX$epoch".toByteArray()
+        return Hkdf.computeHkdf("HmacSHA256", rootKey, null, info, CONTENT_EPOCH_KEY_LEN)
+    }
+
+    /** Candidate [contentEpochKey] values for opening content whose OWN authoring epoch isn't
+     *  knowable before the seal is actually opened — concretely, SOS and position, whose timestamp
+     *  lives inside the AES-GCM body, not the cleartext envelope. (Evidence-meta/nickname/presence/
+     *  the Tier B SOS preview all carry an already-cleartext timestamp field, so those derive a
+     *  single exact [contentEpochKey] directly from it instead — no candidate list needed, and
+     *  none of the ambiguity this function exists to resolve.) `e+1` down through `e-3`: 96h
+     *  backward coverage plus one window forward for ordinary clock skew — see
+     *  [CONTENT_EPOCH_BACKWARD_CANDIDATES]'s own doc for why that backward figure is enough. */
+    fun candidateContentEpochKeys(
+        rootKey: ByteArray,
+        nowSeconds: Long = System.currentTimeMillis() / 1000,
+        epochLenSeconds: Long = CONTENT_EPOCH_SECONDS,
+    ): List<ByteArray> {
+        val epoch = nowSeconds / epochLenSeconds
+        return (epoch + 1 downTo epoch - CONTENT_EPOCH_BACKWARD_CANDIDATES).map { e ->
+            val info = "$CONTENT_EPOCH_INFO_PREFIX$e".toByteArray()
+            Hkdf.computeHkdf("HmacSHA256", rootKey, null, info, CONTENT_EPOCH_KEY_LEN)
         }
     }
 

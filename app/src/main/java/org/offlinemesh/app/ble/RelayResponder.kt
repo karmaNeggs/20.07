@@ -376,10 +376,16 @@ class RelayResponder(
             // first for every group we're in. This is what makes presence work when beacon discovery
             // is one-directional: the single GATT link carries it both ways, so a peer that can't
             // hear our beacon still learns we're here. Costs ~70 bytes and one HMAC per group.
-            repo.getGroupKey(g.id)?.let { key ->
+            repo.getGroupKey(g.id)?.let { rootKey ->
                 val identity = repo.getSenderKeyPair(g.id)
+                val timestamp = System.currentTimeMillis()
+                // Decision 39 (docs/DECISIONS.md): captured as one local, reused for both the frame
+                // and the epoch derivation — two separate System.currentTimeMillis() calls could
+                // straddle an epoch boundary and derive a key that doesn't match what's actually
+                // authenticated.
+                val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / MILLIS_PER_SECOND)
                 frames += MeshFrameCodec.encodePresence(
-                    g.id, repo.deviceId, System.currentTimeMillis(), key,
+                    g.id, repo.deviceId, timestamp, rootKey, contentKey,
                     senderPublicKey = identity?.publicKey, signingPrivateKey = identity?.privateKey
                 )
             }
@@ -438,14 +444,18 @@ class RelayResponder(
      *  even to a peer that turns out not to be a member — they receive opaque bytes, not our
      *  members' GPS. */
     private fun positionFramesToPush(groupId: String, toPeer: String? = null): List<ByteArray> {
-        val key = repo.getGroupKey(groupId) ?: return emptyList()
+        val rootKey = repo.getGroupKey(groupId) ?: return emptyList()
         val frames = mutableListOf<ByteArray>()
         val myLoc = locationTracker.location.value
         if (myLoc != null) {
             val nowSec = System.currentTimeMillis() / 1000
+            // Decision 39 (docs/DECISIONS.md): sealed under the current epoch's derived content
+            // key; groupHandle (inside encodePosition) stays on the root key, unchanged.
+            val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
             frames.add(
                 MeshFrameCodec.encodePosition(
-                    key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(), nowSec, 0,
+                    rootKey, contentKey, repo.deviceId, myLoc.latitude, myLoc.longitude,
+                    myLoc.accuracy.toInt(), nowSec, 0,
                     signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
                 )
             )
@@ -478,9 +488,13 @@ class RelayResponder(
                 if (sealed != null && handle != null) {
                     MeshFrameCodec.reframePositionForRelay(handle, record.hop + 1, sealed)
                 } else {
-                    // No original bytes (a record predating this, or our own fix) — seal it ourselves.
+                    // No original bytes (a record predating this, or our own fix) — seal it
+                    // ourselves. Content key derives from the RECORD's own authored time (decision
+                    // 39, docs/DECISIONS.md), not "now" — this is a re-seal of someone else's
+                    // content, not a fresh authoring.
+                    val recordContentKey = CryptoUtils.contentEpochKey(rootKey, record.timestampSec)
                     MeshFrameCodec.encodePosition(
-                        key, senderId, record.lat, record.lon,
+                        rootKey, recordContentKey, senderId, record.lat, record.lon,
                         record.accuracyM, record.timestampSec, record.hop + 1
                     )
                 }
@@ -534,14 +548,18 @@ class RelayResponder(
             takeOpaqueSosCustody(frame, peerAddress)
             return
         }
-        val (groupId, key) = resolved
-        // A failed decrypt (wrong key — can't happen, we just resolved this exact group's key from
-        // the handle — tampered ciphertext, or a GCM tag mismatch) IS the auth failure now; there
-        // is no separate mac to check. Replaces the old authOk(...) call entirely.
-        val body = MeshFrameCodec.openSos(frame.sealed, key) ?: run {
-            Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
-            return
-        }
+        val (groupId, rootKey) = resolved
+        // A failed decrypt (wrong key, tampered ciphertext, or a GCM tag mismatch) IS the auth
+        // failure now; there is no separate mac to check. Replaces the old authOk(...) call
+        // entirely. Decision 39 (docs/DECISIONS.md): tries each candidate content-epoch key in
+        // turn — SOS's own timestamp lives inside the seal, so the exact epoch isn't knowable
+        // before something actually opens.
+        val body = CryptoUtils.candidateContentEpochKeys(rootKey)
+            .firstNotNullOfOrNull { MeshFrameCodec.openSos(frame.sealed, it) }
+            ?: run {
+                Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
+                return
+            }
         ingestOpenedSos(groupId, frame, body, peerAddress)
     }
 
@@ -722,12 +740,15 @@ class RelayResponder(
     private suspend fun evidMetaIsAuthentic(
         frame: MeshFrameCodec.Frame.EvidMeta,
         groupId: String,
-        key: ByteArray,
+        rootKey: ByteArray,
     ): Boolean {
         val macInput = MeshFrameCodec.evidMacInput(
             frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks, frame.mimeType
         )
-        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)) {
+        // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — frame.timestamp
+        // is already cleartext in the envelope, so the exact epoch is known directly.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.timestamp / MILLIS_PER_SECOND)
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
             Log.w("RelayResponder", "evidence header failed auth for a group we hold — dropping")
             return false
         }
@@ -796,8 +817,11 @@ class RelayResponder(
             takeOpaqueCustody(frame, peerAddress)
             return
         }
-        val (groupId, key) = resolved
-        val body = MeshFrameCodec.openPosition(frame.sealed, key) ?: return
+        val (groupId, rootKey) = resolved
+        // Decision 39 (docs/DECISIONS.md): tries each candidate content-epoch key — position's own
+        // timestamp lives inside the seal, same reasoning as handleSos's own candidate loop.
+        val body = CryptoUtils.candidateContentEpochKeys(rootKey)
+            .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return
         ingestOpenedPosition(groupId, frame, body, peerAddress)
     }
 
@@ -886,10 +910,14 @@ class RelayResponder(
     private suspend fun presenceIsAuthentic(
         frame: MeshFrameCodec.Frame.Presence,
         groupId: String,
-        key: ByteArray,
+        rootKey: ByteArray,
     ): Boolean {
         val macInput = MeshFrameCodec.presenceMacInput(groupId, frame.senderId, frame.timestamp)
-        val macOk = CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)
+        // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — frame.timestamp
+        // is already cleartext, and presenceWithinSkew (checked before this is ever called) already
+        // bounds it to within seconds of "now" anyway.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.timestamp / MILLIS_PER_SECOND)
+        val macOk = CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)
         return macOk && presencePassesSenderIdentityChecks(frame, groupId, macInput)
     }
 
@@ -947,9 +975,16 @@ class RelayResponder(
     /** The member path for a nickname whose group we could actually resolve. Split from
      *  [handleNickname] to keep both functions' return counts within detekt's limit — same reason
      *  [ingestOpenedSos] is split from [handleSos]. */
-    private suspend fun ingestResolvedNickname(groupId: String, key: ByteArray, frame: MeshFrameCodec.Frame.Nickname) {
+    private suspend fun ingestResolvedNickname(
+        groupId: String,
+        rootKey: ByteArray,
+        frame: MeshFrameCodec.Frame.Nickname,
+    ) {
         val macInput = MeshFrameCodec.nicknameMacInput(groupId, frame.senderId, frame.username, frame.updatedAt)
-        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)) {
+        // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list —
+        // frame.updatedAt is already cleartext, so the exact epoch is known directly.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.updatedAt / MILLIS_PER_SECOND)
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
             Log.w("RelayResponder", "nickname failed auth for a group we hold — dropping")
             return
         }
@@ -1161,6 +1196,10 @@ class RelayResponder(
         // How much of a sender/group id may appear in a log line — enough to tell peers apart
         // while never writing a full identifier to disk (see DiagnosticsLog's class doc).
         internal const val SENDER_ID_LOG_CHARS = 8
+
+        /** millis-to-epoch-seconds conversion, for [CryptoUtils.contentEpochKey]'s callers here
+         *  (decision 39, `docs/DECISIONS.md`). */
+        private const val MILLIS_PER_SECOND = 1000L
 
         private const val MAX_TRACKED_WFD_PEERS = 200
         private const val MAX_CATALOG_ITEMS_PER_SESSION = 200

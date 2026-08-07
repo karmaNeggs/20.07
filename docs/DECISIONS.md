@@ -2108,3 +2108,108 @@ bonus not separately designed for), `MeshProtocol.kt` (doc-only). **NOT hardware
 `VERSION` 7 wire break means no pre-checkpoint test APK can talk to this build until reflashed; next
 live round needed for all of decisions 37-38 together (37 was never hardware-confirmed either).
 
+## 39. Content-sealing epoch key — and why it is NOT forward secrecy, correcting `PLAN-v2.md` §4.4
+
+P6's third item. `PLAN-v2.md` §4.4 called for a "non-interactive epoch key ratchet:
+`K_e = HKDF(root, e)` ... gives forward secrecy against later seizure." Before implementing, two
+research passes (one mapping every call site, one validating the actual cryptographic claim) found
+that **no non-interactive design — stateless or a stateful hash-ratchet with deletion — can deliver
+real forward secrecy here**, and this is worth stating plainly rather than burying in a footnote,
+since it corrects this project's own prior planning document:
+
+- The group's root key **must** stay permanently retained in `GroupKeyStore`, unconditionally, for
+  two independent reasons already shipped before this decision: decision 38's wire-obfuscation
+  handle (`MeshFrameCodec.groupHandle`/`GroupRepository.resolveGroupKeyByHandle`) needs it stable
+  forever, and `GroupRepository.getShareCode` reconstructs the original raw 32-byte key to
+  regenerate the shareable invite code (`JoinCode.encode` puts the raw key on the wire verbatim —
+  "no owner role, every member can invite" depends on this).
+- Any non-interactive derivation from a permanently-retained secret — no matter how many hash-chain
+  hops sit in between, even with each intermediate state deleted after use — is trivially
+  recomputable by anyone holding that secret, since the derivation algorithm is public and needs no
+  fresh/random input at each step. "Delete `state_e`" protects nothing when `state_e` is a pure,
+  public function of a key the attacker already has. This is a general result about non-interactive
+  ratchets, not a narrow bug in one design attempt.
+- Real forward secrecy needs an interactive step (a fresh Diffie-Hellman exchange, the way Signal/
+  TLS 1.3/Noise all do it) — exactly what `PLAN-v2.md` §4.4 already rejected in favor of
+  non-interactivity, deliberately, because this mesh partitions constantly and can't rely on two
+  members successfully coordinating a live exchange.
+
+**ELI5 of what's actually lost/kept, for the record**: if a phone is seized, the group's whole
+history is exposed either way — this feature changes nothing about that, because the root key has
+to survive on-device regardless (wire handle + invite code both need it). What this feature actually
+buys: domain separation between the wire-obfuscation handle and the content seal (so a compromise of
+one derivation's output doesn't hand over the other), and bounding a single *independently*-leaked
+`K_e` (a crash dump, a memory scrape catching one epoch's derived key but not the root) to ~24h of
+exposure instead of the group's whole life (typically 4-5 days, up to `JoinCode.MAX_LIFETIME_MILLIS`
+= 180 days). Given that framing, the honest stateless version — matching §4.4's own literal formula —
+was built anyway, since it's genuinely useful for that narrower, real threat, just not the seizure
+threat the old wording implied.
+
+**Design**: `CryptoUtils.contentEpochKey(rootKey, epochSeconds, epochLenSeconds = CONTENT_EPOCH_SECONDS)`
+computes `HKDF-SHA256(ikm = rootKey, salt = null, info = "20.07-content-epoch-v1:" + epoch, len = 32)`
+via Tink's `subtle.Hkdf.computeHkdf` — already a pinned dependency (`tink-android:1.8.0`), same
+"subtle API, not `KeysetHandle`" precedent `SenderIdentity.kt` already established for Ed25519, so no
+new dependency and no new API style. `CONTENT_EPOCH_SECONDS` = 24h — matches this codebase's existing
+day-scale constant family (`RelayEngine.CONTENT_MAX_AGE_MILLIS` = 48h, `GATT_GROUP_HANDLE_WINDOW_SECONDS`
+= 72h, `JoinCode.DEFAULT_LIFETIME_MILLIS` = 48h) and gives real rotation granularity across this app's
+actual group lifetimes; a 72h epoch (matching the wire-handle window) was rejected since a
+default-length group might not even cross one boundary, collapsing the feature to "no rotation" in the
+common case. **Fully stateless** — no `GroupKeyStore`/`AppDatabase`/`GroupRepository` schema changes at
+all; every call site already holds the root key locally and derives fresh, which is also what makes
+the whole feature directly unit-testable with no Robolectric/Keystore constraint, unlike everything
+else key-adjacent in this codebase.
+
+**Two independent, non-conflated "epoch" concepts.** Decision 38's wire-obfuscation handle stays
+exactly as-is, keyed off the permanent root key, completely unchanged by this work. The new
+content-sealing key is a separate derivation with its own (shorter) epoch length, used only for the
+actual AES-GCM seal (position/SOS bodies) and HMAC auth tags (evidence-meta/nickname/presence macs,
+Tier B's SOS broadcast-preview mac) that previously used the root key directly. `MeshFrameCodec.sealSos`/
+`encodePosition`/`encodePresence` each gained a second key parameter (`rootKey` for their internal
+`groupHandle` call, unchanged; `contentKey` for the actual seal/mac) — `sealSosBody`/`openSos`/
+`openPosition`/bare `authTag`/`encrypt` calls keep their existing single-key shape, callers now just
+pass a derived key instead of the root key in.
+
+**Candidate-key list only where the timestamp is hidden pre-decrypt.** `candidateContentEpochKeys`
+returns 5 keys (epoch+1 down through epoch-3 — 96h backward coverage, exceeding decision 38's own 72h
+worst-case content-lifetime figure with margin, +1 forward mirroring `candidateAdvertisementIds`' own
+±1 skew tolerance) and is needed only for SOS/position, whose timestamp lives inside the AES-GCM seal
+itself (unknowable before a successful open). Evidence-meta/nickname/presence/Tier B's SOS
+broadcast-preview all derive a single exact epoch key from an already-cleartext envelope timestamp
+field — no candidate list needed there, same distinction decision 38 already drew for its own
+±1-window tolerance.
+
+**Explicitly scoped out, unchanged**: `RelayResponder`'s Wi-Fi Direct handoff path
+(`maybeAccelerateOverWifiDirect`/`handleWifiDirectHandoff`/`handleWifiDirectAccept`) still macs
+directly under the root key — same precedent decision 38 already set never migrating WFD onto the
+handle scheme, and `NEXT_STEPS.md`'s open "remove or keep off?" question already covers this
+experimental, off-by-default path.
+
+**No `MeshFrameCodec.VERSION` bump** — wire byte layouts are completely unchanged, only which key
+opens/verifies them. The resulting old-build/new-build interop failure mode is different from
+decisions 37-38's: frames still decode fine (envelope/version checks pass), they just fail to
+open/verify (wrong key), surfacing as silent drops rather than a decode rejection. Same "reflash
+before cross-build testing" caveat those decisions carry, via a different mechanism.
+
+390 tests (up from 381) — 7 new in `CryptoUtilsTest` (epoch-key stability within a window, rotation
+across a boundary, determinism, differs under a different root key, never collides with
+`rotatingAdvertisementId`'s output under the same key — domain separation confirmed empirically,
+mirroring decision 38's own "never collide" test — plus `candidateContentEpochKeys` coverage of both
+the current epoch and a creation-time key checked just under decision 38's 72h figure later) and 2 new
+in `MeshFrameCodecTest` (`sos`/`position` body opens under its content epoch key but explicitly fails
+to open under the raw root key directly — the empirical proof the key migration actually took effect,
+not just the two-param signature). detekt clean (two new `@Suppress("LongParameterList")` test helpers
+mirroring `MeshFrameCodec.sealSos`'s own suppress, one new `@Suppress("LargeClass")` on
+`MeshFrameCodecTest` mirroring `CryptoUtils`'s own `TooManyFunctions` suppress), both variants
+compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`, R8-minified) green
+— no `missing_rules.txt` emitted, confirming the new `-keep class
+com.google.crypto.tink.subtle.Hkdf { *; }` proguard rule (mirroring the existing Ed25519 rules) is
+sufficient. **Production code touched**: `CryptoUtils.kt` (`contentEpochKey`/`candidateContentEpochKeys`
++ constants, class doc rewritten to explain the not-forward-secrecy property up front),
+`proguard-rules.pro` (`Hkdf` keep rule), `MeshFrameCodec.kt` (`sealSos`/`encodePosition`/
+`encodePresence` gain `contentKey`), `RelayEngine.kt` (`createSos`/`createEvidence`/`setNickname`/
+`maybeReassemble` derive and use `contentEpochKey`), `RelayResponder.kt` (every outgoing/incoming site
+for SOS/position/presence/evidence-meta/nickname), `BeaconRadio.kt` (Tier B position + SOS
+broadcast-preview mac). **NOT hardware-confirmed** — same as decisions 37-38, flagged for the next
+live round: old-build/new-build phones should fail to interoperate on sealed content (silently, not
+via decode rejection); two new-build phones should round-trip correctly.
+

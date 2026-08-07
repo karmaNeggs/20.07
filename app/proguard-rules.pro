@@ -44,6 +44,11 @@
 -keep class com.google.crypto.tink.subtle.Ed25519Sign$KeyPair { *; }
 -keep class com.google.crypto.tink.subtle.Ed25519Verify { *; }
 
+# Decision 39 (docs/DECISIONS.md): CryptoUtils.contentEpochKey uses Tink's subtle.Hkdf directly,
+# same "subtle API, not KeysetHandle" precedent as the Ed25519 rules above. Hkdf's own JCA Mac
+# provider lookup is the same kind of reflective path those rules already exist for.
+-keep class com.google.crypto.tink.subtle.Hkdf { *; }
+
 # Strip every android.util.Log call out of release builds entirely (R8 removes the call site, not
 # just silences output) — a security-scan finding: this app logs peer BLE addresses, connection
 # diagnostics, and warning messages (RelayResponder, MeshGattClient, the screens' defensive catch

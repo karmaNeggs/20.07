@@ -204,4 +204,76 @@ class CryptoUtilsTest {
         )
         assertTrue(candidatesAtReceiveTime.any { it.contentEquals(handleAtCreation) })
     }
+
+    // ---------- contentEpochKey / candidateContentEpochKeys (decision 39, docs/DECISIONS.md) ----------
+    // NOT a forward-secrecy mechanism — see CryptoUtils' own class doc and decision 39's write-up
+    // for why a non-interactive derivation from a permanently-retained root key can never be one.
+    // What these tests confirm: the derivation is stable within an epoch, rotates across a boundary,
+    // is domain-separated from the wire-handle derivation (rotatingAdvertisementId), and the
+    // candidate list actually covers the backward window it claims to.
+
+    @Test
+    fun `content epoch key is stable within the same epoch`() {
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        assertArrayEquals(
+            CryptoUtils.contentEpochKey(key, epoch),
+            CryptoUtils.contentEpochKey(key, epoch + 3600), // same 24h epoch
+        )
+    }
+
+    @Test
+    fun `content epoch key changes across an epoch boundary`() {
+        val key = randomKey()
+        val keyBefore = CryptoUtils.contentEpochKey(key, 1_700_000_000L)
+        val keyAfter = CryptoUtils.contentEpochKey(key, 1_700_000_000L + CryptoUtils.CONTENT_EPOCH_SECONDS)
+        assertFalse(keyBefore.contentEquals(keyAfter))
+    }
+
+    @Test
+    fun `content epoch key is deterministic for the same key and epoch`() {
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        assertArrayEquals(CryptoUtils.contentEpochKey(key, epoch), CryptoUtils.contentEpochKey(key, epoch))
+    }
+
+    @Test
+    fun `content epoch key differs under a different root key`() {
+        val epoch = 1_700_000_000L
+        val keyA = CryptoUtils.contentEpochKey(randomKey(), epoch)
+        val keyB = CryptoUtils.contentEpochKey(randomKey(), epoch)
+        assertFalse(keyA.contentEquals(keyB))
+    }
+
+    @Test
+    fun `content epoch key never collides with the wire handle derived from the same root key`() {
+        // Domain separation, confirmed empirically: the same root key producing both a wire handle
+        // and a content-sealing key at the same instant must never produce the same bytes — mirrors
+        // "the GATT window and the beacon's own window never collide" above for this newer pair.
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        val wireHandle = CryptoUtils.rotatingAdvertisementId(key, epoch, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS)
+        val contentKey = CryptoUtils.contentEpochKey(key, epoch)
+        assertFalse(wireHandle.contentEquals(contentKey))
+    }
+
+    @Test
+    fun `candidate content epoch keys include the current epoch's key`() {
+        val key = randomKey()
+        val now = 1_700_000_000L
+        val current = CryptoUtils.contentEpochKey(key, now)
+        assertTrue(CryptoUtils.candidateContentEpochKeys(key, now).any { it.contentEquals(current) })
+    }
+
+    @Test
+    fun `candidate content epoch keys still resolve a creation-time key up to 72h later`() {
+        // 72h is decision 38's own worst-case content-lifetime figure (GATT_GROUP_HANDLE_WINDOW_SECONDS);
+        // the candidate list's 96h backward coverage (4 epochs at 24h each) must clear it with margin.
+        val key = randomKey()
+        val createdAt = 1_700_000_000L
+        val keyAtCreation = CryptoUtils.contentEpochKey(key, createdAt)
+        val receivedMuchLater = createdAt + 72L * 60 * 60
+        val candidatesAtReceiveTime = CryptoUtils.candidateContentEpochKeys(key, receivedMuchLater)
+        assertTrue(candidatesAtReceiveTime.any { it.contentEquals(keyAtCreation) })
+    }
 }

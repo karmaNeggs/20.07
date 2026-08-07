@@ -487,7 +487,7 @@ class BeaconRadio(
      *  radio when the payload actually changed" behaviour for free, without a separate change-
      *  detection mechanism. No group key access needed when there's no fix — cheap common case. */
     @Suppress("ReturnCount") // three early-outs (no fix / not due yet / freshly sealed) read clearer than nesting
-    private fun refreshBroadcastTierPositionIfDue(groupId: String, key: ByteArray): Long {
+    private fun refreshBroadcastTierPositionIfDue(groupId: String, rootKey: ByteArray): Long {
         val myLoc = locationTracker.location.value
         if (myLoc == null) {
             broadcastTierPositionFrame = null
@@ -501,8 +501,11 @@ class BeaconRadio(
             return broadcastTierLastPositionSealedAtMs
         }
         val nowSec = nowMs / MILLIS_PER_SECOND
+        // Decision 39 (docs/DECISIONS.md): sealed under the current epoch's derived content key;
+        // groupHandle (inside encodePosition) stays on the root key, unchanged.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
         broadcastTierPositionFrame = MeshFrameCodec.encodePosition(
-            key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
+            rootKey, contentKey, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
             nowSec, hop = 0, signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey,
         )
         broadcastTierLastPositionSealedAtMs = nowMs
@@ -562,11 +565,14 @@ class BeaconRadio(
         if (broadcastTierSosContentCached && sosId == broadcastTierSosContentCacheId) {
             return broadcastTierSosContentCache
         }
-        val key = repo.getGroupKey(groupId)
-        val entity = key?.let { repo.sosDao.getById(sosId) }
-        val content = if (key != null && entity != null && entity.message.isNotEmpty()) {
+        val rootKey = repo.getGroupKey(groupId)
+        val entity = rootKey?.let { repo.sosDao.getById(sosId) }
+        val content = if (rootKey != null && entity != null && entity.message.isNotEmpty()) {
             val macInput = MeshFrameCodec.broadcastSosMacInput(sosId, groupId, entity.message, entity.timestamp)
-            MeshProtocol.SosAlert.Content(entity.message, entity.timestamp, CryptoUtils.authTag(key, macInput))
+            // Decision 39 (docs/DECISIONS.md): single derivation — entity.timestamp is already
+            // cleartext-known, no candidate list needed.
+            val contentKey = CryptoUtils.contentEpochKey(rootKey, entity.timestamp / MILLIS_PER_SECOND)
+            MeshProtocol.SosAlert.Content(entity.message, entity.timestamp, CryptoUtils.authTag(contentKey, macInput))
         } else {
             null
         }
@@ -996,8 +1002,11 @@ class BeaconRadio(
     private suspend fun ingestBroadcastTierPosition(groupId: String, positionFrame: ByteArray) {
         val frame = MeshFrameCodec.decode(positionFrame) as? MeshFrameCodec.Frame.PositionSealed ?: return
         if (frame.hop >= MAX_POSITION_RELAY_HOPS) return
-        val key = repo.getGroupKey(groupId) ?: return
-        val body = MeshFrameCodec.openPosition(frame.sealed, key) ?: return
+        val rootKey = repo.getGroupKey(groupId) ?: return
+        // Decision 39 (docs/DECISIONS.md): tries each candidate content-epoch key — same reasoning
+        // as RelayResponder.handlePositionSealed's own candidate loop for the GATT path.
+        val body = CryptoUtils.candidateContentEpochKeys(rootKey)
+            .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return
         if (body.senderId == repo.deviceId) return // never ingest our own broadcast fix back into our own tracker
         val pinned = repo.peerKeyDao.get(groupId, body.senderId)?.publicKey
         if (!RelayResponder.signatureCheckPasses(pinned, body.signature, body.signedBytes)) {
@@ -1028,9 +1037,12 @@ class BeaconRadio(
      *  preview's own hop gradient already comes from, so it disappears the moment the underlying
      *  SOS itself does without this class needing its own separate staleness logic. */
     private fun verifyBroadcastSosContent(groupId: String, sosId: String, content: MeshProtocol.SosAlert.Content) {
-        val key = repo.getGroupKey(groupId) ?: return
+        val rootKey = repo.getGroupKey(groupId) ?: return
         val macInput = MeshFrameCodec.broadcastSosMacInput(sosId, groupId, content.message, content.timestamp)
-        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), content.mac)) {
+        // Decision 39 (docs/DECISIONS.md): single derivation — content.timestamp is already
+        // cleartext-known, no candidate list needed.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, content.timestamp / MILLIS_PER_SECOND)
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), content.mac)) {
             Log.w(TAG, "broadcast-tier SOS content failed mac verification — dropping")
             return
         }

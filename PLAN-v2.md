@@ -6,6 +6,28 @@ document (including inline "STATUS" notes inside Part 7 below) is detail underne
 competing source. If a phase's own section below ever seems to disagree with this block, this block
 is current and that section is what's stale.
 
+- **2026-08-07, decision 39 (`docs/DECISIONS.md`): P6's third slice, content-sealing epoch key,
+  DONE — and a correction to this document's own §4.4.** §4.4 originally claimed the epoch key
+  ratchet "gives forward secrecy against later seizure." It does not, and cannot as a non-interactive
+  design: the root key must stay permanently retained regardless (decision 38's wire handle and
+  `GroupRepository.getShareCode`'s invite code both need it forever), so any non-interactive
+  derivation from it — stateless or a stateful hash-ratchet with deletion — is trivially
+  recomputable by anyone holding that root key. Real forward secrecy needs an interactive DH step,
+  which §4.4 already rejected for non-interactivity (this mesh partitions constantly). Built the
+  honest stateless version anyway (`CryptoUtils.contentEpochKey` = `HKDF(rootKey, epoch)` via Tink's
+  `subtle.Hkdf`, 24h epochs, fully stateless), which now seals SOS/position bodies and macs
+  evidence-meta/nickname/presence/Tier-B-SOS-preview instead of the root key directly — genuinely
+  useful for bounding an independently-leaked single derived key to ~24h instead of the group's whole
+  life, just not what the old wording implied. See decision 39's own entry for the full ELI5 and the
+  two-independent-epoch-concepts distinction from decision 38's (unrelated, unchanged) wire handle.
+  390 tests (up from 381), detekt clean, both variants compile/test/assemble green (no
+  `missing_rules.txt` — the new Tink `Hkdf` proguard rule is sufficient). Version bumped to
+  v0.7.6-dev, fresh debug APK built and `aapt`-confirmed before committing. **No wire version bump**
+  this time (byte layouts unchanged, only which key opens them) — **NOT hardware-confirmed**, same
+  caveat as 37-38 via a different mechanism (silent open/verify failure, not decode rejection). Full
+  detail in Part 7's own P6 entry. **Remaining P6 scope, not started**: frame padding to size
+  buckets.
+
 - **2026-08-07, decision 38 (`docs/DECISIONS.md`): P6's second slice, rotating group handle, DONE.**
   Closes `PLAN-v2.md` §4.4's cleartext-`groupId` traffic-analysis gap — every relayed frame type
   (SOS/position/evidence-meta/nickname/presence) now carries an opaque `HMAC(groupKey, epoch)`
@@ -20,8 +42,7 @@ is current and that section is what's stale.
   from 370), detekt clean, both variants compile/test/assemble green. Version bumped to v0.7.5-dev,
   fresh debug APK built and `aapt`-confirmed before committing. **NOT hardware-confirmed** —
   `MeshFrameCodec.VERSION` 7 is a wire break, same as decision 37's own (also still unconfirmed) —
-  next live round needed for both together. Full detail in Part 7's own P6 entry. **Remaining P6
-  scope, not started**: non-interactive epoch key ratchet, frame padding to size buckets.
+  next live round needed for both together. Full detail in Part 7's own P6 entry.
 
 - **2026-08-07, decision 37 (`docs/DECISIONS.md`): P6's first slice, SOS body encryption, DONE.**
   Closes `NEXT_STEPS.md`'s long-flagged "SOS text is authenticated but not encrypted" gap — SOS
@@ -177,6 +198,13 @@ is current and that section is what's stale.
   their side (as of 2026-08-06, still not run) — will bring back logs afterward for review. This is
   a bigger test than anything done so far (device count and duration both); treat its findings as
   the most current information available, ahead of everything summarized above.
+- **Sequencing, refined again (2026-08-07, user directive): the field test now also waits on P4 and
+  P6, not just P0a-P3.** Explicit scope: P5 (Media) and P7 (bitchat bridge) are the only phases
+  allowed to still be outstanding when that field test happens — P4 (Couriers) and the rest of P6
+  (frame padding — 3 of 4 P6 items landed 2026-08-07 as decisions 37-39) must be
+  code-complete first. Practical consequence: keep building P4 and P6 now, same "build ahead of the
+  one field test" discipline the P2 bullet above already established — this just widens which phases
+  that applies to.
 
 **Written:** 2026-07-31, after reading bitchat's WHITEPAPER.md end-to-end and re-reading our own
 transport layer and live diagnostics 8/9/10 against it.
@@ -439,7 +467,7 @@ transfer cleanly, because our unit of encryption is a *group*, not a *pair*.
 | Option | Verdict |
 |---|---|
 | **MLS (RFC 9420)** | **Reject.** MLS needs a delivery service that totally orders commits (RFC 9420 §14). A partition-heavy BLE mesh forks constantly and MLS forks are not recoverable without out-of-band resync. Wrong tool for this network. |
-| **Non-interactive epoch ratchet** | **Adopt.** `K_e = HKDF(root, e)` where `e = floor(now / epochLen)`. Every member derives it independently — no commits, no coordination, no delivery service. Keep N previous epoch keys for skew and store-and-forward. Gives forward secrecy against *later* seizure, which is exactly our threat model, and composes with the join-code-v2 expiry field we already ship. |
+| **Non-interactive epoch ratchet** | **Adopt — but see decision 39's correction below.** `K_e = HKDF(root, e)` where `e = floor(now / epochLen)`. Every member derives it independently — no commits, no coordination, no delivery service. Keep N previous epoch keys for skew and store-and-forward. **Does NOT give forward secrecy against seizure** (the root key must stay permanently retained regardless, for the rotating handle and the invite-code reconstruction below — any non-interactive derivation from a retained secret is exactly as forward-secret as that secret is confidential, whether stateless or a stateful ratchet with deletion; real forward secrecy needs an interactive DH step this partition-heavy mesh can't rely on). What it actually buys: domain separation from the wire handle, and bounding one independently-leaked epoch key to a single epoch's exposure window instead of the group's whole life. Composes with the join-code-v2 expiry field we already ship. |
 | **Rotating group handle on the wire** | **Adopt.** Replace cleartext `groupId` in every frame with the beacon's existing `HMAC(groupKey, epoch)` handle. Relays dedup and forward on the handle without learning group membership. Receiver cost is bounded by number of groups joined (small). Closes the traffic-analysis gap in the pass-23 backlog. |
 | **Per-sender ratchet / sender keys for PCS** | Defer past v2. Real value, but needs coordination we do not have yet. |
 | **Padding to size buckets** | Adopt for *all* frame types (bitchat pads only Noise packets and lists the rest as future work). |
@@ -1027,7 +1055,7 @@ Wi-Fi Direct removed.
 
 **P6 — Crypto (§4.4).** Epoch key ratchet, rotating group handle replacing cleartext `groupId`,
 padding for all frame types, SOS body encryption.
-**STATUS (2026-08-07): first two slices done — see `docs/DECISIONS.md` decisions 37-38.**
+**STATUS (2026-08-07): first three slices done — see `docs/DECISIONS.md` decisions 37-39.**
 
 **Slice 1 (37) — SOS body encryption.** `SosEntity.message`/`senderId`/`timestamp`/`isAlert` are now
 AES-GCM sealed under the group key (`MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`), replacing the
@@ -1053,12 +1081,26 @@ bug: `opaqueSos.framesToRelay(...)` was never called anywhere since decision 37 
 custody accepted frames but never forwarded them. `MeshFrameCodec.VERSION` 6 -> 7, `AppDatabase`
 v9 -> v10. 381 tests (up from 370).
 
-Both slices: detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
+**Slice 3 (39) — content-sealing epoch key, and a correction to this section's own table above.**
+The epoch key ratchet does NOT give forward secrecy against seizure, contrary to what §4.4's table
+originally claimed — the root key must stay permanently retained regardless (slice 2's wire handle
+and `GroupRepository.getShareCode`'s invite-code reconstruction both need it forever), so any
+non-interactive derivation from it is exactly as forward-secret as the root key's own confidentiality.
+Real forward secrecy needs an interactive DH step this partition-heavy mesh can't rely on. Built the
+honest stateless version anyway (`CryptoUtils.contentEpochKey` = `HKDF(rootKey, epoch)` via Tink's
+`subtle.Hkdf`, 24h epochs, fully stateless, no schema changes) — it now seals SOS/position bodies and
+macs evidence-meta/nickname/presence/Tier-B-SOS-preview instead of the root key directly, kept fully
+separate from slice 2's (unchanged) wire handle. Real value it does provide: domain separation between
+the two derivations, and bounding one independently-leaked epoch key to ~24h instead of the group's
+whole life. `MeshFrameCodec.VERSION` unchanged (byte layouts didn't move, only which key opens them).
+390 tests (up from 381).
+
+All three slices: detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
 incl. `lintVitalRelease`, R8-minified) green. **NOT hardware-confirmed** — decision 38's `VERSION` 7
 wire break means no pre-checkpoint test APK can talk to this build until reflashed (decision 37's own
-`VERSION` 6 was never hardware-confirmed either — both need the same next live round).
-**Remaining P6 scope, not yet started**: non-interactive epoch key ratchet, frame padding to size
-buckets for all frame types.
+`VERSION` 6 was never hardware-confirmed either — all three need the same next live round; decision
+39 adds a silent open/verify-failure mode on top, since it isn't a version break).
+**Remaining P6 scope, not yet started**: frame padding to size buckets for all frame types.
 *Sim gate: handle rotation does not break dedup or forwarding across an epoch boundary.*
 *Hardware gate: security review pass; wire capture shows no cleartext group identifier.*
 

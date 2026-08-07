@@ -3,6 +3,7 @@ package org.offlinemesh.app.ble
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,6 +22,9 @@ import java.security.SecureRandom
  * catch in a second instead of a live 2-phone session — a frame layout bug here would otherwise
  * only surface as "the other phone never seems to get X."
  */
+@Suppress("LargeClass") // mirrors MeshFrameCodec.kt's own single coherent wire-frame surface — one
+// section per frame type (sos/position/presence/nickname/...), same shape as CryptoUtils' own
+// TooManyFunctions suppress; splitting would fragment tests away from the frame type they cover.
 class MeshFrameCodecTest {
 
     private val fakeSha256 = "a".repeat(64) // valid 32-byte-hex shape, content doesn't matter here
@@ -37,11 +41,28 @@ class MeshFrameCodecTest {
     // handle (decision 38) replaced the old cleartext groupId — MeshFrameCodec.groupHandle(key,
     // epochSeconds) is the single source of truth for what value to expect it holds.
 
+    // Decision 39 (docs/DECISIONS.md): sealSos now takes rootKey (for groupHandle) and contentKey
+    // (for the actual seal) separately. This helper derives contentKey the same way production
+    // code does (CryptoUtils.contentEpochKey(rootKey, timestamp/1000)) so tests don't have to
+    // repeat that at every call site — matches this file's existing fakeHandle/randomKey helper
+    // style.
+    @Suppress("LongParameterList") // wire-protocol scalars — see MeshFrameCodec.sealSos's identical suppress
+    private fun sealSosFixture(
+        rootKey: ByteArray, id: String, senderId: String, message: String, timestamp: Long,
+        isAlert: Boolean, ttl: Int, hop: Int, signingPrivateKey: ByteArray? = null,
+    ): Pair<ByteArray, ByteArray> {
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / 1000)
+        val sealed = MeshFrameCodec.sealSos(
+            rootKey, contentKey, id, senderId, message, timestamp, isAlert, ttl, hop, signingPrivateKey
+        )
+        return sealed to contentKey
+    }
+
     @Test
     fun `sos frame is opaque without the group key and opens correctly with it`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
-            key = key, id = "sos-1", senderId = "sender-1",
+        val (sealed, contentKey) = sealSosFixture(
+            rootKey = key, id = "sos-1", senderId = "sender-1",
             message = "need help at the north gate", timestamp = 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 2,
         )
@@ -56,7 +77,7 @@ class MeshFrameCodecTest {
         assertEquals(2, decoded.hop)
         // Wrong key must not open it.
         assertNull(MeshFrameCodec.openSos(decoded.sealed, randomKey()))
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         assertEquals("sender-1", body.senderId)
         assertEquals("need help at the north gate", body.message)
@@ -67,7 +88,7 @@ class MeshFrameCodecTest {
     @Test
     fun `sos frame with hop 0 (an origin-authored SOS) round-trips`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, _) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
@@ -81,13 +102,13 @@ class MeshFrameCodecTest {
         // decision 35, docs/DECISIONS.md — splits the loud/broadcast alert treatment from ordinary
         // quiet messages sharing this same entity/frame.
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "medical emergency", 1_700_000_000_000L,
             isAlert = true, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         assertTrue(body.isAlert)
     }
@@ -95,13 +116,13 @@ class MeshFrameCodecTest {
     @Test
     fun `sos frame round-trips isAlert false`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "meet at gate 3", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         assertFalse(body.isAlert)
     }
@@ -114,7 +135,7 @@ class MeshFrameCodecTest {
         // 255-byte mac-input truncation bug — without invalidating the GCM tag outright, rather than
         // needing a dedicated per-field check the way the old scheme did.
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
@@ -122,7 +143,7 @@ class MeshFrameCodecTest {
         check(decoded is MeshFrameCodec.Frame.SosSealed)
         val tampered = decoded.sealed.copyOf()
         tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
-        assertNull(MeshFrameCodec.openSos(tampered, key))
+        assertNull(MeshFrameCodec.openSos(tampered, contentKey))
     }
 
     @Test
@@ -135,11 +156,11 @@ class MeshFrameCodecTest {
         // re-encrypting, which would otherwise break blind-relay dedup the same way it would for
         // position.
         val key = randomKey()
-        val a = MeshFrameCodec.sealSos(
+        val (a, _) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
-        val b = MeshFrameCodec.sealSos(
+        val (b, _) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
@@ -152,13 +173,13 @@ class MeshFrameCodecTest {
     fun `sos frame carries a signature inside the seal, verifiable once opened`() {
         val key = randomKey()
         val pair = SenderIdentity.generateKeyPair()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0, signingPrivateKey = pair.privateKey,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         checkNotNull(body.signature)
         assertTrue(SenderIdentity.verify(pair.publicKey, body.signature!!, body.signedBytes))
@@ -172,13 +193,13 @@ class MeshFrameCodecTest {
         val key = randomKey()
         val impostor = SenderIdentity.generateKeyPair()
         val realSender = SenderIdentity.generateKeyPair()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "real-sender-id", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0, signingPrivateKey = impostor.privateKey,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key) // GCM auth passes — same group key
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey) // GCM auth passes — same content key
         checkNotNull(body)
         checkNotNull(body.signature)
         assertFalse(SenderIdentity.verify(realSender.publicKey, body.signature!!, body.signedBytes))
@@ -188,13 +209,13 @@ class MeshFrameCodecTest {
     @Test
     fun `sos frame with no signing key round-trips a null signature`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         assertNull(body.signature)
     }
@@ -206,7 +227,7 @@ class MeshFrameCodecTest {
         // advance hop — none of that requires ever opening the seal. See
         // RelayResponder.takeOpaqueSosCustody.
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, _) = sealSosFixture(
             key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 2,
         )
@@ -221,12 +242,11 @@ class MeshFrameCodecTest {
     @Test
     fun `reframeSosForRelay changes only ttl and hop, never the sealed bytes`() {
         val key = randomKey()
-        val original = MeshFrameCodec.decode(
-            MeshFrameCodec.sealSos(
-                key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
-                isAlert = false, ttl = 8, hop = 0,
-            )
-        ) as MeshFrameCodec.Frame.SosSealed
+        val (sealedBytes, contentKey) = sealSosFixture(
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val original = MeshFrameCodec.decode(sealedBytes) as MeshFrameCodec.Frame.SosSealed
 
         val relayed = MeshFrameCodec.decode(
             MeshFrameCodec.reframeSosForRelay(
@@ -238,9 +258,23 @@ class MeshFrameCodecTest {
         assertEquals(1, relayed.hop)
         assertTrue(original.sealed.contentEquals(relayed.sealed))
         // And it still opens correctly for an actual member, unchanged by the relay hop/ttl.
-        val body = MeshFrameCodec.openSos(relayed.sealed, key)
+        val body = MeshFrameCodec.openSos(relayed.sealed, contentKey)
         checkNotNull(body)
         assertEquals("sender-1", body.senderId)
+    }
+
+    // ---------- decision 39 (docs/DECISIONS.md): sos body is sealed under the content epoch key, ----------
+    // not the root key directly — proven empirically here, not just by the two-param signature.
+    @Test
+    fun `sos body opens under its content epoch key but not under the raw root key`() {
+        val rootKey = randomKey()
+        val (sealed, contentKey) = sealSosFixture(
+            rootKey, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val decoded = MeshFrameCodec.decode(sealed) as MeshFrameCodec.Frame.SosSealed
+        assertNotNull(MeshFrameCodec.openSos(decoded.sealed, contentKey))
+        assertNull(MeshFrameCodec.openSos(decoded.sealed, rootKey))
     }
 
     @Test
@@ -285,16 +319,30 @@ class MeshFrameCodecTest {
         assertArrayEquals(data, decoded.chunk.data)
     }
 
+    // Decision 39 (docs/DECISIONS.md): encodePosition now takes rootKey (for groupHandle) and
+    // contentKey (for the seal) separately — mirrors sealSosFixture above.
+    @Suppress("LongParameterList") // wire-protocol scalars — see MeshFrameCodec.encodePosition's identical suppress
+    private fun encodePositionFixture(
+        rootKey: ByteArray, senderId: String, lat: Double, lon: Double, accuracyM: Int,
+        timestampSec: Long, hop: Int, signingPrivateKey: ByteArray? = null,
+    ): Pair<ByteArray, ByteArray> {
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, timestampSec)
+        val frame = MeshFrameCodec.encodePosition(
+            rootKey, contentKey, senderId, lat, lon, accuracyM, timestampSec, hop, signingPrivateKey
+        )
+        return frame to contentKey
+    }
+
     @Test
     fun `position frame is opaque without the group key and opens correctly with it`() {
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 12.3456, 78.9012, 5, 1_700_000_000L, 2)
+        val (frame, contentKey) = encodePositionFixture(key, "sender-1", 12.3456, 78.9012, 5, 1_700_000_000L, 2)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
         assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000L), decoded.handle)
         // Wrong key must not open it.
         assertNull(MeshFrameCodec.openPosition(decoded.sealed, randomKey()))
-        val body = MeshFrameCodec.openPosition(decoded.sealed, key)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, contentKey)
         checkNotNull(body)
         assertEquals("sender-1", body.senderId)
         assertEquals(12.3456, body.lat, 1e-6)
@@ -307,13 +355,13 @@ class MeshFrameCodecTest {
     fun `position frame carries a signature inside the seal, verifiable once opened`() {
         val key = randomKey()
         val pair = SenderIdentity.generateKeyPair()
-        val frame = MeshFrameCodec.encodePosition(
+        val (frame, contentKey) = encodePositionFixture(
             key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0,
             signingPrivateKey = pair.privateKey
         )
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
-        val body = MeshFrameCodec.openPosition(decoded.sealed, key)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, contentKey)
         checkNotNull(body)
         checkNotNull(body.signature)
         assertTrue(SenderIdentity.verify(pair.publicKey, body.signature!!, body.signedBytes))
@@ -329,13 +377,13 @@ class MeshFrameCodecTest {
         val key = randomKey()
         val impostor = SenderIdentity.generateKeyPair()
         val realSender = SenderIdentity.generateKeyPair()
-        val frame = MeshFrameCodec.encodePosition(
+        val (frame, contentKey) = encodePositionFixture(
             key, "real-sender-id", 1.0, 2.0, 5, 1_700_000_000L, 0,
             signingPrivateKey = impostor.privateKey // signed by the impostor, claiming to be real-sender-id
         )
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
-        val body = MeshFrameCodec.openPosition(decoded.sealed, key) // GCM auth passes — same group key
+        val body = MeshFrameCodec.openPosition(decoded.sealed, contentKey) // GCM auth passes — same content key
         checkNotNull(body)
         checkNotNull(body.signature)
         assertFalse(SenderIdentity.verify(realSender.publicKey, body.signature!!, body.signedBytes))
@@ -345,10 +393,10 @@ class MeshFrameCodecTest {
     @Test
     fun `position frame with no signing key round-trips a null signature`() {
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val (frame, contentKey) = encodePositionFixture(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
-        val body = MeshFrameCodec.openPosition(decoded.sealed, key)
+        val body = MeshFrameCodec.openPosition(decoded.sealed, contentKey)
         checkNotNull(body)
         assertNull(body.signature)
     }
@@ -361,14 +409,25 @@ class MeshFrameCodecTest {
         // bytes (nonce is the first 12 bytes) is a proxy for "the nonce actually differed"; if it
         // hadn't, GCM would also make the ciphertext identical for identical plaintext+key+nonce.
         val key = randomKey()
-        val a = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
-        val b = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val (a, contentKey) = encodePositionFixture(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val (b, _) = encodePositionFixture(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
         val decodedA = MeshFrameCodec.decode(a) as MeshFrameCodec.Frame.PositionSealed
         val decodedB = MeshFrameCodec.decode(b) as MeshFrameCodec.Frame.PositionSealed
         assertTrue(!decodedA.sealed.contentEquals(decodedB.sealed))
         // Both must still open correctly despite identical plaintext/key/second.
-        assertEquals(1.0, MeshFrameCodec.openPosition(decodedA.sealed, key)!!.lat, 1e-6)
-        assertEquals(1.0, MeshFrameCodec.openPosition(decodedB.sealed, key)!!.lat, 1e-6)
+        assertEquals(1.0, MeshFrameCodec.openPosition(decodedA.sealed, contentKey)!!.lat, 1e-6)
+        assertEquals(1.0, MeshFrameCodec.openPosition(decodedB.sealed, contentKey)!!.lat, 1e-6)
+    }
+
+    // ---------- decision 39 (docs/DECISIONS.md): position body is sealed under the content epoch ----------
+    // key, not the root key directly — proven empirically here, not just by the two-param signature.
+    @Test
+    fun `position body opens under its content epoch key but not under the raw root key`() {
+        val rootKey = randomKey()
+        val (frame, contentKey) = encodePositionFixture(rootKey, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val decoded = MeshFrameCodec.decode(frame) as MeshFrameCodec.Frame.PositionSealed
+        assertNotNull(MeshFrameCodec.openPosition(decoded.sealed, contentKey))
+        assertNull(MeshFrameCodec.openPosition(decoded.sealed, rootKey))
     }
 
     @Test
@@ -437,7 +496,8 @@ class MeshFrameCodecTest {
     @Test
     fun `presence frame round-trips and carries a verifiable tag`() {
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key)
+        val contentKey = CryptoUtils.contentEpochKey(key, 1_700_000_000_000L / 1000)
+        val frame = MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key, contentKey)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.Presence)
         assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000_000L / 1000), decoded.handle)
@@ -449,9 +509,10 @@ class MeshFrameCodecTest {
     @Test
     fun `presence frame round-trips a sender public key and signature`() {
         val key = randomKey()
+        val contentKey = CryptoUtils.contentEpochKey(key, 1_700_000_000_000L / 1000)
         val pair = SenderIdentity.generateKeyPair()
         val frame = MeshFrameCodec.encodePresence(
-            "group-1", "sender-1", 1_700_000_000_000L, key,
+            "group-1", "sender-1", 1_700_000_000_000L, key, contentKey,
             senderPublicKey = pair.publicKey, signingPrivateKey = pair.privateKey
         )
         val decoded = MeshFrameCodec.decode(frame)
@@ -536,7 +597,10 @@ class MeshFrameCodecTest {
 
     @Test
     fun `decode rejects a frame from a different version`() {
-        val encoded = MeshFrameCodec.encodePresence("g", "s", 0L, randomKey())
+        val presenceKey = randomKey()
+        val encoded = MeshFrameCodec.encodePresence(
+            "g", "s", 0L, presenceKey, CryptoUtils.contentEpochKey(presenceKey, 0L)
+        )
         val wrongVersion = encoded.copyOf().also { it[1] = 99 }
         assertNull(MeshFrameCodec.decode(wrongVersion))
     }
@@ -631,25 +695,25 @@ class MeshFrameCodecTest {
     @Test
     fun `openSos rejects a message exceeding MAX_SOS_MESSAGE_BYTES`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1),
             1000L, isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        assertNull(MeshFrameCodec.openSos(decoded.sealed, key))
+        assertNull(MeshFrameCodec.openSos(decoded.sealed, contentKey))
     }
 
     @Test
     fun `openSos still accepts a message at exactly MAX_SOS_MESSAGE_BYTES`() {
         val key = randomKey()
-        val sealed = MeshFrameCodec.sealSos(
+        val (sealed, contentKey) = sealSosFixture(
             key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES),
             1000L, isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        val body = MeshFrameCodec.openSos(decoded.sealed, contentKey)
         checkNotNull(body)
         assertEquals(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES, body.message.length)
     }
@@ -660,7 +724,7 @@ class MeshFrameCodecTest {
         // read and increment the hop. If this ever moves back inside the seal, non-member relays
         // silently stop forwarding positions again (see Frame.PositionSealed's doc).
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 2)
+        val (frame, _) = encodePositionFixture(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 2)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
         assertEquals(2, decoded.hop)
@@ -669,9 +733,8 @@ class MeshFrameCodecTest {
     @Test
     fun `reframePositionForRelay changes only the hop, never the sealed bytes`() {
         val key = randomKey()
-        val original = MeshFrameCodec.decode(
-            MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 0)
-        ) as MeshFrameCodec.Frame.PositionSealed
+        val (frameBytes, contentKey) = encodePositionFixture(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 0)
+        val original = MeshFrameCodec.decode(frameBytes) as MeshFrameCodec.Frame.PositionSealed
 
         val relayed = MeshFrameCodec.decode(
             MeshFrameCodec.reframePositionForRelay(original.handle, original.hop + 1, original.sealed)
@@ -680,7 +743,7 @@ class MeshFrameCodecTest {
         assertEquals(1, relayed.hop)
         assertTrue(original.sealed.contentEquals(relayed.sealed))
         // And it still opens correctly for an actual member, unchanged by the relay hop.
-        val body = MeshFrameCodec.openPosition(relayed.sealed, key)
+        val body = MeshFrameCodec.openPosition(relayed.sealed, contentKey)
         checkNotNull(body)
         assertEquals("sender-1", body.senderId)
     }
@@ -691,8 +754,9 @@ class MeshFrameCodecTest {
         // relay holding no group key must be able to advance its hop. Nothing but the hop may change
         // — the mac a real member verifies has to survive the relay byte-for-byte.
         val key = randomKey()
+        val contentKey = CryptoUtils.contentEpochKey(key, 1_700_000_000_000L / 1000)
         val original = MeshFrameCodec.decode(
-            MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key)
+            MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key, contentKey)
         ) as MeshFrameCodec.Frame.Presence
         assertEquals(0, original.hop)
 
@@ -706,6 +770,6 @@ class MeshFrameCodecTest {
         assertArrayEquals(original.mac, relayed.mac)
         // And the mac still verifies for an actual member, unaffected by having been relayed.
         val macInput = MeshFrameCodec.presenceMacInput("group-1", "sender-1", 1_700_000_000_000L)
-        assertTrue(CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), relayed.mac))
+        assertTrue(CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), relayed.mac))
     }
 }

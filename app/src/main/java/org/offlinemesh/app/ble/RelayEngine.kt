@@ -120,16 +120,21 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // to can't happen in practice (a user can't type into a group whose key they don't have),
         // and there's nothing valid to seal without one, unlike the old cleartext-plus-HMAC scheme
         // where a null mac was at least a representable (if useless) state.
-        val key = repo.getGroupKey(groupId) ?: error("no key for group")
+        val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
         val signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
+        // Decision 39 (docs/DECISIONS.md): sealed under the current epoch's derived content key,
+        // not the root key directly — see CryptoUtils.contentEpochKey's own doc for what this does
+        // and does not buy.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / MILLIS_PER_SECOND)
         // sealSosBody, NOT sealSos — this needs the RAW sealed bytes to store on SosEntity.sealed
         // (see that field's own doc and sealSosBody's), not a full pre-framed wire message. The
         // actual frame is built moments later, from these same stored bytes, when the caller
         // (MeshService.sendSos) invokes RelayResponder.floodForwardLocalSos.
-        val sealed = MeshFrameCodec.sealSosBody(key, id, senderId, truncated, timestamp, isAlert, signingPrivateKey)
+        val sealed =
+            MeshFrameCodec.sealSosBody(contentKey, id, senderId, truncated, timestamp, isAlert, signingPrivateKey)
         // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
-        // see MeshFrameCodec.groupHandle's doc.
-        val handle = MeshFrameCodec.groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        // see MeshFrameCodec.groupHandle's doc. Stays on the ROOT key, unchanged by decision 39.
+        val handle = MeshFrameCodec.groupHandle(rootKey, timestamp / MILLIS_PER_SECOND)
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, isAlert = isAlert,
@@ -142,19 +147,23 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     }
 
     suspend fun createEvidence(groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?): EvidenceEntity {
-        val key = repo.getGroupKey(groupId) ?: error("no key for group")
-        val ciphertext = CryptoUtils.encrypt(key, plaintext)
+        val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
+        // timestamp computed here, BEFORE the encrypt call below (decision 39, docs/DECISIONS.md) —
+        // needs to exist first so the content epoch key can derive from it; previously this field
+        // wasn't computed until after encrypt/hash/chunk, since nothing needed it that early.
+        val timestamp = System.currentTimeMillis()
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / MILLIS_PER_SECOND)
+        val ciphertext = CryptoUtils.encrypt(contentKey, plaintext)
         val id = UUID.randomUUID().toString()
         val hash = CryptoUtils.sha256Hex(ciphertext)
         val chunks = chunkBytes(ciphertext, CHUNK_SIZE)
-        val timestamp = System.currentTimeMillis()
         val senderId = repo.deviceId
         val macInput = MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType)
-        val mac = CryptoUtils.authTag(key, macInput)
+        val mac = CryptoUtils.authTag(contentKey, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
-        // see MeshFrameCodec.groupHandle's doc.
-        val handle = MeshFrameCodec.groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        // see MeshFrameCodec.groupHandle's doc. Stays on the ROOT key, unchanged by decision 39.
+        val handle = MeshFrameCodec.groupHandle(rootKey, timestamp / MILLIS_PER_SECOND)
         val evidence = EvidenceEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
@@ -186,13 +195,14 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val trimmed = username.trim().take(MeshFrameCodec.MAX_USERNAME_CHARS)
         val updatedAt = System.currentTimeMillis()
         val senderId = repo.deviceId
-        val key = repo.getGroupKey(groupId) ?: error("no key for group")
+        val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, updatedAt / MILLIS_PER_SECOND)
         val macInput = MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt)
-        val mac = CryptoUtils.authTag(key, macInput)
+        val mac = CryptoUtils.authTag(contentKey, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
-        // see MeshFrameCodec.groupHandle's doc.
-        val handle = MeshFrameCodec.groupHandle(key, updatedAt / MILLIS_PER_SECOND)
+        // see MeshFrameCodec.groupHandle's doc. Stays on the ROOT key, unchanged by decision 39.
+        val handle = MeshFrameCodec.groupHandle(rootKey, updatedAt / MILLIS_PER_SECOND)
         val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac, signature, handle)
         nicknameDao.upsert(n)
         epoch.incrementAndGet()
@@ -272,7 +282,12 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // Decision 38 (docs/DECISIONS.md): meta.groupId is null exactly when we're a blind carrier
         // (never resolved which group this belongs to) — same "stay a blind carrier" outcome as
         // before, now reached via a null groupId instead of a failed getGroupKey lookup.
-        val key = meta.groupId?.let { repo.getGroupKey(it) } ?: return
+        val rootKey = meta.groupId?.let { repo.getGroupKey(it) } ?: return
+        // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — meta.timestamp
+        // is the content's own authored time, already cleartext (round-tripped through the wire
+        // envelope since decision 38), so the exact epoch is known directly, unlike SOS/position
+        // whose timestamp lives inside the seal.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, meta.timestamp / MILLIS_PER_SECOND)
         val chunks = chunkDao.allChunks(evidenceId).sortedBy { it.chunkIndex }
         // Pre-sized array + arraycopy, not repeated `+=` (O(n) instead of O(n^2) — matters once
         // this is thousands of chunks, found during QC while checking the large-file path).
@@ -287,7 +302,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
             Log.w(TAG, "evidence $evidenceId hash mismatch — corrupted or tampered, discarding reassembly")
             return
         }
-        val plaintext = CryptoUtils.decrypt(key, ciphertext) ?: return
+        val plaintext = CryptoUtils.decrypt(contentKey, ciphertext) ?: return
 
         val outFile = outputFile(context, evidenceId, meta.mimeType)
         outFile.parentFile?.mkdirs()

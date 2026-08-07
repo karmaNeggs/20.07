@@ -8,6 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -349,12 +350,14 @@ class RelayResponderTest {
     fun `SOS, position, presence, and nickname frames for an unresolvable group are all carried onward`() = runTest {
         val key = testGroupKey // arbitrary — this repo holds no group for it either way
         val epoch = System.currentTimeMillis() / 1000
+        val now = System.currentTimeMillis()
+        val contentKey = CryptoUtils.contentEpochKey(key, epoch)
 
         val sosFrame = MeshFrameCodec.sealSos(
-            key, "sos-1", "sender-1", "help", System.currentTimeMillis(), isAlert = false, ttl = 8, hop = 0
+            key, contentKey, "sos-1", "sender-1", "help", now, isAlert = false, ttl = 8, hop = 0
         )
-        val positionFrame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, epoch, hop = 0)
-        val presenceFrame = MeshFrameCodec.encodePresence("some-group", "sender-1", System.currentTimeMillis(), key)
+        val positionFrame = MeshFrameCodec.encodePosition(key, contentKey, "sender-1", 1.0, 2.0, 5, epoch, hop = 0)
+        val presenceFrame = MeshFrameCodec.encodePresence("some-group", "sender-1", now, key, contentKey)
         val nicknameFrame = MeshFrameCodec.encodeNickname(
             NicknameEntity(
                 "some-group", "sender-1", "responder", System.currentTimeMillis(),
@@ -379,8 +382,10 @@ class RelayResponderTest {
     @Test
     fun `a carried frame is never handed back to the peer that supplied it`() = runTest {
         val key = testGroupKey
+        val now = System.currentTimeMillis()
+        val contentKey = CryptoUtils.contentEpochKey(key, now / 1000)
         val sosFrame = MeshFrameCodec.sealSos(
-            key, "sos-1", "sender-1", "help", System.currentTimeMillis(), isAlert = false, ttl = 8, hop = 0
+            key, contentKey, "sos-1", "sender-1", "help", now, isAlert = false, ttl = 8, hop = 0
         )
         responder.handleIncoming(sosFrame, "peer1") { }
 

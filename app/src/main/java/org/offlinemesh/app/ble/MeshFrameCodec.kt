@@ -399,10 +399,15 @@ object MeshFrameCodec {
      *  that needs to STORE the sealed bytes (rather than send them immediately) must call that
      *  instead of this. [handle] is computed here (via [groupHandle], from [timestamp]) rather than
      *  taking a `groupId` param — since decision 38, the envelope carries an opaque handle, not a
-     *  cleartext groupId. */
+     *  cleartext groupId. [rootKey]/[contentKey] are deliberately separate params (decision 39,
+     *  `docs/DECISIONS.md`): [groupHandle] must keep using the permanent [rootKey] unchanged, while
+     *  the actual seal uses [contentKey] (the caller's already-derived `CryptoUtils.
+     *  contentEpochKey(rootKey, ...)`) — this function never derives one itself, so it stays a pure
+     *  function of whatever keys it's handed, same as every other function in this file. */
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun sealSos(
-        key: ByteArray,
+        rootKey: ByteArray,
+        contentKey: ByteArray,
         id: String,
         senderId: String,
         message: String,
@@ -412,8 +417,8 @@ object MeshFrameCodec {
         hop: Int,
         signingPrivateKey: ByteArray? = null,
     ): ByteArray {
-        val sealed = sealSosBody(key, id, senderId, message, timestamp, isAlert, signingPrivateKey)
-        val handle = groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        val sealed = sealSosBody(contentKey, id, senderId, message, timestamp, isAlert, signingPrivateKey)
+        val handle = groupHandle(rootKey, timestamp / MILLIS_PER_SECOND)
         return reframeSosForRelay(handle, id, ttl, hop, sealed)
     }
 
@@ -478,13 +483,15 @@ object MeshFrameCodec {
      *  [signingPrivateKey] is optional (this device may not have a sender identity for [groupId]
      *  yet, or the caller may be a blind relay authoring nothing of its own) — see
      *  [PositionBody.signature]'s doc for why the resulting signature travels INSIDE the seal, not
-     *  alongside it. */
+     *  alongside it. [rootKey]/[contentKey] deliberately separate (decision 39, `docs/DECISIONS.md`)
+     *  — [groupHandle] must keep using the permanent [rootKey], the actual seal uses the caller's
+     *  already-derived `CryptoUtils.contentEpochKey(rootKey, ...)`. */
     // groupId dropped (decision 38) — key is already a param, and the handle it derives (via
     // groupHandle) is all the envelope needs; a caller that also needs the real groupId string
     // (e.g. for a signing-key lookup) already has it from wherever it got `key`.
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun encodePosition(
-        key: ByteArray, senderId: String, lat: Double, lon: Double,
+        rootKey: ByteArray, contentKey: ByteArray, senderId: String, lat: Double, lon: Double,
         accuracyM: Int, timestampSec: Long, hop: Int, signingPrivateKey: ByteArray? = null,
     ): ByteArray {
         val inner = build { d ->
@@ -495,8 +502,9 @@ object MeshFrameCodec {
         }
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
         val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
-        val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, positionNonce(senderId, timestampSec))
-        val handle = groupHandle(key, timestampSec)
+        val sealed =
+            CryptoUtils.encryptWithNonce(contentKey, innerWithSignature, positionNonce(senderId, timestampSec))
+        val handle = groupHandle(rootKey, timestampSec)
         return reframePositionForRelay(handle, hop, sealed)
     }
 
@@ -547,20 +555,24 @@ object MeshFrameCodec {
      *  [groupId] is still needed here (unlike [encodePosition], which dropped it) — it's part of
      *  [presenceMacInput]'s authenticated bytes, computed identically by both the resolved-groupId
      *  sender and a resolved-groupId receiver; only the WIRE envelope itself carries the opaque
-     *  [handle] derived from it (decision 38), not [groupId] directly. */
+     *  [handle] derived from it (decision 38), not [groupId] directly. [rootKey]/[contentKey]
+     *  deliberately separate (decision 39, `docs/DECISIONS.md`) — [groupHandle] must keep using the
+     *  permanent [rootKey], the mac uses the caller's already-derived `CryptoUtils.
+     *  contentEpochKey(rootKey, ...)`. */
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun encodePresence(
         groupId: String,
         senderId: String,
         timestamp: Long,
-        key: ByteArray,
+        rootKey: ByteArray,
+        contentKey: ByteArray,
         senderPublicKey: ByteArray? = null,
         signingPrivateKey: ByteArray? = null,
     ): ByteArray {
         val macInput = presenceMacInput(groupId, senderId, timestamp)
-        val mac = CryptoUtils.authTag(key, macInput)
+        val mac = CryptoUtils.authTag(contentKey, macInput)
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, macInput) }
-        val handle = groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        val handle = groupHandle(rootKey, timestamp / MILLIS_PER_SECOND)
         return encodePresenceFrame(handle, senderId, timestamp, mac, senderPublicKey, signature, hop = 0)
     }
 
