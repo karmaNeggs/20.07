@@ -72,9 +72,10 @@ object MeshProtocol {
     /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [BroadcastTierBeacon.positionFrame]
      *  block — defence in depth for [decodeBroadcastTierBeacon]'s length-prefixed read, same
      *  reasoning as [MeshFrameCodec.MAX_EVIDENCE_CHUNKS]/[MeshFrameCodec.MAX_SOS_MESSAGE_BYTES].
-     *  Generous against a real `MeshFrameCodec.encodePosition` frame (~150-160B: `groupId` is a
-     *  16-char hex id, not UUID-length — see [org.offlinemesh.app.data.JoinCode]'s `GROUP_ID_LEN`
-     *  — while `senderId` IS a 36-char UUID) while leaving guaranteed headroom for
+     *  Generous against a real `MeshFrameCodec.encodePosition` frame (~135-145B: `senderId` is a
+     *  36-char UUID, the dominant field, since decision 38 replaced the old cleartext `groupId`
+     *  string with a fixed 6-byte opaque handle — see `MeshFrameCodec.groupHandle`'s doc — shrinking
+     *  this frame slightly rather than growing it) while leaving guaranteed headroom for
      *  [MAX_BROADCAST_TIER_SOS_ID_BYTES] and [MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES] too — see
      *  [encodeBroadcastTierBeacon]'s own doc for the full worst-case budget arithmetic. */
     const val MAX_BROADCAST_TIER_POSITION_FRAME_BYTES = 180

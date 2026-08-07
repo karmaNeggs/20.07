@@ -23,7 +23,11 @@ import androidx.room.RoomDatabase
     // treatment from ordinary quiet messages, which share this same table/entity unchanged.
     // v9: SosEntity.mac/signature replaced with `sealed` (docs/DECISIONS.md decision 37) — SOS
     // message content is now AES-GCM sealed, not cleartext-plus-HMAC.
-    version = 9,
+    // v10: SosEntity/EvidenceEntity/NicknameEntity gain `handle` (ByteArray?) — the rotating GATT
+    // group handle each frame was framed under (docs/DECISIONS.md decision 38, PLAN-v2.md §4.4's
+    // "rotating group handle" item), replacing cleartext `groupId` on the wire.
+    // EvidenceEntity.groupId also becomes nullable (see that field's own doc).
+    version = 10,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

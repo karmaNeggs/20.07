@@ -77,6 +77,14 @@ data class SosEntity(
     // `PositionBody.signature`'s handling, never persisted as its own field once verified. Null only
     // transiently during construction before a fresh seal is computed; every stored row has one.
     val sealed: ByteArray? = null,
+    // Decision 38 (docs/DECISIONS.md): the opaque GATT wire handle — HMAC(group_key, epoch), see
+    // MeshFrameCodec.groupHandle's doc — this SOS was framed under, replacing the old cleartext
+    // `groupId` wire field. Computed ONCE (RelayEngine.createSos for our own, or copied verbatim
+    // from the arriving frame when ingesting someone else's) and forwarded unchanged on every
+    // relay, same discipline as [sealed]: a blind relay has no key to recompute it with, so it must
+    // stay stable across the whole relay life of this row. Null only transiently during
+    // construction; every stored row has one.
+    val handle: ByteArray? = null,
 ) {
     private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl, hop, isAlert)
 
@@ -84,16 +92,25 @@ data class SosEntity(
         if (this === other) return true
         if (other !is SosEntity) return false
         return scalars() == other.scalars() &&
-            (sealed?.contentEquals(other.sealed) ?: (other.sealed == null))
+            (sealed?.contentEquals(other.sealed) ?: (other.sealed == null)) &&
+            (handle?.contentEquals(other.handle) ?: (other.handle == null))
     }
 
-    override fun hashCode(): Int = 31 * scalars().hashCode() + (sealed?.contentHashCode() ?: 0)
+    override fun hashCode(): Int =
+        31 * (31 * scalars().hashCode() + (sealed?.contentHashCode() ?: 0)) + (handle?.contentHashCode() ?: 0)
 }
 
 @Entity(tableName = "evidence")
 data class EvidenceEntity(
     @PrimaryKey val id: String,
-    val groupId: String,
+    // Decision 38 (docs/DECISIONS.md): nullable since the wire no longer carries groupId in the
+    // clear — a blind relay (holding no key for [handle]'s group) can still store and forward this
+    // row's chunks via the existing manifest/deficit mechanism (RelayResponder.handleManifest reads
+    // this row's own totalChunks, not the wire's), it just never learns WHICH group it belongs to.
+    // Null exactly means "blind-relay-held, group unresolved"; every row we're an actual member of
+    // has this populated (either by RelayEngine.createEvidence for our own, or by
+    // RelayResponder.handleEvidMeta once GroupRepository.resolveGroupKeyByHandle succeeds).
+    val groupId: String?,
     val senderId: String,
     val senderIsMe: Boolean,
     val timestamp: Long,
@@ -110,7 +127,13 @@ data class EvidenceEntity(
     // Same additive per-sender Ed25519 signature scheme SosEntity's own sealed body carries
     // internally (see its doc) — this entity predates decision 37's seal and still travels as a
     // separate column alongside mac, over evidMacInput's canonical bytes.
-    val signature: ByteArray? = null
+    val signature: ByteArray? = null,
+    // Decision 38: the opaque GATT wire handle this evidence header was framed under — see
+    // SosEntity.handle's doc for the exact same "computed once, forwarded verbatim" discipline.
+    // Unlike [groupId], this is populated even when we're a blind relay (it's read straight off
+    // the wire, no resolution needed) — it's what actually lets a blind relay keep forwarding this
+    // header onward without ever learning [groupId].
+    val handle: ByteArray? = null,
 ) {
     private fun scalars() = listOf(
         id, groupId, senderId, senderIsMe, timestamp, sha256, totalChunks, mimeType, ttl, originalLocalPath, complete
@@ -121,11 +144,15 @@ data class EvidenceEntity(
         if (other !is EvidenceEntity) return false
         return scalars() == other.scalars() &&
             (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
-            (signature?.contentEquals(other.signature) ?: (other.signature == null))
+            (signature?.contentEquals(other.signature) ?: (other.signature == null)) &&
+            (handle?.contentEquals(other.handle) ?: (other.handle == null))
     }
 
-    override fun hashCode(): Int =
-        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
+    override fun hashCode(): Int {
+        var result = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
+        result = 31 * result + (signature?.contentHashCode() ?: 0)
+        return 31 * result + (handle?.contentHashCode() ?: 0)
+    }
 }
 
 @Entity(tableName = "evidence_chunks", primaryKeys = ["evidenceId", "chunkIndex"])
@@ -186,7 +213,15 @@ data class NicknameEntity(
     val mac: ByteArray? = null,
     // Same additive per-sender Ed25519 signature scheme EvidenceEntity.signature carries, over
     // nicknameMacInput's canonical bytes instead of evidMacInput's.
-    val signature: ByteArray? = null
+    val signature: ByteArray? = null,
+    // Decision 38 (docs/DECISIONS.md): the opaque GATT wire handle this nickname was framed under
+    // — see SosEntity.handle's doc for the "computed once, forwarded verbatim" discipline. Unlike
+    // EvidenceEntity, a blind-relay-held nickname never becomes a Room row at all (see
+    // RelayResponder.takeOpaqueNicknameCustody — a genuinely new in-memory OpaqueFrameRelay path,
+    // decision 38), so [groupId] here always names a real group we're a member of; [handle] is
+    // still stored so this row's own relay (once we ARE a member) can re-frame it without needing
+    // to recompute anything.
+    val handle: ByteArray? = null,
 ) {
     private fun scalars() = listOf(groupId, senderId, username, updatedAt)
 
@@ -195,9 +230,13 @@ data class NicknameEntity(
         if (other !is NicknameEntity) return false
         return scalars() == other.scalars() &&
             (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
-            (signature?.contentEquals(other.signature) ?: (other.signature == null))
+            (signature?.contentEquals(other.signature) ?: (other.signature == null)) &&
+            (handle?.contentEquals(other.handle) ?: (other.handle == null))
     }
 
-    override fun hashCode(): Int =
-        31 * (31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)) + (signature?.contentHashCode() ?: 0)
+    override fun hashCode(): Int {
+        var result = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
+        result = 31 * result + (signature?.contentHashCode() ?: 0)
+        return 31 * result + (handle?.contentHashCode() ?: 0)
+    }
 }

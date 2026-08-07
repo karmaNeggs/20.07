@@ -502,7 +502,7 @@ class BeaconRadio(
         }
         val nowSec = nowMs / MILLIS_PER_SECOND
         broadcastTierPositionFrame = MeshFrameCodec.encodePosition(
-            groupId, key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
+            key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
             nowSec, hop = 0, signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey,
         )
         broadcastTierLastPositionSealedAtMs = nowMs
@@ -542,7 +542,8 @@ class BeaconRadio(
             positionTracker.forGroup(groupId), repo.deviceId, MAX_POSITION_RELAY_HOPS, limit = 1,
         ).firstOrNull() ?: return null
         val sealed = record.sealed ?: return null
-        val frame = MeshFrameCodec.reframePositionForRelay(groupId, record.hop + 1, sealed)
+        val handle = record.handle ?: return null
+        val frame = MeshFrameCodec.reframePositionForRelay(handle, record.hop + 1, sealed)
         return frame to "$senderId:${record.hop}:${record.timestampSec}"
     }
 
@@ -1005,15 +1006,16 @@ class BeaconRadio(
         }
         positionTracker.offer(
             groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, frame.hop,
-            sealed = frame.sealed,
+            sealed = frame.sealed, handle = frame.handle,
         )
     }
 
     /** Verifies an SOS content preview's mac (decision 29, `docs/DECISIONS.md`) — recomputes
      *  [MeshFrameCodec.broadcastSosMacInput] under this device's own copy of the group key and
-     *  constant-time-compares against [content]'s mac, the SAME acceptance shape
-     *  `RelayResponder.authOk` uses for the GATT-authoritative scheme, just without a `RelayResponder`
-     *  reference (this only needs [CryptoUtils], already a dependency here). A group we hold no key
+     *  constant-time-compares against [content]'s mac, the same constant-time-comparison shape
+     *  every group-key check in `RelayResponder` uses for the GATT-authoritative scheme, just
+     *  without a `RelayResponder` reference (this only needs [CryptoUtils], already a dependency
+     *  here). A group we hold no key
      *  for can't verify at all — silently does nothing, matching every other blind-relay-tolerant
      *  check in this app (there is nothing to relay further here regardless, since Tier B content
      *  is a broadcaster's own preview, never re-broadcast by a receiver — see

@@ -24,25 +24,30 @@ import java.security.SecureRandom
 class MeshFrameCodecTest {
 
     private val fakeSha256 = "a".repeat(64) // valid 32-byte-hex shape, content doesn't matter here
+    // Valid 6-byte handle shape (decision 38) — content doesn't matter for tests that only care
+    // whether it round-trips, not what group it actually resolves to.
+    private val fakeHandle = ByteArray(6) { it.toByte() }
     private fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
     // ---------- SOS (decision 37, docs/DECISIONS.md): AES-GCM sealed, same shape as position ----------
     // sealSos/openSos replaced the old cleartext-plus-HMAC (sosMacInput) scheme entirely — a
     // non-member relay used to be able to read SOS message text directly; now it moves opaque bytes,
-    // same as it always has for position. groupId/id/ttl/hop stay in the cleartext envelope (see
+    // same as it always has for position. handle/id/ttl/hop stay in the cleartext envelope (see
     // Frame.SosSealed's own doc) so blind relaying still works without ever opening the seal.
+    // handle (decision 38) replaced the old cleartext groupId — MeshFrameCodec.groupHandle(key,
+    // epochSeconds) is the single source of truth for what value to expect it holds.
 
     @Test
     fun `sos frame is opaque without the group key and opens correctly with it`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            groupId = "group-1", key = key, id = "sos-1", senderId = "sender-1",
+            key = key, id = "sos-1", senderId = "sender-1",
             message = "need help at the north gate", timestamp = 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 2,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
-        assertEquals("group-1", decoded.groupId)
+        assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000_000L / 1000), decoded.handle)
         assertEquals("sos-1", decoded.id)
         assertEquals(8, decoded.ttl)
         // hop must round-trip independently of ttl (docs/DECISIONS.md decision 16 — the whole
@@ -63,7 +68,7 @@ class MeshFrameCodecTest {
     fun `sos frame with hop 0 (an origin-authored SOS) round-trips`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -77,7 +82,7 @@ class MeshFrameCodecTest {
         // quiet messages sharing this same entity/frame.
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "medical emergency", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "medical emergency", 1_700_000_000_000L,
             isAlert = true, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -91,7 +96,7 @@ class MeshFrameCodecTest {
     fun `sos frame round-trips isAlert false`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "meet at gate 3", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "meet at gate 3", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -110,7 +115,7 @@ class MeshFrameCodecTest {
         // needing a dedicated per-field check the way the old scheme did.
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -131,11 +136,11 @@ class MeshFrameCodecTest {
         // position.
         val key = randomKey()
         val a = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val b = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decodedA = MeshFrameCodec.decode(a) as MeshFrameCodec.Frame.SosSealed
@@ -148,7 +153,7 @@ class MeshFrameCodecTest {
         val key = randomKey()
         val pair = SenderIdentity.generateKeyPair()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0, signingPrivateKey = pair.privateKey,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -168,7 +173,7 @@ class MeshFrameCodecTest {
         val impostor = SenderIdentity.generateKeyPair()
         val realSender = SenderIdentity.generateKeyPair()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "real-sender-id", "need help", 1_700_000_000_000L,
+            key, "sos-1", "real-sender-id", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0, signingPrivateKey = impostor.privateKey,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -184,7 +189,7 @@ class MeshFrameCodecTest {
     fun `sos frame with no signing key round-trips a null signature`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -195,16 +200,19 @@ class MeshFrameCodecTest {
     }
 
     @Test
-    fun `sos frame carries id, ttl, and hop in the cleartext envelope, readable without any key`() {
-        // The property blind relaying depends on (decision 37's whole point): a phone with no group
-        // key must still be able to dedup on id, flood-control on ttl, and advance hop — none of
-        // that requires ever opening the seal. See RelayResponder.takeOpaqueSosCustody.
+    fun `sos frame carries handle, id, ttl, and hop in the cleartext envelope, readable without any key`() {
+        // The property blind relaying depends on (decision 37/38's whole point): a phone with no
+        // group key must still be able to read the handle, dedup on id, flood-control on ttl, and
+        // advance hop — none of that requires ever opening the seal. See
+        // RelayResponder.takeOpaqueSosCustody.
+        val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", randomKey(), "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
             isAlert = false, ttl = 8, hop = 2,
         )
         val decoded = MeshFrameCodec.decode(sealed)
         check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000_000L / 1000), decoded.handle)
         assertEquals("sos-1", decoded.id)
         assertEquals(8, decoded.ttl)
         assertEquals(2, decoded.hop)
@@ -215,14 +223,14 @@ class MeshFrameCodecTest {
         val key = randomKey()
         val original = MeshFrameCodec.decode(
             MeshFrameCodec.sealSos(
-                "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+                key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
                 isAlert = false, ttl = 8, hop = 0,
             )
         ) as MeshFrameCodec.Frame.SosSealed
 
         val relayed = MeshFrameCodec.decode(
             MeshFrameCodec.reframeSosForRelay(
-                original.groupId, original.id, original.ttl - 1, original.hop + 1, original.sealed
+                original.handle, original.id, original.ttl - 1, original.hop + 1, original.sealed
             )
         ) as MeshFrameCodec.Frame.SosSealed
 
@@ -240,15 +248,16 @@ class MeshFrameCodecTest {
         val meta = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
             timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
-            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16) { it.toByte() }
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16) { it.toByte() }, handle = fakeHandle,
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
         check(decoded is MeshFrameCodec.Frame.EvidMeta)
-        assertEquals(meta.id, decoded.meta.id)
-        assertEquals(meta.sha256, decoded.meta.sha256)
-        assertEquals(meta.totalChunks, decoded.meta.totalChunks)
-        assertEquals(meta.mimeType, decoded.meta.mimeType)
-        assertNull(decoded.meta.signature)
+        assertEquals(meta.id, decoded.id)
+        assertArrayEquals(fakeHandle, decoded.handle)
+        assertEquals(meta.sha256, decoded.sha256)
+        assertEquals(meta.totalChunks, decoded.totalChunks)
+        assertEquals(meta.mimeType, decoded.mimeType)
+        assertNull(decoded.signature)
     }
 
     @Test
@@ -258,11 +267,11 @@ class MeshFrameCodecTest {
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
             timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
             mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16),
-            signature = SenderIdentity.sign(pair.privateKey, "evid-1".toByteArray())
+            signature = SenderIdentity.sign(pair.privateKey, "evid-1".toByteArray()), handle = fakeHandle,
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
         check(decoded is MeshFrameCodec.Frame.EvidMeta)
-        assertArrayEquals(meta.signature, decoded.meta.signature)
+        assertArrayEquals(meta.signature, decoded.signature)
     }
 
     @Test
@@ -279,10 +288,10 @@ class MeshFrameCodecTest {
     @Test
     fun `position frame is opaque without the group key and opens correctly with it`() {
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 12.3456, 78.9012, 5, 1_700_000_000L, 2)
+        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 12.3456, 78.9012, 5, 1_700_000_000L, 2)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
-        assertEquals("group-1", decoded.groupId)
+        assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000L), decoded.handle)
         // Wrong key must not open it.
         assertNull(MeshFrameCodec.openPosition(decoded.sealed, randomKey()))
         val body = MeshFrameCodec.openPosition(decoded.sealed, key)
@@ -299,7 +308,7 @@ class MeshFrameCodecTest {
         val key = randomKey()
         val pair = SenderIdentity.generateKeyPair()
         val frame = MeshFrameCodec.encodePosition(
-            "group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0,
+            key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0,
             signingPrivateKey = pair.privateKey
         )
         val decoded = MeshFrameCodec.decode(frame)
@@ -321,7 +330,7 @@ class MeshFrameCodecTest {
         val impostor = SenderIdentity.generateKeyPair()
         val realSender = SenderIdentity.generateKeyPair()
         val frame = MeshFrameCodec.encodePosition(
-            "group-1", key, "real-sender-id", 1.0, 2.0, 5, 1_700_000_000L, 0,
+            key, "real-sender-id", 1.0, 2.0, 5, 1_700_000_000L, 0,
             signingPrivateKey = impostor.privateKey // signed by the impostor, claiming to be real-sender-id
         )
         val decoded = MeshFrameCodec.decode(frame)
@@ -336,7 +345,7 @@ class MeshFrameCodecTest {
     @Test
     fun `position frame with no signing key round-trips a null signature`() {
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
         val body = MeshFrameCodec.openPosition(decoded.sealed, key)
@@ -352,8 +361,8 @@ class MeshFrameCodecTest {
         // bytes (nonce is the first 12 bytes) is a proxy for "the nonce actually differed"; if it
         // hadn't, GCM would also make the ciphertext identical for identical plaintext+key+nonce.
         val key = randomKey()
-        val a = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
-        val b = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val a = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
+        val b = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, 0)
         val decodedA = MeshFrameCodec.decode(a) as MeshFrameCodec.Frame.PositionSealed
         val decodedB = MeshFrameCodec.decode(b) as MeshFrameCodec.Frame.PositionSealed
         assertTrue(!decodedA.sealed.contentEquals(decodedB.sealed))
@@ -375,12 +384,14 @@ class MeshFrameCodecTest {
     @Test
     fun `nickname frame round-trips and truncates to MAX_USERNAME_CHARS`() {
         val tooLong = "x".repeat(MeshFrameCodec.MAX_USERNAME_CHARS + 10)
-        val nick = NicknameEntity("group-1", "sender-1", tooLong, 1_700_000_000_000L, ByteArray(16))
+        val nick =
+            NicknameEntity("group-1", "sender-1", tooLong, 1_700_000_000_000L, ByteArray(16), handle = fakeHandle)
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeNickname(nick))
         check(decoded is MeshFrameCodec.Frame.Nickname)
-        assertEquals(MeshFrameCodec.MAX_USERNAME_CHARS, decoded.nickname.username.length)
-        assertTrue(tooLong.startsWith(decoded.nickname.username))
-        assertNull(decoded.nickname.signature)
+        assertArrayEquals(fakeHandle, decoded.handle)
+        assertEquals(MeshFrameCodec.MAX_USERNAME_CHARS, decoded.username.length)
+        assertTrue(tooLong.startsWith(decoded.username))
+        assertNull(decoded.signature)
     }
 
     @Test
@@ -388,11 +399,39 @@ class MeshFrameCodecTest {
         val pair = SenderIdentity.generateKeyPair()
         val nick = NicknameEntity(
             "group-1", "sender-1", "responder", 1_700_000_000_000L,
-            mac = ByteArray(16), signature = SenderIdentity.sign(pair.privateKey, "responder".toByteArray())
+            mac = ByteArray(16), signature = SenderIdentity.sign(pair.privateKey, "responder".toByteArray()),
+            handle = fakeHandle,
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeNickname(nick))
         check(decoded is MeshFrameCodec.Frame.Nickname)
-        assertArrayEquals(nick.signature, decoded.nickname.signature)
+        assertArrayEquals(nick.signature, decoded.signature)
+    }
+
+    @Test
+    fun `reframeNicknameForRelay re-encodes every field unchanged`() {
+        // New in decision 38 (docs/DECISIONS.md) — nickname never had a reframe function before,
+        // since its old vacuous-auth blind-relay path never needed to move opaque bytes forward
+        // (see RelayResponder.takeOpaqueNicknameCustody's doc for why that changes here). No hop/
+        // ttl field exists on this frame type, so "reframe" is a structural no-op re-encode; this
+        // test is what proves it really is byte-for-byte identical, not just in shape.
+        val pair = SenderIdentity.generateKeyPair()
+        val nick = NicknameEntity(
+            "group-1", "sender-1", "responder", 1_700_000_000_000L,
+            mac = ByteArray(16) { it.toByte() },
+            signature = SenderIdentity.sign(pair.privateKey, "responder".toByteArray()),
+            handle = fakeHandle,
+        )
+        val original = MeshFrameCodec.decode(MeshFrameCodec.encodeNickname(nick)) as MeshFrameCodec.Frame.Nickname
+
+        val relayed =
+            MeshFrameCodec.decode(MeshFrameCodec.reframeNicknameForRelay(original)) as MeshFrameCodec.Frame.Nickname
+
+        assertArrayEquals(original.handle, relayed.handle)
+        assertEquals(original.senderId, relayed.senderId)
+        assertEquals(original.username, relayed.username)
+        assertEquals(original.updatedAt, relayed.updatedAt)
+        assertArrayEquals(original.mac, relayed.mac)
+        assertArrayEquals(original.signature, relayed.signature)
     }
 
     @Test
@@ -401,7 +440,7 @@ class MeshFrameCodecTest {
         val frame = MeshFrameCodec.encodePresence("group-1", "sender-1", 1_700_000_000_000L, key)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.Presence)
-        assertEquals("group-1", decoded.groupId)
+        assertArrayEquals(MeshFrameCodec.groupHandle(key, 1_700_000_000_000L / 1000), decoded.handle)
         assertEquals("sender-1", decoded.senderId)
         assertNull(decoded.senderPublicKey)
         assertNull(decoded.signature)
@@ -514,7 +553,7 @@ class MeshFrameCodecTest {
         val meta = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
             timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = Int.MAX_VALUE,
-            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16), handle = fakeHandle,
         )
         assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta)))
     }
@@ -524,7 +563,7 @@ class MeshFrameCodecTest {
         val negative = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
             timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = -1,
-            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16), handle = fakeHandle,
         )
         assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(negative)))
         val zero = negative.copy(totalChunks = 0)
@@ -535,12 +574,12 @@ class MeshFrameCodecTest {
     fun `decode still accepts a legitimate evidence meta frame under the cap`() {
         val meta = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 200,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 200, handle = fakeHandle,
             mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16)
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
         check(decoded is MeshFrameCodec.Frame.EvidMeta)
-        assertEquals(200, decoded.meta.totalChunks)
+        assertEquals(200, decoded.totalChunks)
     }
 
     /** Hand-builds the raw manifest wire layout (rather than calling [MeshFrameCodec.encodeManifest],
@@ -593,7 +632,7 @@ class MeshFrameCodecTest {
     fun `openSos rejects a message exceeding MAX_SOS_MESSAGE_BYTES`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1),
+            key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1),
             1000L, isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -605,7 +644,7 @@ class MeshFrameCodecTest {
     fun `openSos still accepts a message at exactly MAX_SOS_MESSAGE_BYTES`() {
         val key = randomKey()
         val sealed = MeshFrameCodec.sealSos(
-            "group-1", key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES),
+            key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES),
             1000L, isAlert = false, ttl = 8, hop = 0,
         )
         val decoded = MeshFrameCodec.decode(sealed)
@@ -621,7 +660,7 @@ class MeshFrameCodecTest {
         // read and increment the hop. If this ever moves back inside the seal, non-member relays
         // silently stop forwarding positions again (see Frame.PositionSealed's doc).
         val key = randomKey()
-        val frame = MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 2)
+        val frame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 2)
         val decoded = MeshFrameCodec.decode(frame)
         check(decoded is MeshFrameCodec.Frame.PositionSealed)
         assertEquals(2, decoded.hop)
@@ -631,11 +670,11 @@ class MeshFrameCodecTest {
     fun `reframePositionForRelay changes only the hop, never the sealed bytes`() {
         val key = randomKey()
         val original = MeshFrameCodec.decode(
-            MeshFrameCodec.encodePosition("group-1", key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 0)
+            MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, 1_700_000_000L, hop = 0)
         ) as MeshFrameCodec.Frame.PositionSealed
 
         val relayed = MeshFrameCodec.decode(
-            MeshFrameCodec.reframePositionForRelay(original.groupId, original.hop + 1, original.sealed)
+            MeshFrameCodec.reframePositionForRelay(original.handle, original.hop + 1, original.sealed)
         ) as MeshFrameCodec.Frame.PositionSealed
 
         assertEquals(1, relayed.hop)

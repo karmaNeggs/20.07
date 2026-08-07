@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.7.5-dev] — Rotating group handle (P6's second slice)
+
+Decision 38 (`docs/DECISIONS.md`), P6's second slice: closes `PLAN-v2.md` §4.4's cleartext-`groupId`
+traffic-analysis gap. Every relayed frame type (SOS, position, evidence-meta, nickname, presence) has
+always carried its `groupId` in the clear — any nearby phone capturing mesh traffic could correlate
+packets to a group with no key needed at all, even after decision 37 sealed SOS content itself.
+`groupId` is now replaced everywhere with an opaque rotating handle, `HMAC(groupKey, epoch)`.
+
+Reuses the beacon's own existing HMAC construction (`CryptoUtils.rotatingAdvertisementId`),
+generalized with a `windowSeconds` param rather than duplicated — every existing beacon call site is
+unaffected. GATT frames get a new, much wider 72h window (`CryptoUtils.
+GATT_GROUP_HANDLE_WINDOW_SECONDS`) instead of the beacon's own 60s one: a GATT handle is computed
+once at creation and forwarded verbatim for a frame's entire relay life (a blind relay has no key to
+recompute it with), so it has to keep resolving correctly up to this app's 48h content-retention
+ceiling, not just a beacon payload's sub-minute one. New `GroupRepository.resolveGroupKeyByHandle`
+(receiver-side resolution, modeled on `BeaconRadio.refreshCaches()`'s existing pattern) and
+`MeshFrameCodec.groupHandle` (the shared computation point).
+
+`Frame.EvidMeta`/`Nickname` became envelope-only structs (previously they decoded directly into a
+ready entity) since `groupId` can no longer travel in the clear for them either.
+`EvidenceEntity.groupId` went nullable so a blind carrier can keep relaying evidence chunks without
+ever learning which group they belong to (an existing mechanism, traced and preserved).
+`NicknameEntity` gained a genuinely new in-memory blind-relay path — its old cleartext-scheme
+equivalent was already a dead end (every nickname push path only ever serves active groups), so this
+is a real new capability, not a like-for-like port. `MeshFrameCodec.VERSION` 6 → 7, `AppDatabase`
+v9 → v10.
+
+Found and fixed a real bug while building this: `opaqueSos`'s carried frames were never actually
+pushed back out anywhere — decision 37 added the accept-side but never wired the forward-side, so SOS
+blind relay has been silently inert since it shipped. Fixed alongside the new nickname path.
+
+381 tests (up from 370), detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** — the
+`VERSION` 7 wire break means no pre-checkpoint test APK can talk to this build until reflashed
+(decision 37's own `VERSION` 6 was never hardware-confirmed either — both need the same next round).
+
 ## [0.7.4-dev] — SOS body encryption (P6's first slice)
 
 Decision 37 (`docs/DECISIONS.md`), P6's first slice: `docs/DECISIONS.md`/`NEXT_STEPS.md`'s long-

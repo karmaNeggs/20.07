@@ -54,8 +54,9 @@ object MeshFrameCodec {
      *  ~268MB allocation on every device that relays it — worse, that header is persisted to Room
      *  and re-encoded into a manifest on every future connection (see
      *  [org.offlinemesh.app.ble.RelayResponder.framesToPushOnConnect]), so the crash recurs until
-     *  the 48h prune. `authOk` intentionally returns true for a group we hold no key for (blind
-     *  relaying), so this frame type has no authentication gate at all — the length cap here is
+     *  the 48h prune. A blind relay (one that can't resolve this frame's `handle` to a group key —
+     *  see `GroupRepository.resolveGroupKeyByHandle`, decision 38) stores this header regardless,
+     *  so this frame type has no authentication gate at all for that path — the length cap here is
      *  the only line of defense. 4096 chunks * 400 bytes/chunk (`RelayEngine.CHUNK_SIZE`) = 1.6MB,
      *  generous against `EvidenceCapture`'s 640px/quality-45 JPEGs (typically ~200 chunks). */
     const val MAX_EVIDENCE_CHUNKS = 4096
@@ -68,6 +69,9 @@ object MeshFrameCodec {
 
     /** Largest value a single unsigned wire byte can carry — hop/ttl fields coerce into this. */
     private const val MAX_UNSIGNED_BYTE = 255
+
+    /** millis-to-epoch-seconds conversion, for [groupHandle]'s callers (decision 38). */
+    private const val MILLIS_PER_SECOND = 1000L
 
     // v3: presence gained an envelope hop too, for the same blind-relay reason.
     // v2 -> v3: the position frame's hop moved from inside the encrypted body into the cleartext
@@ -88,56 +92,99 @@ object MeshFrameCodec {
     // v6: SOS frames now AES-GCM seal senderId/message/timestamp/isAlert under the group key
     // instead of cleartext-plus-HMAC (see SosEntity.sealed's doc, docs/DECISIONS.md decision 37) —
     // any nearby non-member relay could previously read the message text directly.
-    const val VERSION: Int = 6
+    // v7: every frame type except CatalogFilter drops its cleartext `groupId` field, replaced with
+    // an opaque rotating `handle` (see groupHandle's doc, docs/DECISIONS.md decision 38) — a
+    // passive observer could previously correlate mesh traffic to a specific group just by reading
+    // this field, with no key needed at all.
+    const val VERSION: Int = 7
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openSos]. Same
          *  shape as [PositionSealed] and the same reasoning: [id]/[ttl]/[hop] live out here in the
-         *  cleartext envelope so a phone holding no key for [groupId] can still dedup, flood-control,
-         *  and carry this frame onward without ever learning its content — see [SosEntity.sealed]'s
-         *  own doc (decision 37, `docs/DECISIONS.md`) for why this replaced the old cleartext-
-         *  message-plus-HMAC shape. [id] specifically has to stay cleartext (not just inside the
-         *  seal) because it's what both a member's `seenDao` dedup AND a blind relay's own
-         *  ciphertext-independent dedup key off — see [RelayResponder]'s `takeOpaqueSosCustody`. */
-        data class SosSealed(val groupId: String, val id: String, val ttl: Int, val hop: Int, val sealed: ByteArray) :
+         *  cleartext envelope so a phone holding no key for [handle]'s group can still dedup,
+         *  flood-control, and carry this frame onward without ever learning its content — see
+         *  [SosEntity.sealed]'s own doc (decision 37, `docs/DECISIONS.md`) for why this replaced
+         *  the old cleartext-message-plus-HMAC shape, and [groupHandle]'s doc (decision 38) for why
+         *  [handle] replaced the cleartext `groupId` this envelope used to carry directly. [id]
+         *  specifically has to stay cleartext (not just inside the seal) because it's what both a
+         *  member's `seenDao` dedup AND a blind relay's own ciphertext-independent dedup key off —
+         *  see [RelayResponder]'s `takeOpaqueSosCustody`. */
+        data class SosSealed(val handle: ByteArray, val id: String, val ttl: Int, val hop: Int, val sealed: ByteArray) :
             Frame()
-        data class EvidMeta(val meta: EvidenceEntity) : Frame()
+        /** Envelope only, since decision 38 (`docs/DECISIONS.md`) — [handle] replaces the cleartext
+         *  `groupId` this used to decode directly into a ready [EvidenceEntity] with. A receiver
+         *  now has to resolve [handle] to a real groupId first (see
+         *  [org.offlinemesh.app.data.GroupRepository.resolveGroupKeyByHandle]) before it can verify
+         *  [mac]/[signature] or construct a full entity — see [EvidenceEntity.groupId]'s own doc
+         *  for what happens when that resolution fails (a blind relay still stores a row, with
+         *  `groupId = null`, so the existing manifest/chunk-relay mechanism keeps working without
+         *  ever learning which group this belongs to). Every other field here is unchanged from
+         *  what [EvidenceEntity] itself carries — this is a 1:1 field list minus `groupId`. */
+        data class EvidMeta(
+            val id: String,
+            val handle: ByteArray,
+            val senderId: String,
+            val timestamp: Long,
+            val sha256: String,
+            val totalChunks: Int,
+            val mimeType: String,
+            val ttl: Int,
+            val mac: ByteArray?,
+            val signature: ByteArray?,
+        ) : Frame()
         data class EvidChunk(val chunk: EvidenceChunkEntity) : Frame()
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
          *
          *  [hop] lives out here in the cleartext envelope, NOT inside [sealed], specifically so a
-         *  phone that holds no key for [groupId] can still carry this frame onward and increment
-         *  its hop — the same store-and-forward blind relaying SOS/evidence already get. Without
-         *  that, positions could only ever travel member-to-member: a non-member relay dropped them
-         *  outright, so a member two hops away behind a stranger's phone never appeared on the
-         *  radar at all (confirmed live — every position ever received was hop=0). The sealed body
-         *  still carries its own copy of the hop for the signature to cover; receivers use THIS
-         *  one, since it reflects the path actually travelled. Exposing hop depth in cleartext
-         *  reveals topology distance and nothing about who or where — the same tradeoff
-         *  `SosEntity.ttl` already makes. */
-        data class PositionSealed(val groupId: String, val hop: Int, val sealed: ByteArray) : Frame()
+         *  phone that holds no key for [handle]'s group can still carry this frame onward and
+         *  increment its hop — the same store-and-forward blind relaying SOS/evidence already get.
+         *  Without that, positions could only ever travel member-to-member: a non-member relay
+         *  dropped them outright, so a member two hops away behind a stranger's phone never
+         *  appeared on the radar at all (confirmed live — every position ever received was hop=0).
+         *  The sealed body still carries its own copy of the hop for the signature to cover;
+         *  receivers use THIS one, since it reflects the path actually travelled. Exposing hop
+         *  depth in cleartext reveals topology distance and nothing about who or where — the same
+         *  tradeoff `SosEntity.ttl` already makes. [handle] replaced this envelope's own cleartext
+         *  `groupId` in decision 38 — see [groupHandle]'s doc. */
+        data class PositionSealed(val handle: ByteArray, val hop: Int, val sealed: ByteArray) : Frame()
         data class Manifest(val evidenceId: String, val totalChunks: Int, val peerHave: Set<Int>) : Frame()
-        data class Nickname(val nickname: NicknameEntity) : Frame()
+        /** Envelope only, since decision 38 (`docs/DECISIONS.md`) — same shape [EvidMeta] gained:
+         *  [handle] replaces the cleartext `groupId` this used to decode directly into a ready
+         *  [NicknameEntity] with. Unlike [EvidMeta], a nickname a receiver can't resolve [handle]
+         *  for never becomes a Room row at all — see [org.offlinemesh.app.ble.RelayResponder]'s
+         *  `takeOpaqueNicknameCustody` (a genuinely new in-memory blind-relay path this decision
+         *  adds, since nicknames never had one before: tracing the existing push paths showed a
+         *  blind-relay-held nickname was already a dead end pre-decision-38, never re-served to
+         *  anyone, so this is a strict improvement, not a new risk). */
+        data class Nickname(
+            val handle: ByteArray,
+            val senderId: String,
+            val username: String,
+            val updatedAt: Long,
+            val mac: ByteArray?,
+            val signature: ByteArray?,
+        ) : Frame()
         /** Not stored, not relayed — a direct-neighbor heartbeat proving group co-membership over the
          *  GATT link, so presence doesn't depend solely on hearing a beacon (which can be one-way).
          *  [senderPublicKey] is what a receiver pins per (groupId, senderId) on first sight — see
          *  [RelayResponder]'s pin-on-first-sight doc and `docs/DECISIONS.md`, decision 7. [signature]
          *  is the same additive per-sender Ed25519 tag every other frame type carries, over
-         *  [presenceMacInput]'s bytes. */
+         *  [presenceMacInput]'s bytes (computed over the REAL groupId, resolved from [handle] — see
+         *  [groupHandle]'s doc, decision 38, for why the wire field itself is now opaque). */
         data class Presence(
-            val groupId: String,
+            val handle: ByteArray,
             val senderId: String,
             val timestamp: Long,
             val mac: ByteArray?,
             val senderPublicKey: ByteArray? = null,
             val signature: ByteArray? = null,
             /** Hops travelled, in the cleartext envelope for exactly the same reason
-             *  [PositionSealed.hop] is: a phone holding no key for [groupId] can neither verify
-             *  [mac] nor read anything here, but it CAN still carry this onward and advance the hop
-             *  (see [OpaqueFrameRelay]). Without it, a member with no GPS fix — who therefore pushes
-             *  no position for the position path to piggyback on — was invisible past a non-member
-             *  relay rather than merely distant. */
+             *  [PositionSealed.hop] is: a phone holding no key for [handle]'s group can neither
+             *  verify [mac] nor read anything here, but it CAN still carry this onward and advance
+             *  the hop (see [OpaqueFrameRelay]). Without it, a member with no GPS fix — who
+             *  therefore pushes no position for the position path to piggyback on — was invisible
+             *  past a non-member relay rather than merely distant. */
             val hop: Int = 0,
         ) : Frame()
         /** One filter per connection, covering ALL of the sender's current relayable sos/evidence-
@@ -157,8 +204,9 @@ object MeshFrameCodec {
         /** "I have a chunk deficit for this evidence item worth accelerating over WiFi Direct."
          *  Only ever produced by a sender that holds [groupId]'s key (a blind relay can compute a
          *  chunk deficit but can never produce a verifiable [mac] here, so a forged frame from a
-         *  non-member just fails verification and is dropped — same shape as every other authOk
-         *  failure in this codec). */
+         *  non-member just fails verification and is dropped). Out of scope for decision 38's
+         *  handle-based rewrite — this is a separate, opt-in, already-mac-gated proposal frame, not
+         *  one of the always-relayed frame types that needed a blind-relay path in the first place. */
         data class WifiDirectHandoff(
             val evidenceId: String,
             val groupId: String,
@@ -288,6 +336,20 @@ object MeshFrameCodec {
 
     // ---------- encode ----------
 
+    /** The opaque wire handle for [key]'s group at [epochSeconds] — `HMAC(groupKey, epoch)` under
+     *  the GATT-specific epoch window (decision 38, `docs/DECISIONS.md`; see
+     *  [CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS]'s own doc for why GATT needs a much wider
+     *  window than the beacon's own 60s rotating id). Replaces the cleartext `groupId` field every
+     *  relayed frame type used to carry, closing a passive-correlation gap `PLAN-v2.md` §4.4 names
+     *  explicitly. The single computation point for all 5 relayed frame types: `RelayEngine` calls
+     *  this ONCE at creation/first-ingest time and stores the result on the entity (`SosEntity`/
+     *  `EvidenceEntity`/`NicknameEntity.handle`) for SOS/evidence/nickname; position/presence,
+     *  never stored, call it fresh on every push instead — either way, once computed, a handle is
+     *  forwarded VERBATIM on every subsequent relay hop, never recomputed (a blind relay has no key
+     *  to recompute it with — see e.g. `reframeSosForRelay`'s doc). */
+    fun groupHandle(key: ByteArray, epochSeconds: Long): ByteArray =
+        CryptoUtils.rotatingAdvertisementId(key, epochSeconds, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS)
+
     // SOS frames are the second place in this app that repeatedly encrypts under a single, never-
     // rotated group key (decision 37, docs/DECISIONS.md) — same birthday-bound reasoning
     // positionNonceCounter's own doc gives, so this needs the identical deterministic-nonce
@@ -335,10 +397,11 @@ object MeshFrameCodec {
      *  one call — same shape as [encodePosition]. Only a member holding the key can produce or read
      *  this, non-members that relay it move opaque bytes. See [sealSosBody]'s doc for why a caller
      *  that needs to STORE the sealed bytes (rather than send them immediately) must call that
-     *  instead of this. */
+     *  instead of this. [handle] is computed here (via [groupHandle], from [timestamp]) rather than
+     *  taking a `groupId` param — since decision 38, the envelope carries an opaque handle, not a
+     *  cleartext groupId. */
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun sealSos(
-        groupId: String,
         key: ByteArray,
         id: String,
         senderId: String,
@@ -350,21 +413,26 @@ object MeshFrameCodec {
         signingPrivateKey: ByteArray? = null,
     ): ByteArray {
         val sealed = sealSosBody(key, id, senderId, message, timestamp, isAlert, signingPrivateKey)
-        return reframeSosForRelay(groupId, id, ttl, hop, sealed)
+        val handle = groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        return reframeSosForRelay(handle, id, ttl, hop, sealed)
     }
 
     /** Re-frames an already-sealed SOS for another hop **without needing the group key** — a blind
      *  relay (or a member forwarding someone else's SOS) moves the exact same opaque ciphertext
      *  along, only the envelope's ttl/hop differ, so it never learns the message while still
-     *  carrying it. Same role [reframePositionForRelay] plays for position. */
-    fun reframeSosForRelay(groupId: String, id: String, ttl: Int, hop: Int, sealed: ByteArray): ByteArray =
+     *  carrying it. Same role [reframePositionForRelay] plays for position. [handle] is likewise
+     *  forwarded verbatim, never recomputed — a blind relay has no key to recompute it with (see
+     *  [groupHandle]'s doc, decision 38). */
+    fun reframeSosForRelay(handle: ByteArray, id: String, ttl: Int, hop: Int, sealed: ByteArray): ByteArray =
         frame(FRAME_SOS) { d ->
-            d.writeStr(groupId); d.writeStr(id); d.writeByte(ttl.coerceIn(0, MAX_UNSIGNED_BYTE))
+            d.writeBlob(handle); d.writeStr(id); d.writeByte(ttl.coerceIn(0, MAX_UNSIGNED_BYTE))
             d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
         }
 
+    // e.handle should always be populated by the time this is called — see EvidenceEntity.handle's
+    // doc — writeBlob's null tolerance is defensive only, matching every other blob field here.
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
-        d.writeStr(e.id); d.writeStr(e.groupId); d.writeStr(e.senderId); d.writeLong(e.timestamp)
+        d.writeStr(e.id); d.writeBlob(e.handle); d.writeStr(e.senderId); d.writeLong(e.timestamp)
         d.write(hexToBytes(e.sha256)); d.writeInt(e.totalChunks); d.writeStr(e.mimeType)
         d.writeByte(e.ttl.coerceIn(0, 255)); d.writeBlob(e.mac); d.writeBlob(e.signature)
     }
@@ -411,9 +479,12 @@ object MeshFrameCodec {
      *  yet, or the caller may be a blind relay authoring nothing of its own) — see
      *  [PositionBody.signature]'s doc for why the resulting signature travels INSIDE the seal, not
      *  alongside it. */
+    // groupId dropped (decision 38) — key is already a param, and the handle it derives (via
+    // groupHandle) is all the envelope needs; a caller that also needs the real groupId string
+    // (e.g. for a signing-key lookup) already has it from wherever it got `key`.
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun encodePosition(
-        groupId: String, key: ByteArray, senderId: String, lat: Double, lon: Double,
+        key: ByteArray, senderId: String, lat: Double, lon: Double,
         accuracyM: Int, timestampSec: Long, hop: Int, signingPrivateKey: ByteArray? = null,
     ): ByteArray {
         val inner = build { d ->
@@ -425,28 +496,58 @@ object MeshFrameCodec {
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
         val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
         val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, positionNonce(senderId, timestampSec))
-        return reframePositionForRelay(groupId, hop, sealed)
+        val handle = groupHandle(key, timestampSec)
+        return reframePositionForRelay(handle, hop, sealed)
     }
 
     /** Re-frames an already-sealed position for another hop **without needing the group key** —
      *  the whole point of keeping hop in the envelope (see [Frame.PositionSealed]). A blind relay
      *  moves the exact same opaque ciphertext along, only the hop byte differs, so it never learns
-     *  a member's position while still carrying it. */
-    fun reframePositionForRelay(groupId: String, hop: Int, sealed: ByteArray): ByteArray =
+     *  a member's position while still carrying it. [handle] is likewise forwarded verbatim, never
+     *  recomputed (see [groupHandle]'s doc, decision 38). */
+    fun reframePositionForRelay(handle: ByteArray, hop: Int, sealed: ByteArray): ByteArray =
         frame(FRAME_POSITION) { d ->
-            d.writeStr(groupId); d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
+            d.writeBlob(handle); d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
         }
 
-    fun encodeNickname(n: NicknameEntity): ByteArray = frame(FRAME_NICKNAME) { d ->
-        d.writeStr(n.groupId); d.writeStr(n.senderId); d.writeNicknameUsername(n.username)
-        d.writeLong(n.updatedAt); d.writeBlob(n.mac); d.writeBlob(n.signature)
+    // n.handle should always be populated by the time this is called — see NicknameEntity.handle's
+    // doc — writeBlob's null tolerance is defensive only, matching every other blob field here.
+    fun encodeNickname(n: NicknameEntity): ByteArray =
+        encodeNicknameFrame(n.handle, n.senderId, n.username, n.updatedAt, n.mac, n.signature)
+
+    /** Re-frames an already-encoded nickname for another hop **without needing the group key** —
+     *  new in decision 38 (`docs/DECISIONS.md`): nickname never needed this before (its old
+     *  vacuous-auth blind-relay path never actually re-served a held row to anyone — see
+     *  `RelayResponder.takeOpaqueNicknameCustody`'s doc), but a genuine `OpaqueFrameRelay` custody
+     *  path needs a way to move the ORIGINAL bytes forward, same as every other frame type. Nothing
+     *  in this frame mutates per hop (no hop/ttl field, unlike Sos/Position/Presence), so this is a
+     *  structural no-op re-encode — kept as its own named function purely for consistency with the
+     *  other 4 frame types' `reframeXForRelay` shape. */
+    fun reframeNicknameForRelay(frame: Frame.Nickname): ByteArray =
+        encodeNicknameFrame(frame.handle, frame.senderId, frame.username, frame.updatedAt, frame.mac, frame.signature)
+
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    private fun encodeNicknameFrame(
+        handle: ByteArray?,
+        senderId: String,
+        username: String,
+        updatedAt: Long,
+        mac: ByteArray?,
+        signature: ByteArray?,
+    ): ByteArray = frame(FRAME_NICKNAME) { d ->
+        d.writeBlob(handle); d.writeStr(senderId); d.writeNicknameUsername(username)
+        d.writeLong(updatedAt); d.writeBlob(mac); d.writeBlob(signature)
     }
 
     /** Computes the tag internally (like encodePosition takes the key) — there's no stored entity
      *  for a presence heartbeat, it's generated fresh each connect. [senderPublicKey]/
      *  [signingPrivateKey] are both optional and independent of each other in principle, but in
      *  practice a caller either has a sender identity for this group (and passes both) or doesn't
-     *  (and passes neither) — see [RelayResponder.framesToPushOnConnect]'s only real call site. */
+     *  (and passes neither) — see [RelayResponder.framesToPushOnConnect]'s only real call site.
+     *  [groupId] is still needed here (unlike [encodePosition], which dropped it) — it's part of
+     *  [presenceMacInput]'s authenticated bytes, computed identically by both the resolved-groupId
+     *  sender and a resolved-groupId receiver; only the WIRE envelope itself carries the opaque
+     *  [handle] derived from it (decision 38), not [groupId] directly. */
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun encodePresence(
         groupId: String,
@@ -459,22 +560,24 @@ object MeshFrameCodec {
         val macInput = presenceMacInput(groupId, senderId, timestamp)
         val mac = CryptoUtils.authTag(key, macInput)
         val signature = signingPrivateKey?.let { SenderIdentity.sign(it, macInput) }
-        return encodePresenceFrame(groupId, senderId, timestamp, mac, senderPublicKey, signature, hop = 0)
+        val handle = groupHandle(key, timestamp / MILLIS_PER_SECOND)
+        return encodePresenceFrame(handle, senderId, timestamp, mac, senderPublicKey, signature, hop = 0)
     }
 
     /** Re-frames a received presence for another hop **without needing the group key** — the point of
      *  keeping hop in the envelope (see [Frame.Presence.hop]). Every field is copied verbatim from
      *  what arrived; only the hop advances, so the [Frame.Presence.mac] a real member will verify is
-     *  untouched and a relay cannot forge presence it couldn't already forge. */
+     *  untouched and a relay cannot forge presence it couldn't already forge. [handle] is likewise
+     *  copied verbatim, never recomputed (see [groupHandle]'s doc, decision 38). */
     fun reframePresenceForRelay(frame: Frame.Presence, hop: Int): ByteArray =
         encodePresenceFrame(
-            frame.groupId, frame.senderId, frame.timestamp, frame.mac,
+            frame.handle, frame.senderId, frame.timestamp, frame.mac,
             frame.senderPublicKey, frame.signature, hop
         )
 
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     private fun encodePresenceFrame(
-        groupId: String,
+        handle: ByteArray,
         senderId: String,
         timestamp: Long,
         mac: ByteArray?,
@@ -482,7 +585,7 @@ object MeshFrameCodec {
         signature: ByteArray?,
         hop: Int,
     ): ByteArray = frame(FRAME_PRESENCE) { d ->
-        d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
+        d.writeBlob(handle); d.writeStr(senderId); d.writeLong(timestamp); d.writeBlob(mac)
         d.writeBlob(senderPublicKey); d.writeBlob(signature)
         d.writeByte(hop.coerceIn(0, MAX_UNSIGNED_BYTE))
     }
@@ -583,34 +686,38 @@ object MeshFrameCodec {
                 FRAME_SOS -> {
                     // Envelope only (decision 37, docs/DECISIONS.md) — sealed is opened separately
                     // via openSos, once a caller has the group key; see Frame.SosSealed's own doc.
-                    val groupId = buf.readStr()
+                    // handle (decision 38) replaces the old cleartext groupId here.
+                    val handle = buf.readBlob() ?: return null
                     val id = buf.readStr()
                     val ttl = buf.get().toInt() and 0xFF
                     val hop = buf.get().toInt() and 0xFF
                     val sealed = buf.readStr16Bytes()
-                    Frame.SosSealed(groupId, id, ttl, hop, sealed)
+                    Frame.SosSealed(handle, id, ttl, hop, sealed)
                 }
                 FRAME_EVID_META -> {
-                    val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()
+                    // Envelope only, since decision 38 (docs/DECISIONS.md) — handle is resolved to
+                    // a real groupId separately, by the caller, via
+                    // GroupRepository.resolveGroupKeyByHandle; see Frame.EvidMeta's own doc.
+                    val id = buf.readStr(); val handle = buf.readBlob() ?: return null
+                    val senderId = buf.readStr()
                     val timestamp = buf.long
                     val sha = ByteArray(32).also { buf.get(it) }
                     val totalChunks = buf.int
                     // Guards MeshProtocol.encodeBitset's O(totalChunks) allocation, which this
                     // persisted header later feeds via RelayResponder.framesToPushOnConnect — see
-                    // MAX_EVIDENCE_CHUNKS's doc. Not gated behind authOk (blind relays never hold a
-                    // key), so this is the only check standing between a hostile 120-byte frame and
-                    // a repeating ~268MB allocation.
+                    // MAX_EVIDENCE_CHUNKS's doc. Not gated behind any auth check here (a receiver
+                    // that can't resolve `handle` to a group key still stores this header — see
+                    // EvidenceEntity.groupId's doc), so this is the only check standing between a
+                    // hostile 120-byte frame and a repeating ~268MB allocation.
                     if (totalChunks !in 1..MAX_EVIDENCE_CHUNKS) return null
                     val mimeType = buf.readStr()
                     val ttl = buf.get().toInt() and 0xFF
                     val mac = buf.readBlob()
                     val signature = buf.readBlob()
                     Frame.EvidMeta(
-                        EvidenceEntity(
-                            id = id, groupId = groupId, senderId = senderId, senderIsMe = false,
-                            timestamp = timestamp, sha256 = bytesToHex(sha), totalChunks = totalChunks,
-                            mimeType = mimeType, ttl = ttl, mac = mac, signature = signature
-                        )
+                        id = id, handle = handle, senderId = senderId, timestamp = timestamp,
+                        sha256 = bytesToHex(sha), totalChunks = totalChunks, mimeType = mimeType,
+                        ttl = ttl, mac = mac, signature = signature,
                     )
                 }
                 FRAME_EVID_CHUNK -> {
@@ -619,10 +726,10 @@ object MeshFrameCodec {
                     Frame.EvidChunk(EvidenceChunkEntity(evidenceId, index, data))
                 }
                 FRAME_POSITION -> {
-                    val groupId = buf.readStr()
+                    val handle = buf.readBlob() ?: return null
                     val hop = buf.get().toInt() and 0xFF
                     val sealed = buf.readStr16Bytes()
-                    Frame.PositionSealed(groupId, hop, sealed)
+                    Frame.PositionSealed(handle, hop, sealed)
                 }
                 FRAME_MANIFEST -> {
                     val evidenceId = buf.readStr(); val totalChunks = buf.int
@@ -636,20 +743,24 @@ object MeshFrameCodec {
                     Frame.Manifest(evidenceId, totalChunks, MeshProtocol.decodeBitset(bitset, totalChunks))
                 }
                 FRAME_NICKNAME -> {
-                    val groupId = buf.readStr(); val senderId = buf.readStr(); val username = buf.readStr()
+                    // Envelope only, since decision 38 (docs/DECISIONS.md) — see Frame.Nickname's
+                    // own doc for why a receiver that can't resolve `handle` never stores this at all.
+                    val handle = buf.readBlob() ?: return null
+                    val senderId = buf.readStr(); val username = buf.readStr()
                     val updatedAt = buf.long; val mac = buf.readBlob()
                     val signature = buf.readBlob()
-                    Frame.Nickname(NicknameEntity(groupId, senderId, username, updatedAt, mac, signature))
+                    Frame.Nickname(handle, senderId, username, updatedAt, mac, signature)
                 }
                 FRAME_PRESENCE -> {
-                    val groupId = buf.readStr(); val senderId = buf.readStr()
+                    val handle = buf.readBlob() ?: return null
+                    val senderId = buf.readStr()
                     val timestamp = buf.long; val mac = buf.readBlob()
                     val senderPublicKey = buf.readBlob()
                     val signature = buf.readBlob()
                     // Appended last, so a hop-less v3 presence still decodes as hop 0 rather than
                     // throwing — the same tolerance readBlob-appended fields already rely on.
                     val hop = if (buf.hasRemaining()) buf.get().toInt() and 0xFF else 0
-                    Frame.Presence(groupId, senderId, timestamp, mac, senderPublicKey, signature, hop)
+                    Frame.Presence(handle, senderId, timestamp, mac, senderPublicKey, signature, hop)
                 }
                 FRAME_CATALOG_FILTER -> {
                     val seed = buf.long

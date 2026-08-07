@@ -2001,3 +2001,110 @@ updated stale comments naming the removed `sosMacInput`/old `Frame.Sos`; decisio
 GATT-authoritative scheme). **NOT hardware-confirmed** — the `VERSION` 6 wire break means no
 pre-checkpoint test APK can talk to this build until reflashed; next live round needed.
 
+## 38. Rotating group handle — closes `PLAN-v2.md` §4.4's cleartext-`groupId` traffic-analysis gap
+
+P6's second slice. Every GATT-relayed frame (SOS, position, evidence-meta, nickname, presence) has
+always carried its `groupId` in cleartext — an observer capturing mesh traffic could correlate which
+packets belong to the same group with no key needed at all, even after decision 37 sealed SOS
+content itself. This decision replaces cleartext `groupId` with an opaque rotating handle,
+`HMAC(groupKey, epoch)`, on every one of those frame types (`Frame.CatalogFilter` excluded — it
+never carried `groupId`, confirmed by inspection: it's one filter per connection covering every
+group's items, keyed only by item-type+item-id strings).
+
+**Reuses the beacon's own construction, generalized, not duplicated.** `BeaconRadio`'s discovery
+layer already solves this exact problem for BLE advertisements
+(`CryptoUtils.rotatingAdvertisementId`, 60s window, 6-byte truncated HMAC-SHA256) with a working
+resolve-by-iterating-active-groups pattern (`BeaconRadio.refreshCaches()`). `rotatingAdvertisementId`/
+`candidateAdvertisementIds` gained a `windowSeconds: Long = ID_WINDOW_SECONDS` param — every existing
+beacon call site passes none, so that behavior is byte-for-byte unchanged — and a new
+`MeshFrameCodec.groupHandle(key, epochSeconds)` calls the same function with a new
+`CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS` (72h) instead.
+
+**Why 72h, not the beacon's 60s.** A beacon id is re-derived fresh every ~60s advertise cycle; a GATT
+handle is computed ONCE at creation/first-ingest and forwarded verbatim for a frame's whole relay
+life (a blind relay has no key to recompute it with). For a receiver's ±1-window tolerance to still
+catch a handle computed at time T when checked at any later receive time, the window must EXCEED this
+app's 48h content-retention ceiling (`RelayEngine.CONTENT_MAX_AGE_MILLIS`), not just cover it — 72h
+gives 24h of margin, absorbing decision 33's multi-hour 120-hop transit time and ordinary clock skew.
+Domain separation from the beacon's own 60s window is provable, not assumed: for any realistic
+calendar date this app runs at (2020-2100), `epoch/60` and `epoch/259200` land in disjoint integer
+ranges, so one HMAC construction safely serves both purposes under the same group key — confirmed by
+a new test (`CryptoUtilsTest`), not just argued in the doc comment.
+
+**Receiver-side resolution**: new `GroupRepository.resolveGroupKeyByHandle(handle, epochSeconds)`,
+modeled directly on `BeaconRadio.refreshCaches()`'s shape — iterate every active group's key, compute
+3 candidate handles per group (adjacent-window tolerance), match via `.contentEquals()` (not
+`constantTimeEquals` — a handle isn't secret once it's on the wire, no timing-attack surface to
+defend). Deliberately NOT cached (unlike `BeaconRadio.matchTable`) — GATT frame receipt is bounded by
+open-connection count × per-connection frame cadence, several orders of magnitude cooler than the
+beacon's genuinely hot per-scan-result path, and this app's own group counts are small (a few groups,
+3-8 members each). Pure matching core factored into `GroupRepository.matchHandle` (no DAO/Keystore
+access) so it's directly unit-testable despite this class's real-Keystore construction constraint
+under Robolectric — new `GroupRepositoryHandleTest.kt`, including a test proving a handle computed at
+creation still resolves when checked up to just under 48h later, the empirical proof of the 72h
+derivation.
+
+**Every relayed frame's own field list changed.** `Frame.SosSealed`/`PositionSealed`/`Presence` swap
+`groupId: String` for `handle: ByteArray` directly. `Frame.EvidMeta`/`Nickname` needed a bigger
+structural change: they used to decode DIRECTLY into a ready-to-use `EvidenceEntity`/`NicknameEntity`
+(no separate open/verify step, unlike Sos/Position), which is no longer possible once `groupId` isn't
+in the envelope — both are now envelope-only structs (entity fields present, `groupId` deferred to a
+resolve step downstream), the same shape Sos/Position have had since decision 8/37.
+`SosEntity`/`EvidenceEntity`/`NicknameEntity` each gain a stored `handle: ByteArray?` (computed once
+in `RelayEngine.createSos`/`createEvidence`/`setNickname`, forwarded verbatim on every relay — same
+discipline `SosEntity.sealed` already established in decision 37). `MeshFrameCodec.VERSION` 6 → 7,
+`AppDatabase` v9 → v10 (`fallbackToDestructiveMigration`, no manual migration needed).
+
+**Evidence-meta and nickname get asymmetric treatment on a resolution failure — verified via tracing
+the actual code, not assumed:**
+- **`EvidenceEntity.groupId` becomes nullable (`String?`)**, keeping its existing Room-backed relay
+  mechanism intact rather than moving to an in-memory `OpaqueFrameRelay` custody. Traced why:
+  offering chunks onward to a peer (`RelayResponder`'s manifest push) reads `totalChunks` from a
+  **stored** entity row — a purely in-memory custody has nowhere to keep that. A blind relay still
+  stores the row, just with `groupId = null` ("blind-relay-held, group unresolved"), so the
+  already-working blind chunk-relay mechanism (unauthenticated for a non-member either way, before
+  and after this decision) keeps working unchanged.
+- **`NicknameEntity` gets a genuinely new `OpaqueFrameRelay`-based opaque-custody path**
+  (`takeOpaqueNicknameCustody`, `opaqueNickname` store). Verified via grep: every nickname push path
+  (`currentCatalogKeys`/`framesToPushOnConnect`/`presenceAndPositionFrames`/`handleCatalogFilter`) is
+  scoped to `repo.groupDao.getActiveGroups()` only — a blind-relay-held nickname (stored under the
+  OLD vacuous-auth-pass scheme) was never re-served to anyone. A comment already in
+  `RelayResponder.kt` confirms this by contrast: it explains position/presence's blind-relay frames
+  live in a separate path "outside the loop... on purpose... because we're not a member," while
+  nickname code had no such treatment. So this is a strict improvement, not a new risk — new
+  `MeshFrameCodec.reframeNicknameForRelay`/`encodeNicknameFrame` (nickname never had a reframe
+  function before, since it never needed to survive a blind hop; it's a structural no-op re-encode,
+  no hop/ttl field on this frame type — confirmed by a new round-trip test).
+
+**Real bug found and fixed as part of this slice, unrelated to the design above**: `opaqueSos`
+(added in decision 37) was populated via `takeOpaqueSosCustody`'s `.offer(...)` but
+**`.framesToRelay(...)` was never called anywhere** — confirmed via grep, `opaquePositions`/
+`opaquePresence` both already fed `presenceAndPositionFrames`'s `carried` list, `opaqueSos` didn't.
+SOS blind custody has accepted frames but never actually forwarded them since decision 37 shipped.
+Fixed by adding it (and the new `opaqueNickname`) to that same `carried` list. This bug — plus the
+whole nickname dead-end finding above — is exactly the kind of miss a real end-to-end test catches
+that a signature-shape test doesn't: new `RelayResponderTest` coverage feeds a crafted SOS/position/
+presence/nickname frame for an unresolvable group into `handleIncoming` and asserts all four come
+back out via `refreshFramesToPush` to a different peer (and NOT back to the peer that supplied them
+— split horizon) — genuinely possible for the first time, since this class's `repo` holds zero
+groups, so `resolveGroupKeyByHandle` never touches Keystore on this path either.
+
+`presenceMacInput`/`evidMacInput`/`nicknameMacInput` are unchanged — they authenticate the REAL
+resolved `groupId` (computed identically by a sender who knows it and a receiver who resolved it),
+not the transport-scoping handle, so nothing about the authenticated-bytes contract needed to move.
+
+381 tests (up from 370), detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`, R8-minified) green. **Production code
+touched**: `CryptoUtils.kt` (`GATT_GROUP_HANDLE_WINDOW_SECONDS`, generalized `windowSeconds` param),
+`Entities.kt` (`handle` on all three; `EvidenceEntity.groupId` nullable), `AppDatabase.kt` (v10),
+`GroupRepository.kt` (`resolveGroupKeyByHandle`/`matchHandle`), `MeshFrameCodec.kt` (`VERSION` 7,
+`groupHandle`, every relayed frame type's new shape, `reframeNicknameForRelay`), `PositionTracker.kt`
+(`Record.handle`), `RelayEngine.kt` (`createSos`/`createEvidence`/`setNickname` compute+store
+`handle`; null-safe `maybeReassemble`), `RelayResponder.kt` (the bulk — every handler's
+resolve-then-branch rewrite, `authOk` deleted, `takeOpaqueNicknameCustody`, the `opaqueSos` bugfix),
+`BeaconRadio.kt` (3 mechanical call-site edits — Tier B's embedded position sub-frame reuses
+`encodePosition`/`reframePositionForRelay` unchanged, so it stops leaking cleartext `groupId` too, a
+bonus not separately designed for), `MeshProtocol.kt` (doc-only). **NOT hardware-confirmed** — the
+`VERSION` 7 wire break means no pre-checkpoint test APK can talk to this build until reflashed; next
+live round needed for all of decisions 37-38 together (37 was never hardware-confirmed either).
+

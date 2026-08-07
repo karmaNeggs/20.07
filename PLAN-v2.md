@@ -6,6 +6,23 @@ document (including inline "STATUS" notes inside Part 7 below) is detail underne
 competing source. If a phase's own section below ever seems to disagree with this block, this block
 is current and that section is what's stale.
 
+- **2026-08-07, decision 38 (`docs/DECISIONS.md`): P6's second slice, rotating group handle, DONE.**
+  Closes `PLAN-v2.md` §4.4's cleartext-`groupId` traffic-analysis gap — every relayed frame type
+  (SOS/position/evidence-meta/nickname/presence) now carries an opaque `HMAC(groupKey, epoch)`
+  handle instead, reusing (generalized, not duplicated) the beacon's own existing
+  `CryptoUtils.rotatingAdvertisementId` construction under a new, much wider 72h window (a GATT
+  handle is computed once and forwarded verbatim for a frame's whole relay life, unlike a beacon id
+  re-derived every ~60s — see decision 38's own entry for the full derivation). Found and fixed a
+  real bug along the way: `opaqueSos`'s `.framesToRelay(...)` was never called anywhere since
+  decision 37 added it — SOS blind custody accepted frames but never forwarded them. Also gave
+  nickname a genuinely new blind-relay path (it never had one; the old scheme's version was already
+  a dead end, traced via every nickname push path being scoped to active groups only). 381 tests (up
+  from 370), detekt clean, both variants compile/test/assemble green. Version bumped to v0.7.5-dev,
+  fresh debug APK built and `aapt`-confirmed before committing. **NOT hardware-confirmed** —
+  `MeshFrameCodec.VERSION` 7 is a wire break, same as decision 37's own (also still unconfirmed) —
+  next live round needed for both together. Full detail in Part 7's own P6 entry. **Remaining P6
+  scope, not started**: non-interactive epoch key ratchet, frame padding to size buckets.
+
 - **2026-08-07, decision 37 (`docs/DECISIONS.md`): P6's first slice, SOS body encryption, DONE.**
   Closes `NEXT_STEPS.md`'s long-flagged "SOS text is authenticated but not encrypted" gap — SOS
   content is now AES-GCM sealed under the group key, same treatment position has had since v2/v3.
@@ -16,9 +33,8 @@ is current and that section is what's stale.
   device. 370 tests, detekt clean, both variants compile/test/assemble green. Version bumped to
   v0.7.4-dev, fresh debug APK built and confirmed via `aapt dump badging` (not assumed) before
   committing. **NOT hardware-confirmed** — `MeshFrameCodec.VERSION` 6 is a wire break, no
-  pre-checkpoint test APK can talk to this build until reflashed. Full detail in Part 7's own P6
-  entry. **Remaining P6 scope, not started**: epoch key ratchet, rotating group handle (replacing
-  cleartext `groupId` on the wire), frame padding to size buckets.
+  pre-checkpoint test APK can talk to this build until reflashed (superseded by decision 38's
+  VERSION 7 above — the two need the same next live round). Full detail in Part 7's own P6 entry.
 
 - **2026-08-07, user directive (decision 36, `docs/DECISIONS.md`): Tier 2 (synthetic radio load,
   ESP32/BlueZ boards) REMOVED from this project's testing methodology entirely** — never had a
@@ -136,11 +152,12 @@ is current and that section is what's stale.
   step; the in-tree APK is what's ready right now.
 - **Committed, on `main`, through `1e63778`** (the v0.7.3-dev version bump + debug APK; decisions
   31-35's own code+docs landed first as `5737c81`; decision 30's own checkpoint landed earlier as
-  `ccd29f6`) **as of the previous checkpoint — since then, decision 36 (`c3730bc`) and decision 37
-  landed on top** (decision 37's own commit is this checkpoint's own commit, version-bumped to
-  v0.7.4-dev with a fresh debug APK, per the same "confirm via `aapt`, not assumed" discipline as
-  every prior version bump). Working tree clean as of this checkpoint. If you find uncommitted
-  changes when resuming, they're from a session after this one.
+  `ccd29f6`) **as of two checkpoints ago — since then, decision 36 (`c3730bc`), decision 37
+  (`594973a`, v0.7.4-dev), and now decision 38 have landed on top** (decision 38's own commit is
+  this checkpoint's own commit, version-bumped to v0.7.5-dev with a fresh debug APK, per the same
+  "confirm via `aapt`, not assumed" discipline as every prior version bump). Working tree clean as
+  of this checkpoint. If you find uncommitted changes when resuming, they're from a session after
+  this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
@@ -1010,21 +1027,38 @@ Wi-Fi Direct removed.
 
 **P6 — Crypto (§4.4).** Epoch key ratchet, rotating group handle replacing cleartext `groupId`,
 padding for all frame types, SOS body encryption.
-**STATUS (2026-08-07): first slice done — see `docs/DECISIONS.md` decision 37.** SOS body encryption
-landed: `SosEntity.message`/`senderId`/`timestamp`/`isAlert` are now AES-GCM sealed under the group
-key (`MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`), replacing the old cleartext-plus-HMAC
-scheme — closes `NEXT_STEPS.md`'s long-flagged "SOS text is authenticated but not encrypted" gap, the
-same treatment position got back at v2/v3. `Frame.SosSealed` keeps only `groupId`/`id`/`ttl`/`hop`
-in the cleartext envelope (mirrors `Frame.PositionSealed` exactly), so blind relaying still works
-without ever reading the message. `MeshFrameCodec.VERSION` 5 -> 6, `AppDatabase` v8 -> v9. Found and
-fixed a real bug while finishing this slice's checkpoint: `RelayEngine.createSos` was storing
-`sealSos`'s FULL FRAMED output as `SosEntity.sealed` instead of raw ciphertext, which would have
-double-framed every self-authored SOS on send — fixed by splitting out `sealSosBody` (raw bytes only)
-for the storage path. 370 tests, detekt clean, both variants compile/test/assemble
-(`assembleDebug`/`assembleRelease`) green. **NOT hardware-confirmed** — the `VERSION` 6 wire break
-means no pre-checkpoint test APK can talk to this build until reflashed. **Remaining P6 scope, not
-yet started**: non-interactive epoch key ratchet, rotating group handle replacing cleartext
-`groupId` on the wire, frame padding to size buckets for all frame types.
+**STATUS (2026-08-07): first two slices done — see `docs/DECISIONS.md` decisions 37-38.**
+
+**Slice 1 (37) — SOS body encryption.** `SosEntity.message`/`senderId`/`timestamp`/`isAlert` are now
+AES-GCM sealed under the group key (`MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`), replacing the
+old cleartext-plus-HMAC scheme — closes `NEXT_STEPS.md`'s long-flagged "SOS text is authenticated but
+not encrypted" gap, the same treatment position got back at v2/v3. `MeshFrameCodec.VERSION` 5 -> 6,
+`AppDatabase` v8 -> v9. Found and fixed a real bug while finishing this slice's checkpoint:
+`RelayEngine.createSos` was storing `sealSos`'s FULL FRAMED output as `SosEntity.sealed` instead of
+raw ciphertext, which would have double-framed every self-authored SOS on send — fixed by splitting
+out `sealSosBody` (raw bytes only) for the storage path. 370 tests.
+
+**Slice 2 (38) — rotating group handle.** Every relayed frame type (SOS/position/evidence-meta/
+nickname/presence) now carries an opaque `HMAC(groupKey, epoch)` handle instead of cleartext
+`groupId` — closes this section's own traffic-analysis gap. Reuses (generalized, not duplicated) the
+beacon's own `CryptoUtils.rotatingAdvertisementId` construction under a new 72h window (a GATT handle
+is computed once and forwarded verbatim for a frame's whole relay life, unlike a beacon id re-derived
+every ~60s — see decision 38's own entry for the full window-length derivation and its domain-
+separation proof from the beacon's 60s one). `Frame.EvidMeta`/`Nickname` became envelope-only structs
+(the same shape Sos/Position already had) since `groupId` can no longer travel in the clear;
+`EvidenceEntity.groupId` went nullable (a blind carrier keeps working, just never learns which group)
+while `NicknameEntity` gained a genuinely new in-memory blind-relay path (traced: its old cleartext
+scheme's blind-relay case was already a dead end, never re-served to anyone). Found and fixed a real
+bug: `opaqueSos.framesToRelay(...)` was never called anywhere since decision 37 added it — SOS blind
+custody accepted frames but never forwarded them. `MeshFrameCodec.VERSION` 6 -> 7, `AppDatabase`
+v9 -> v10. 381 tests (up from 370).
+
+Both slices: detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
+incl. `lintVitalRelease`, R8-minified) green. **NOT hardware-confirmed** — decision 38's `VERSION` 7
+wire break means no pre-checkpoint test APK can talk to this build until reflashed (decision 37's own
+`VERSION` 6 was never hardware-confirmed either — both need the same next live round).
+**Remaining P6 scope, not yet started**: non-interactive epoch key ratchet, frame padding to size
+buckets for all frame types.
 *Sim gate: handle rotation does not break dedup or forwarding across an epoch boundary.*
 *Hardware gate: security review pass; wire capture shows no cleartext group identifier.*
 

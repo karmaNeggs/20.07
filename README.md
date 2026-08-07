@@ -226,14 +226,15 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 - **Discovery is pseudonymous**: phones advertise `HMAC(group_key, current_60s_window)`, not
   anything that identifies the group, so passive BLE scanning by an outsider sees rotating
   random-looking values, not group membership.
+- **Group identity is opaque on the GATT wire too**: every relayed frame (SOS, position, evidence
+  header, nickname, presence heartbeat) carries a rotating `HMAC(group_key, epoch)` handle instead
+  of a cleartext group id — the same rotating-id idea the discovery beacon already used, extended to
+  cover a mesh relay too. An adversary capturing mesh traffic can't correlate which packets belong
+  to the same group just by reading a field, even without holding any group's key.
 
 **What this does *not* protect against** — read this before relying on the app for anything
 where it matters:
 
-- **Group IDs are not hidden on the wire.** SOS/evidence/nickname frames carry their `groupId`
-  in the clear. An adversary who can capture mesh traffic (even without any group's key) can
-  correlate which packets belong to the same group and build a traffic-analysis picture, even
-  though they can't read the content.
 - **No forward secrecy, no membership revocation — mitigated, not solved, by groups being
   short-lived by design.** The group key is a single static secret for the group's lifetime, and
   there's still no way to remove one member's access short of dismantling the group and recreating
@@ -392,7 +393,7 @@ unconfirmed one.
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.7.4-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.7.5-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain

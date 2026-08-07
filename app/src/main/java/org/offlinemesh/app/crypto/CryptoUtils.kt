@@ -18,27 +18,61 @@ object CryptoUtils {
     private const val GCM_TAG_LEN_BITS = 128
     const val ID_WINDOW_SECONDS = 60L
 
+    // decision 38 (docs/DECISIONS.md): GATT-relayed frames (SOS/position/evidence/nickname/
+    // presence) persist/relay for up to RelayEngine's 48h content-retention ceiling — far longer
+    // than a beacon payload's sub-minute life. Unlike a beacon id (re-derived fresh every ~60s
+    // advertise cycle), a GATT handle is computed ONCE at creation/first-ingest and forwarded
+    // verbatim for the frame's whole relay life (see e.g. SosEntity.handle's doc) — so for a
+    // receiver's ±1-window tolerance to still catch a handle computed at time T when checked at any
+    // later receive time within the 48h ceiling, this window must EXCEED 48h, not just cover it.
+    // 72h gives 24h of margin, absorbing decision 33's multi-hour 120-hop transit time and ordinary
+    // clock skew.
+    //
+    // Domain-separated from ID_WINDOW_SECONDS by construction, not by luck: for any realistic
+    // calendar date this app runs at (Unix epoch ~1.6e9-4.1e9, i.e. 2020-2100), the beacon's window
+    // (epoch/60) ranges over [26.6M, 68.3M] while this window (epoch/259200) ranges over
+    // [6172, 15818] — disjoint integer ranges, so rotatingAdvertisementId's HMAC input
+    // (window.toString()) can never collide between the two purposes sharing one groupKey.
+    const val GATT_GROUP_HANDLE_WINDOW_SECONDS = 72L * 60 * 60
+
     // 6 bytes = 48 bits of entropy per rotating window — still astronomically collision-safe
     // for this purpose. Kept deliberately short: legacy BLE advertising has a hard 31-byte
     // total limit (Android auto-adds 3 bytes for a Flags structure you don't control), and
     // every byte here is a byte the whole beacon payload has to fit inside alongside its
     // header overhead (found live during device testing — the original 8-byte id, combined
     // with an also-advertised Service UUID list, silently overflowed the limit and meant
-    // advertising was failing outright, so phones never discovered each other at all).
+    // advertising was failing outright, so phones never discovered each other at all). Reused
+    // as-is for the GATT handle (decision 38) — GATT frames have no comparable size pressure, but
+    // there's no reason to widen it: 48 bits is already astronomically collision-safe for this
+    // app's group counts, and reusing the same length keeps one construction serving both purposes.
     private const val ROTATING_ID_LEN = 6
 
-    /** Rotating pseudonymous beacon id for this group, changes every ID_WINDOW_SECONDS. */
-    fun rotatingAdvertisementId(groupKey: ByteArray, epochSeconds: Long = System.currentTimeMillis() / 1000): ByteArray {
-        val window = epochSeconds / ID_WINDOW_SECONDS
+    /** Rotating pseudonymous id for this group, changes every [windowSeconds]. Used both for the
+     *  beacon's own discovery payload (default [ID_WINDOW_SECONDS]) and, since decision 38, for the
+     *  GATT wire handle that replaces cleartext `groupId` on every relayed frame (callers pass
+     *  [GATT_GROUP_HANDLE_WINDOW_SECONDS] via [org.offlinemesh.app.ble.MeshFrameCodec.groupHandle]) —
+     *  see that constant's own doc for why GATT needs a much wider window than the beacon does. */
+    fun rotatingAdvertisementId(
+        groupKey: ByteArray,
+        epochSeconds: Long = System.currentTimeMillis() / 1000,
+        windowSeconds: Long = ID_WINDOW_SECONDS,
+    ): ByteArray {
+        val window = epochSeconds / windowSeconds
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(groupKey, "HmacSHA256"))
         val windowBytes = window.toString().toByteArray()
         return mac.doFinal(windowBytes).copyOfRange(0, ROTATING_ID_LEN)
     }
 
-    /** Candidate ids for current + adjacent windows, to tolerate clock drift between phones. */
-    fun candidateAdvertisementIds(groupKey: ByteArray, nowSeconds: Long = System.currentTimeMillis() / 1000): List<ByteArray> {
-        val window = nowSeconds / ID_WINDOW_SECONDS
+    /** Candidate ids for current + adjacent windows, to tolerate clock drift between phones (and,
+     *  for the GATT-purpose [windowSeconds], the real time elapsed between a handle's creation and
+     *  a receiver eventually seeing it relayed — see [GATT_GROUP_HANDLE_WINDOW_SECONDS]'s doc). */
+    fun candidateAdvertisementIds(
+        groupKey: ByteArray,
+        nowSeconds: Long = System.currentTimeMillis() / 1000,
+        windowSeconds: Long = ID_WINDOW_SECONDS,
+    ): List<ByteArray> {
+        val window = nowSeconds / windowSeconds
         return listOf(window - 1, window, window + 1).map { w ->
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(groupKey, "HmacSHA256"))

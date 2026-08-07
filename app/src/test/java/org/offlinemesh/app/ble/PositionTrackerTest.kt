@@ -157,4 +157,16 @@ class PositionTrackerTest {
         t.pruneOrphaned(activeGroupIds = setOf("group-1"))
         assertTrue(t.forGroup("group-1").containsKey("sender-1"))
     }
+
+    // ---------- handle (decision 38, docs/DECISIONS.md) — threaded through offer() like sealed ----------
+
+    @Test
+    fun `offer threads handle through to the stored record`() {
+        val t = tracker()
+        val handle = ByteArray(6) { it.toByte() }
+        t.offer("group-1", "sender-1", 1.0, 2.0, 5, timestampSec = clock, hop = 0, handle = handle)
+        val record = t.forGroup("group-1")["sender-1"]
+        checkNotNull(record)
+        assertTrue(handle.contentEquals(record.handle))
+    }
 }

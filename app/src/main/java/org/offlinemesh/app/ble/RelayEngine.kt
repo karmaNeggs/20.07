@@ -42,6 +42,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // something already known to be a duplicate.
         private const val SEEN_ID_MAX_AGE_MILLIS = CONTENT_MAX_AGE_MILLIS
 
+        /** millis-to-epoch-seconds conversion, for [MeshFrameCodec.groupHandle]'s callers here
+         *  (decision 38, `docs/DECISIONS.md`). */
+        private const val MILLIS_PER_SECOND = 1000L
+
         /** Truncates [text] to at most [maxBytes] UTF-8 bytes — used instead of [String.take] since
          *  the caps this guards ([MeshFrameCodec.MAX_SOS_MESSAGE_BYTES]) are wire byte-length limits,
          *  not character-count limits, and non-ASCII text can be several bytes per character. A cut
@@ -123,10 +127,13 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // actual frame is built moments later, from these same stored bytes, when the caller
         // (MeshService.sendSos) invokes RelayResponder.floodForwardLocalSos.
         val sealed = MeshFrameCodec.sealSosBody(key, id, senderId, truncated, timestamp, isAlert, signingPrivateKey)
+        // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
+        // see MeshFrameCodec.groupHandle's doc.
+        val handle = MeshFrameCodec.groupHandle(key, timestamp / MILLIS_PER_SECOND)
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, isAlert = isAlert,
-            sealed = sealed,
+            sealed = sealed, handle = handle,
         )
         sosDao.insert(sos)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
@@ -145,11 +152,14 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val macInput = MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType)
         val mac = CryptoUtils.authTag(key, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
+        // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
+        // see MeshFrameCodec.groupHandle's doc.
+        val handle = MeshFrameCodec.groupHandle(key, timestamp / MILLIS_PER_SECOND)
         val evidence = EvidenceEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
             mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true,
-            mac = mac, signature = signature
+            mac = mac, signature = signature, handle = handle,
         )
         evidenceDao.insert(evidence)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
@@ -180,7 +190,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val macInput = MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt)
         val mac = CryptoUtils.authTag(key, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
-        val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac, signature)
+        // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
+        // see MeshFrameCodec.groupHandle's doc.
+        val handle = MeshFrameCodec.groupHandle(key, updatedAt / MILLIS_PER_SECOND)
+        val n = NicknameEntity(groupId, senderId, trimmed, updatedAt, mac, signature, handle)
         nicknameDao.upsert(n)
         epoch.incrementAndGet()
         return n
@@ -256,7 +269,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val have = chunkDao.receivedCount(evidenceId)
         if (have < meta.totalChunks) return
 
-        val key = repo.getGroupKey(meta.groupId) ?: return // not a group we're in — stay a blind carrier
+        // Decision 38 (docs/DECISIONS.md): meta.groupId is null exactly when we're a blind carrier
+        // (never resolved which group this belongs to) — same "stay a blind carrier" outcome as
+        // before, now reached via a null groupId instead of a failed getGroupKey lookup.
+        val key = meta.groupId?.let { repo.getGroupKey(it) } ?: return
         val chunks = chunkDao.allChunks(evidenceId).sortedBy { it.chunkIndex }
         // Pre-sized array + arraycopy, not repeated `+=` (O(n) instead of O(n^2) — matters once
         // this is thousands of chunks, found during QC while checking the large-file path).

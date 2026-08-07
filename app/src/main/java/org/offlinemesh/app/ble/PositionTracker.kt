@@ -35,6 +35,12 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
          *  below — a data class compares ByteArray by reference, which would make two records with
          *  identical content compare unequal. */
         val sealed: ByteArray? = null,
+        /** Decision 38 (docs/DECISIONS.md): the opaque GATT wire handle this position arrived under
+         *  — see [MeshFrameCodec.groupHandle]'s doc. Same "kept so relaying can forward it verbatim"
+         *  reasoning and the same equals/hashCode exclusion as [sealed]. Null only for our own fix
+         *  (never stored here at all — see `RelayResponder.positionFramesToPush`'s own-fix branch,
+         *  which computes a fresh handle on every ~20s push cycle instead of storing one). */
+        val handle: ByteArray? = null,
     ) {
         // Content equality over the scalar fields only; `sealed` is derived from them, so including
         // it (by reference, as a data class would) would only ever produce false inequality.
@@ -84,6 +90,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         hop: Int,
         viaPeer: String? = null,
         sealed: ByteArray? = null,
+        handle: ByteArray? = null,
     ) {
         val key = Key(groupId, senderId)
         val existing = table[key]
@@ -96,7 +103,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
                 (existing.timestampSec == timestampSec && existing.hop <= hop)
             )
         if (staleOrWorse) return
-        table[key] = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed)
+        table[key] = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
         epoch.incrementAndGet()
         prune()
     }

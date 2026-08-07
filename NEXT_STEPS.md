@@ -83,7 +83,6 @@ Earlier: A1, A2, B1, C1.
   raise a system dialog on the peer that visibly breaks the disguise. Remove, or keep off?
 - **Long-range BT5 Coded PHY** — confirmed failing 100% on this hardware (circuit-broken now).
   Remove, or leave disabled?
-- **Group ids are cleartext on the wire** — enables traffic analysis / participant enumeration.
 
 ## Dropped
 

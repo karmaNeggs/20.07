@@ -11,6 +11,7 @@ import org.junit.runner.RunWith
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
+import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
 import org.offlinemesh.app.sensors.LocationTracker
 import org.robolectric.RobolectricTestRunner
@@ -79,6 +80,10 @@ class RelayResponderTest {
         sealed = MeshFrameCodec.sealSosBody(
             testGroupKey, id, "sender-1", message, System.currentTimeMillis(), isAlert = false
         ),
+        // Decision 38 (docs/DECISIONS.md): handle, mirroring RelayEngine.createSos's own
+        // groupHandle(key, timestamp/1000) computation — needed for real, not just for shape:
+        // reframeStoredSos/floodForwardSos both do `sos.handle!!` on the push path this file exercises.
+        handle = MeshFrameCodec.groupHandle(testGroupKey, System.currentTimeMillis() / 1000),
     )
 
     // sha256 must be a real 32-byte (64 hex char) value — MeshFrameCodec's wire format always
@@ -87,7 +92,10 @@ class RelayResponderTest {
     private fun evidenceFixture(id: String = "evid-1") = EvidenceEntity(
         id = id, groupId = "group-1", senderId = "sender-1", senderIsMe = false,
         timestamp = System.currentTimeMillis(), sha256 = "ab".repeat(32), totalChunks = 3,
-        mimeType = "image/jpeg", ttl = RelayEngine.DEFAULT_TTL
+        mimeType = "image/jpeg", ttl = RelayEngine.DEFAULT_TTL,
+        // Decision 38: handle, same reasoning as sosFixture's own — encodeEvidMeta writes this
+        // (not groupId) to the wire, and decode() rejects a frame with an empty/missing one.
+        handle = MeshFrameCodec.groupHandle(testGroupKey, System.currentTimeMillis() / 1000),
     )
 
     @Test
@@ -103,7 +111,6 @@ class RelayResponderTest {
         val decoded = MeshFrameCodec.decode(responded[0])
         check(decoded is MeshFrameCodec.Frame.SosSealed)
         assertEquals("sos-1", decoded.id)
-        assertEquals("group-1", decoded.groupId)
         val body = MeshFrameCodec.openSos(decoded.sealed, testGroupKey)
         checkNotNull(body)
         assertEquals("help", body.message)
@@ -133,7 +140,7 @@ class RelayResponderTest {
         val decoded = responded.mapNotNull { MeshFrameCodec.decode(it) }
         val evidMeta = decoded.filterIsInstance<MeshFrameCodec.Frame.EvidMeta>().singleOrNull()
         assertTrue("expected the evidence header to be pushed, got: $decoded", evidMeta != null)
-        assertEquals("evid-1", evidMeta?.meta?.id)
+        assertEquals("evid-1", evidMeta?.id)
     }
 
     @Test
@@ -290,7 +297,7 @@ class RelayResponderTest {
         val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
         val pushedMeta = decoded.filterIsInstance<MeshFrameCodec.Frame.EvidMeta>().singleOrNull()
         assertTrue(pushedMeta != null)
-        assertEquals("evid-1", pushedMeta?.meta?.id)
+        assertEquals("evid-1", pushedMeta?.id)
     }
 
     // ---- catalogEpoch: the signal ConnectionAttemptTracker uses to skip a peer's synced cooldown
@@ -323,5 +330,64 @@ class RelayResponderTest {
     fun `RelayResponder catalogEpoch mirrors the underlying RelayEngine's`() = runTest {
         relay.ingestSos(sosFixture())
         assertEquals(relay.catalogEpoch, responder.catalogEpoch)
+    }
+
+    // ---- blind relay for a group we hold no key for (decision 38, docs/DECISIONS.md) ----
+    // This class's `repo` never joins/creates a group, so `resolveGroupKeyByHandle` always misses —
+    // exactly the "not a member" case every one of these frame types now routes to its own opaque-
+    // custody path for. That's also what makes this genuinely testable under Robolectric for the
+    // first time: matchHandle's own loop never runs (zero groups), so no Keystore access ever
+    // happens on this path (see GroupRepositoryHandleTest for that same property, isolated).
+    //
+    // Concretely proves two things this decision's own write-up documents: the opaqueSos bug (SOS
+    // blind custody accepted frames but never actually forwarded them, since decision 37 — confirmed
+    // via grep that opaquePositions/opaquePresence both fed presenceAndPositionFrames's carried list
+    // and opaqueSos did not) is fixed, and the new opaqueNickname path genuinely propagates (unlike
+    // the old vacuous-auth scheme, which never re-served a blind-held nickname to anyone).
+
+    @Test
+    fun `SOS, position, presence, and nickname frames for an unresolvable group are all carried onward`() = runTest {
+        val key = testGroupKey // arbitrary — this repo holds no group for it either way
+        val epoch = System.currentTimeMillis() / 1000
+
+        val sosFrame = MeshFrameCodec.sealSos(
+            key, "sos-1", "sender-1", "help", System.currentTimeMillis(), isAlert = false, ttl = 8, hop = 0
+        )
+        val positionFrame = MeshFrameCodec.encodePosition(key, "sender-1", 1.0, 2.0, 5, epoch, hop = 0)
+        val presenceFrame = MeshFrameCodec.encodePresence("some-group", "sender-1", System.currentTimeMillis(), key)
+        val nicknameFrame = MeshFrameCodec.encodeNickname(
+            NicknameEntity(
+                "some-group", "sender-1", "responder", System.currentTimeMillis(),
+                mac = ByteArray(16), handle = MeshFrameCodec.groupHandle(key, epoch),
+            )
+        )
+
+        // Arrives from peer1 — must come back out to a DIFFERENT peer (split horizon), never
+        // handed straight back to whoever supplied it.
+        for (frame in listOf(sosFrame, positionFrame, presenceFrame, nicknameFrame)) {
+            responder.handleIncoming(frame, "peer1") { }
+        }
+
+        val carried = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
+
+        assertTrue("expected a carried SOS frame", carried.any { it is MeshFrameCodec.Frame.SosSealed })
+        assertTrue("expected a carried position frame", carried.any { it is MeshFrameCodec.Frame.PositionSealed })
+        assertTrue("expected a carried presence frame", carried.any { it is MeshFrameCodec.Frame.Presence })
+        assertTrue("expected a carried nickname frame", carried.any { it is MeshFrameCodec.Frame.Nickname })
+    }
+
+    @Test
+    fun `a carried frame is never handed back to the peer that supplied it`() = runTest {
+        val key = testGroupKey
+        val sosFrame = MeshFrameCodec.sealSos(
+            key, "sos-1", "sender-1", "help", System.currentTimeMillis(), isAlert = false, ttl = 8, hop = 0
+        )
+        responder.handleIncoming(sosFrame, "peer1") { }
+
+        val backToSamePeer = responder.refreshFramesToPush("peer1").mapNotNull { MeshFrameCodec.decode(it) }
+        assertTrue(backToSamePeer.none { it is MeshFrameCodec.Frame.SosSealed })
+
+        val toAnotherPeer = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
+        assertTrue(toAnotherPeer.any { it is MeshFrameCodec.Frame.SosSealed })
     }
 }

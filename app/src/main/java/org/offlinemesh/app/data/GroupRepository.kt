@@ -1,6 +1,7 @@
 package org.offlinemesh.app.data
 
 import android.content.Context
+import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
 import java.util.UUID
 
@@ -68,6 +69,54 @@ class GroupRepository(context: Context) {
     }
 
     fun getGroupKey(groupId: String): ByteArray? = keyStore.getKey(groupId)
+
+    /** Decision 38 (docs/DECISIONS.md): the receive-side counterpart to
+     *  [org.offlinemesh.app.ble.MeshFrameCodec.groupHandle] — resolves an opaque GATT wire handle
+     *  back to the (groupId, key) pair it was computed from, since frames no longer carry `groupId`
+     *  in the clear. Modeled directly on [org.offlinemesh.app.ble.BeaconRadio.refreshCaches]'s
+     *  exact shape (iterate every active group's key, compute candidate handles, match) — that
+     *  function solves the identical problem for the beacon's own 60s-window rotating id.
+     *
+     *  Scoped to [GroupDao.getActiveGroups] (not `allGroupIds`), matching [getGroupKey]'s own
+     *  scope: an expired group's key is already gone via [dismantleGroup], so there'd be nothing to
+     *  resolve to anyway. Deliberately NOT cached (unlike [org.offlinemesh.app.ble.BeaconRadio]'s
+     *  `matchTable`) — that cache exists because scan-result callbacks are a genuinely hot path in
+     *  a dense crowd (PLAN-v2.md §5.4/§9.2); GATT frame receipt is bounded by open-connection count
+     *  × per-connection frame cadence, several orders of magnitude cooler, and this app's own group
+     *  counts are small (a few groups, 3-8 members each — PLAN-v2.md §5.5). A cache here would add
+     *  join/leave/expiry invalidation complexity for no measurable win at this app's scale. */
+    suspend fun resolveGroupKeyByHandle(
+        handle: ByteArray,
+        epochSeconds: Long = System.currentTimeMillis() / MILLIS_PER_SECOND,
+    ): Pair<String, ByteArray>? {
+        val groups = groupDao.getActiveGroups().mapNotNull { g -> getGroupKey(g.id)?.let { g.id to it } }
+        return matchHandle(handle, groups, epochSeconds)
+    }
+
+    companion object {
+        /** millis-to-epoch-seconds conversion, for [resolveGroupKeyByHandle]'s default param. */
+        private const val MILLIS_PER_SECOND = 1000L
+
+        /** Pure matching core of [resolveGroupKeyByHandle] — no DAO/Keystore access, so directly
+         *  unit-testable despite this class's real-Keystore construction constraint under
+         *  Robolectric (see [keyStore]'s own doc). `.contentEquals()`, not
+         *  [CryptoUtils.constantTimeEquals] — a handle isn't secret once it's on the wire (every
+         *  relay, member or not, already sees it), so there's no timing-attack surface to defend
+         *  here, unlike comparing an actual auth tag. */
+        internal fun matchHandle(
+            handle: ByteArray,
+            groups: List<Pair<String, ByteArray>>,
+            epochSeconds: Long,
+        ): Pair<String, ByteArray>? {
+            for ((groupId, key) in groups) {
+                val candidates = CryptoUtils.candidateAdvertisementIds(
+                    key, epochSeconds, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS
+                )
+                if (candidates.any { it.contentEquals(handle) }) return groupId to key
+            }
+            return null
+        }
+    }
 
     /** Generates this device's Ed25519 sender-identity keypair for [groupId] — once. A join code
      *  can be re-scanned for a group already joined (`groupDao.insert` uses `REPLACE`), and

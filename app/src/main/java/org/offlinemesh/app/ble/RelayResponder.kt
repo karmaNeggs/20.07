@@ -78,7 +78,7 @@ class RelayResponder(
 
     // Blind-relay custody for frames belonging to groups we hold no key for — see
     // OpaqueFrameRelay's class doc for why positions and presence both needed this while content
-    // never did. Three stores, not one, purely so each can be reasoned about (and counted)
+    // never did. Four stores, not one, purely so each can be reasoned about (and counted)
     // separately.
     private val opaquePositions = OpaqueFrameRelay()
     // Presence gets a shorter carry window than positions: a receiver's skew gate is
@@ -89,6 +89,13 @@ class RelayResponder(
     // it, so it needs the same blind-custody treatment position/presence already had. Default
     // maxAgeMillis (matches position's own, generous enough for an SOS's own longer useful life).
     private val opaqueSos = OpaqueFrameRelay()
+    // New (decision 38, docs/DECISIONS.md) — nickname never had a blind-relay path before, since a
+    // non-member could always vacuously "pass" the old cleartext-plus-HMAC auth check and store a
+    // usable row. That row was already a dead end in practice (every nickname push path is scoped
+    // to getActiveGroups() only, confirmed via grep — a blind-relay-held row was never re-served to
+    // anyone), so this is a genuine new capability, not a like-for-like port. See
+    // takeOpaqueNicknameCustody's doc.
+    private val opaqueNickname = OpaqueFrameRelay()
 
     // See framesToPushOnConnect's doc for what this default is for. 517 matches the MTU every
     // connection actually requests (MeshGattClient.onConnectionStateChange's requestMtu(517)) —
@@ -155,15 +162,6 @@ class RelayResponder(
         peerWfdCapable.remove(address)
     }
 
-    /** True if we should accept this frame. If it belongs to a group we hold the key to, the tag
-     *  must verify (forgery/tamper => false). If it's not our group, we can't verify and return true
-     *  so blind relaying still works — a member downstream does the real check. [macInput] is only
-     *  computed when we actually have a key, so non-member relaying stays cheap. */
-    private fun authOk(groupId: String, mac: ByteArray?, macInput: () -> ByteArray): Boolean {
-        val key = repo.getGroupKey(groupId) ?: return true
-        return CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput()), mac)
-    }
-
     /** [FIRST_SIGHT]/[UNCHANGED] are both "nothing to worry about". [CHANGED] means this sender is
      *  presenting a different key than the one already pinned for them — see [pinOrCheckSenderKey]
      *  for why that is a warning that re-pins, and NOT a reason to drop traffic. */
@@ -185,8 +183,8 @@ class RelayResponder(
      *  positions all gone, while beacon-derived hop count kept working. That reads to a user as
      *  "connected, 1 hop away, but nothing arrives", with no way to recover short of clearing app
      *  data on both phones. A key change now re-pins and logs a warning; the frame still has to pass
-     *  the group-key HMAC ([authOk]) to be accepted at all, so a non-member still can't inject
-     *  anything. What's given up is detection of a *member* swapping their own identity mid-group —
+     *  the group-key check (its own MAC or seal) to be accepted at all, so a non-member still can't
+     *  inject anything. What's given up is detection of a *member* swapping their own identity mid-group —
      *  worth surfacing (and it is, loudly), but not worth silently breaking the app over. */
     private suspend fun pinOrCheckSenderKey(
         groupId: String,
@@ -204,7 +202,8 @@ class RelayResponder(
     }
 
     /** True = OK to proceed (either a genuine signature verified, or there was nothing to check
-     *  yet); false = hard reject, same effect as an [authOk] failure. Looks up any existing pin,
+     *  yet); false = hard reject, same effect as any other group-key check failure. Looks up any
+     *  existing pin,
      *  defers the actual pass/fail decision to [signatureCheckPasses] (pure/`internal`, directly
      *  unit-testable without a DAO). */
     private suspend fun verifySignatureIfPinned(
@@ -338,7 +337,7 @@ class RelayResponder(
             // sealed is null only transiently during construction, never for a stored row.
             for (sos in relay.relayableSos()) {
                 sos.sealed?.let {
-                    frames += MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, it)
+                    frames += MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, sos.ttl, sos.hop, it)
                 }
             }
             for (meta in relay.relayableEvidenceMeta()) frames += MeshFrameCodec.encodeEvidMeta(meta)
@@ -347,8 +346,9 @@ class RelayResponder(
             }
         }
         // Experimental, opt-in WiFi Direct accelerator — see WifiDirectAccelerator's class doc.
-        // Announced fresh every connection (never cached), matching authOk's own "check live, not
-        // once" style, so flipping the opt-in toggle mid-session takes effect immediately.
+        // Announced fresh every connection (never cached), same "check live, not once" style every
+        // group-key check in this file follows, so flipping the opt-in toggle mid-session takes
+        // effect immediately.
         if (wifiDirectCoordinator?.capabilityAdvertisable() == true) {
             frames += MeshFrameCodec.encodeWifiDirectCap(version = 1)
         }
@@ -394,17 +394,26 @@ class RelayResponder(
             // refresh, same as presence, rather than tracked for whether it actually changed.
             for (n in relay.nicknamesForGroup(g.id)) frames += MeshFrameCodec.encodeNickname(n)
         }
-        // Positions/presence we're carrying for groups we aren't in. Outside the per-group loop
-        // above on purpose: these belong to groups absent from getActiveGroups() precisely because
-        // we're not a member, so that loop would never reach them.
+        // Positions/presence/SOS/nicknames we're carrying for groups we aren't in. Outside the
+        // per-group loop above on purpose: these belong to groups absent from getActiveGroups()
+        // precisely because we're not a member, so that loop would never reach them.
         // Budgeted, like every other relay path here (MAX_RELAYED_POSITIONS_PER_GROUP for member
         // positions, MAX_CATALOG_ITEMS_PER_SESSION for content). This one previously wasn't: two
         // 200-entry stores could emit up to 400 frames, unbudgeted, at the FRONT of the push — and
         // since every frame is a serialised GATT write, a phone carrying for several strangers'
         // groups could spend an entire push on their traffic. Blind carriage must not outrank the
         // mesh's own delivery.
+        //
+        // Decision 38 (docs/DECISIONS.md): opaqueSos.framesToRelay was never called here — a real
+        // bug, confirmed by grep, present since decision 37 added opaqueSos.offer without ever
+        // wiring its output back out. SOS blind custody accepted frames but never actually forwarded
+        // them. opaqueNickname is new this decision — nickname's old vacuous-auth blind-relay never
+        // actually re-served a held row to anyone (traced: every nickname push path is scoped to
+        // getActiveGroups() only), so this is the first time it genuinely propagates.
         val carried = opaquePositions.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
-            opaquePresence.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION)
+            opaquePresence.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
+            opaqueSos.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
+            opaqueNickname.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION)
         if (carried.isNotEmpty()) {
             frames += carried
             DiagnosticsLog.event("relay", "forwarding ${carried.size} opaque frame(s)")
@@ -436,7 +445,7 @@ class RelayResponder(
             val nowSec = System.currentTimeMillis() / 1000
             frames.add(
                 MeshFrameCodec.encodePosition(
-                    groupId, key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(), nowSec, 0,
+                    key, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(), nowSec, 0,
                     signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
                 )
             )
@@ -464,13 +473,14 @@ class RelayResponder(
             // signature inside the seal, which re-encryption silently dropped (relayed positions
             // were previously unsigned and unverifiable).
             val sealed = record.sealed
+            val handle = record.handle
             frames.add(
-                if (sealed != null) {
-                    MeshFrameCodec.reframePositionForRelay(groupId, record.hop + 1, sealed)
+                if (sealed != null && handle != null) {
+                    MeshFrameCodec.reframePositionForRelay(handle, record.hop + 1, sealed)
                 } else {
                     // No original bytes (a record predating this, or our own fix) — seal it ourselves.
                     MeshFrameCodec.encodePosition(
-                        groupId, key, senderId, record.lat, record.lon,
+                        key, senderId, record.lat, record.lon,
                         record.accuracyM, record.timestampSec, record.hop + 1
                     )
                 }
@@ -496,8 +506,12 @@ class RelayResponder(
         if (!isWfdCapable(peerAddress)) return
         if (deficit.size * RelayEngine.CHUNK_SIZE < WifiDirectTuning.MIN_DEFICIT_BYTES_FOR_HANDOFF) return
         val meta = relay.evidenceMeta(evidenceId) ?: return
-        val key = repo.getGroupKey(meta.groupId) ?: return
-        coordinator.maybeProposeHandoff(peerAddress, evidenceId, meta.groupId, deficit, key, respond)
+        // Decision 38 (docs/DECISIONS.md): meta.groupId is null exactly when we're a blind carrier
+        // — no group resolved, so nothing to propose a WFD handoff for (same "stay a blind carrier"
+        // outcome the class doc above already describes, now reached via a null groupId).
+        val groupId = meta.groupId ?: return
+        val key = repo.getGroupKey(groupId) ?: return
+        coordinator.maybeProposeHandoff(peerAddress, evidenceId, groupId, deficit, key, respond)
     }
 
     // ---------- per-frame handlers ----------
@@ -510,34 +524,41 @@ class RelayResponder(
      *  — a phone with no key for [frame]'s group can no longer read OR authenticate it, so it takes
      *  opaque custody instead of attempting the old vacuous-pass auth check. Same split
      *  [handlePositionSealed] already makes between the member path (this function) and
-     *  [takeOpaqueSosCustody] (the blind-relay path). */
+     *  [takeOpaqueSosCustody] (the blind-relay path). Decision 38: [frame] no longer names its
+     *  group directly — [GroupRepository.resolveGroupKeyByHandle] resolves [frame]'s opaque
+     *  `handle` to a real (groupId, key) pair first; a resolution failure is now what routes to the
+     *  blind-relay path, instead of a direct `getGroupKey` miss. */
     private suspend fun handleSos(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
-        val key = repo.getGroupKey(frame.groupId)
-        if (key == null) {
+        val resolved = repo.resolveGroupKeyByHandle(frame.handle)
+        if (resolved == null) {
             takeOpaqueSosCustody(frame, peerAddress)
             return
         }
-        // A failed decrypt (wrong key — can't happen, we just looked it up for this exact group —
-        // tampered ciphertext, or a GCM tag mismatch) IS the auth failure now; there is no separate
-        // mac to check. Replaces the old authOk(...) call entirely.
+        val (groupId, key) = resolved
+        // A failed decrypt (wrong key — can't happen, we just resolved this exact group's key from
+        // the handle — tampered ciphertext, or a GCM tag mismatch) IS the auth failure now; there
+        // is no separate mac to check. Replaces the old authOk(...) call entirely.
         val body = MeshFrameCodec.openSos(frame.sealed, key) ?: run {
             Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
             return
         }
-        ingestOpenedSos(frame, body, peerAddress)
+        ingestOpenedSos(groupId, frame, body, peerAddress)
     }
 
     /** The member path for an SOS we could actually open. Split from [handleSos] to keep both
      *  functions' return counts within detekt's limit — same reason [ingestOpenedPosition] is split
-     *  from [handlePositionSealed]. */
+     *  from [handlePositionSealed]. [groupId] is the real group [handleSos] just resolved from
+     *  [frame]'s opaque `handle` (decision 38) — used everywhere [frame.groupId] used to be read
+     *  directly. */
     private suspend fun ingestOpenedSos(
+        groupId: String,
         frame: MeshFrameCodec.Frame.SosSealed,
         body: MeshFrameCodec.SosBody,
         peerAddress: String,
     ) {
         // Additive per-sender check: decrypting under the group key only proves SOME member
         // produced this; a pinned sender key catches a different member forging this one's SOS.
-        if (!verifySignatureIfPinned(frame.groupId, body.senderId, body.signature, body.signedBytes)) {
+        if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) {
             Log.w(
                 "RelayResponder",
                 "SOS signature failed verification for a pinned sender — dropping (possible impersonation)"
@@ -545,8 +566,8 @@ class RelayResponder(
             return
         }
         val sos = SosEntity(
-            frame.id, frame.groupId, body.senderId, senderIsMe = false, body.message, body.timestamp,
-            frame.ttl, frame.hop, body.isAlert, sealed = frame.sealed,
+            frame.id, groupId, body.senderId, senderIsMe = false, body.message, body.timestamp,
+            frame.ttl, frame.hop, body.isAlert, sealed = frame.sealed, handle = frame.handle,
         )
         val isNew = relay.ingestSos(sos)
         // The receive half of relay. Without this the diagnostics log only showed what we PUSHED,
@@ -582,11 +603,11 @@ class RelayResponder(
         // business feeding the SOS hop-gradient or firing the alarm-style notification, both of
         // which only make sense for a genuine flagged emergency.
         if (sos.isAlert) {
-            hopTracker.considerDirectHop(frame.groupId, frame.id, hopsFromOrigin, body.senderId)
+            hopTracker.considerDirectHop(groupId, frame.id, hopsFromOrigin, body.senderId)
             // Reaching this branch already means we hold the key (we're a member) — the old
             // separate isMember check is no longer needed, a blind relay can't reach this far.
             if (isNew) {
-                val groupName = repo.groupDao.getGroup(frame.groupId)?.name ?: frame.groupId
+                val groupName = repo.groupDao.getGroup(groupId)?.name ?: groupId
                 onSosReceived(sos, groupName)
             }
         }
@@ -611,14 +632,15 @@ class RelayResponder(
      *  auth check, so there was never a reason for a separate opaque path. [maxHops] reuses
      *  [RelayEngine.DEFAULT_TTL] as a reasonable blind-relay depth ceiling — matching the scale a
      *  member's own degree-aware flood-forward would naturally reach, since a blind relay has no
-     *  group-key-derived signal of its own to size this from. */
+     *  group-key-derived signal of its own to size this from. Decision 38: [frame.handle] is
+     *  forwarded verbatim, never recomputed — a blind relay has no key to recompute it with. */
     private fun takeOpaqueSosCustody(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
         val accepted = opaqueSos.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(frame.sealed),
             hop = frame.hop,
             maxHops = RelayEngine.DEFAULT_TTL,
             viaPeer = peerAddress,
-        ) { MeshFrameCodec.reframeSosForRelay(frame.groupId, frame.id, frame.ttl, frame.hop + 1, frame.sealed) }
+        ) { MeshFrameCodec.reframeSosForRelay(frame.handle, frame.id, frame.ttl, frame.hop + 1, frame.sealed) }
         if (accepted) {
             DiagnosticsLog.event("relay", "carrying opaque sos hop=${frame.hop} (not a member)")
         }
@@ -642,9 +664,10 @@ class RelayResponder(
      *  as gated in the P0a/P1 simulator (`ForwardingPlaneEngine`) before this was trusted with
      *  production wiring. */
     private suspend fun floodForwardSos(sos: SosEntity, hopsFromOrigin: Int, excludeKey: String?) {
-        // sealed is null only transiently during construction (see SosEntity.sealed's own doc) —
-        // never for anything that reached here, which is always either freshly created (createSos
-        // seals before storing) or freshly ingested (handleSos constructs with sealed set).
+        // sealed/handle are null only transiently during construction (see SosEntity.sealed/
+        // handle's own docs) — never for anything that reached here, which is always either
+        // freshly created (createSos seals+handles before storing) or freshly ingested (handleSos
+        // constructs with both set) — hence handle's own unguarded `!!` a few lines below.
         val sealed = sos.sealed ?: return
         val openLinkCount = connectionRegistry.openLinkCount()
         val forwardedTtl = ForwardingPolicy.forwardedTtl(sos.ttl, openLinkCount)
@@ -657,35 +680,66 @@ class RelayResponder(
         // Decision 37 (docs/DECISIONS.md): forwards the ORIGINAL sealed bytes verbatim, only the
         // envelope's hop/ttl change — same "never re-encrypt a relayed item" reasoning position's
         // own reframePositionForRelay already follows, and for the same dedup-stability reason.
-        val outgoing = MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, forwardedTtl, hopsFromOrigin, sealed)
+        val outgoing = MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, forwardedTtl, hopsFromOrigin, sealed)
         delay(ForwardingPolicy.pickJitterMs(openLinkCount))
         val liveTargets = connectionRegistry.others(excludeKey)
         for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)
     }
 
+    /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
+     *  [frame.handle] to a real (groupId, key) pair first. Unlike SOS/position/presence, a
+     *  resolution failure does NOT route to a separate in-memory opaque-custody path: this still
+     *  stores a real (if `groupId = null`) [EvidenceEntity] row, exactly like the old vacuous-
+     *  auth-pass behavior did — traced via `handleManifest`/`framesToPushOnConnect`'s manifest
+     *  loop, which reads a stored row's own `totalChunks` to offer chunks onward, something a
+     *  purely in-memory custody (SOS/position/presence's shape) has nowhere to keep. Making
+     *  `groupId` nullable preserves that existing chunk-relay-through-a-blind-carrier mechanism
+     *  while still closing the wire-level leak. */
     private suspend fun handleEvidMeta(frame: MeshFrameCodec.Frame.EvidMeta, respond: suspend (ByteArray) -> Unit) {
-        val macInput = MeshFrameCodec.evidMacInput(
-            frame.meta.id, frame.meta.groupId, frame.meta.senderId, frame.meta.timestamp,
-            frame.meta.sha256, frame.meta.totalChunks, frame.meta.mimeType
+        val resolved = repo.resolveGroupKeyByHandle(frame.handle)
+        if (resolved != null && !evidMetaIsAuthentic(frame, resolved.first, resolved.second)) return
+        if (resolved == null) {
+            DiagnosticsLog.event("relay", "carrying evidence header for an unresolved group (not a member)")
+        }
+        val meta = EvidenceEntity(
+            id = frame.id, groupId = resolved?.first, senderId = frame.senderId, senderIsMe = false,
+            timestamp = frame.timestamp, sha256 = frame.sha256, totalChunks = frame.totalChunks,
+            mimeType = frame.mimeType, ttl = frame.ttl, mac = frame.mac, signature = frame.signature,
+            handle = frame.handle,
         )
-        if (!authOk(frame.meta.groupId, frame.meta.mac) { macInput }) {
-            Log.w("RelayResponder", "evidence header failed auth for a group we hold — dropping")
-            return
-        }
-        if (!verifySignatureIfPinned(frame.meta.groupId, frame.meta.senderId, frame.meta.signature, macInput)) {
-            Log.w(
-                "RelayResponder",
-                "evidence header signature failed verification for a pinned sender — dropping (possible impersonation)"
-            )
-            return
-        }
-        if (relay.ingestEvidenceMeta(frame.meta)) {
+        if (relay.ingestEvidenceMeta(meta)) {
             // Without this, the connection that first tells a peer an item exists could never
             // also transfer its chunks — our own manifest push already happened at connection
             // start, before we knew this item existed. Responding immediately (with our honest
             // 0%-complete manifest) lets the sender fill us in now.
-            respond(MeshFrameCodec.encodeManifest(frame.meta.id, frame.meta.totalChunks, relay.haveIndexSet(frame.meta.id)))
+            respond(MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id)))
         }
+    }
+
+    /** Split out purely to keep [handleEvidMeta]'s return count within detekt's limit, same shape
+     *  [presenceIsAuthentic] already uses — only called once [handleEvidMeta] has actually resolved
+     *  a group for [frame]. */
+    private suspend fun evidMetaIsAuthentic(
+        frame: MeshFrameCodec.Frame.EvidMeta,
+        groupId: String,
+        key: ByteArray,
+    ): Boolean {
+        val macInput = MeshFrameCodec.evidMacInput(
+            frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks, frame.mimeType
+        )
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)) {
+            Log.w("RelayResponder", "evidence header failed auth for a group we hold — dropping")
+            return false
+        }
+        val signatureOk = verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)
+        if (!signatureOk) {
+            Log.w(
+                "RelayResponder",
+                "evidence header signature failed verification for a pinned sender — dropping " +
+                    "(possible impersonation)"
+            )
+        }
+        return signatureOk
     }
 
     private suspend fun handleEvidChunk(frame: MeshFrameCodec.Frame.EvidChunk) {
@@ -703,7 +757,7 @@ class RelayResponder(
             hop = frame.hop,
             maxHops = maxPositionRelayHops,
             viaPeer = peerAddress,
-        ) { MeshFrameCodec.reframePositionForRelay(frame.groupId, frame.hop + 1, frame.sealed) }
+        ) { MeshFrameCodec.reframePositionForRelay(frame.handle, frame.hop + 1, frame.sealed) }
         if (accepted) {
             DiagnosticsLog.event("relay", "carrying opaque position hop=${frame.hop} (not a member)")
         }
@@ -713,11 +767,12 @@ class RelayResponder(
      *  piece that makes a GPS-less member visible past a non-member relay: they push no position for
      *  the position path to piggyback on, so this is the only thing that carries them outward. */
     private fun takeOpaquePresenceCustody(frame: MeshFrameCodec.Frame.Presence, peerAddress: String) {
-        // (groupId, senderId, timestamp) identifies one presence heartbeat exactly — the sender
-        // stamps a fresh timestamp per connection, and the mac is a pure function of these three.
+        // (handle, senderId, timestamp) identifies one presence heartbeat exactly — the sender
+        // stamps a fresh timestamp per connection, and the mac is a pure function of these three
+        // (decision 38: handle replaces the old cleartext groupId here, same dedup role).
         val accepted = opaquePresence.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(
-                frame.groupId.toByteArray(), frame.senderId.toByteArray(), frame.timestamp.toString().toByteArray()
+                frame.handle, frame.senderId.toByteArray(), frame.timestamp.toString().toByteArray()
             ),
             hop = frame.hop,
             maxHops = maxPositionRelayHops,
@@ -728,28 +783,34 @@ class RelayResponder(
         }
     }
 
+    /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
+     *  [frame.handle] to a real (groupId, key) pair first; a resolution failure is what routes to
+     *  [takeOpaqueCustody] now, instead of a direct `getGroupKey` miss. */
     private suspend fun handlePositionSealed(frame: MeshFrameCodec.Frame.PositionSealed, peerAddress: String) {
         // No key for this group: we cannot read this position and never will — but we CAN carry it,
         // and until this branch existed we simply dropped it, which is what made a member behind a
         // non-member relay invisible on the radar (see OpaquePositionRelay's class doc). The
         // ciphertext is moved verbatim; only the envelope's hop byte changes.
-        val key = repo.getGroupKey(frame.groupId)
-        if (key == null) {
+        val resolved = repo.resolveGroupKeyByHandle(frame.handle)
+        if (resolved == null) {
             takeOpaqueCustody(frame, peerAddress)
             return
         }
+        val (groupId, key) = resolved
         val body = MeshFrameCodec.openPosition(frame.sealed, key) ?: return
-        ingestOpenedPosition(frame, body, peerAddress)
+        ingestOpenedPosition(groupId, frame, body, peerAddress)
     }
 
     /** The member path for a position we could actually open. Split from [handlePositionSealed] to
-     *  keep both functions' return counts within detekt's limit. */
+     *  keep both functions' return counts within detekt's limit. [groupId] is the real group
+     *  [handlePositionSealed] just resolved from [frame]'s opaque `handle` (decision 38). */
     private suspend fun ingestOpenedPosition(
+        groupId: String,
         frame: MeshFrameCodec.Frame.PositionSealed,
         body: MeshFrameCodec.PositionBody,
         peerAddress: String,
     ) {
-        if (!verifySignatureIfPinned(frame.groupId, body.senderId, body.signature, body.signedBytes)) {
+        if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) {
             Log.w(
                 "RelayResponder",
                 "position signature failed verification for a pinned sender — dropping (possible impersonation)"
@@ -765,12 +826,12 @@ class RelayResponder(
             // Sourced on body.senderId (stable), not peerAddress — see PeerIdentityResolver's
             // class doc / PLAN-v2.md §1.3 / P0b. Already passed verifySignatureIfPinned above.
             learnPeerIdentity(peerAddress, body.senderId)
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, body.senderId)
+            hopTracker.considerNeighborReport(groupId, "PRESENCE", frame.hop, body.senderId)
             if (frame.hop < maxPositionRelayHops) {
                 positionTracker.offer(
-                    frame.groupId, body.senderId, body.lat, body.lon,
+                    groupId, body.senderId, body.lat, body.lon,
                     body.accuracyM, body.timestampSec, frame.hop,
-                    viaPeer = peerAddress, sealed = frame.sealed
+                    viaPeer = peerAddress, sealed = frame.sealed, handle = frame.handle,
                 )
                 // hop>0 is a RELAYED position — the single clearest signal that multi-hop actually
                 // worked, and the thing the radar's far-phone dot depends on. Never logs the
@@ -784,6 +845,9 @@ class RelayResponder(
         }
     }
 
+    /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
+     *  [frame.handle] to a real (groupId, key) pair first; a resolution failure is what routes to
+     *  [takeOpaquePresenceCustody] now, instead of a direct `getGroupKey` miss. */
     private suspend fun handlePresence(frame: MeshFrameCodec.Frame.Presence, peerAddress: String) {
         // Replay check FIRST, before any key lookup or MAC verification: the MAC covers the
         // timestamp, so it can't be forward-dated by an attacker, but nothing previously checked
@@ -798,12 +862,13 @@ class RelayResponder(
         }
         // No key: we can't verify this and never will — but we can carry it, which is what makes a
         // GPS-less member reachable past a stranger's phone (see takeOpaquePresenceCustody).
-        val key = repo.getGroupKey(frame.groupId)
-        if (key == null) {
+        val resolved = repo.resolveGroupKeyByHandle(frame.handle)
+        if (resolved == null) {
             takeOpaquePresenceCustody(frame, peerAddress)
             return
         }
-        if (!presenceIsAuthentic(frame, key)) return
+        val (groupId, key) = resolved
+        if (!presenceIsAuthentic(frame, groupId, key)) return
         if (frame.senderId != repo.deviceId) {
             // frame.hop, not a hardcoded 0: a presence that crossed relays (including relays that
             // couldn't verify it) must report the distance it actually travelled, or a member two
@@ -811,28 +876,35 @@ class RelayResponder(
             // peerAddress — see PeerIdentityResolver's class doc / PLAN-v2.md §1.3 / P0b. This
             // frame already passed presenceIsAuthentic (group MAC + sender-key pin) above.
             learnPeerIdentity(peerAddress, frame.senderId)
-            hopTracker.considerNeighborReport(frame.groupId, "PRESENCE", frame.hop, frame.senderId)
+            hopTracker.considerNeighborReport(groupId, "PRESENCE", frame.hop, frame.senderId)
         }
     }
 
     /** Group-key MAC plus the sender-identity pin/signature checks, in that order. Folded into one
-     *  function so [handlePresence] keeps its return count within detekt's limit. */
-    private suspend fun presenceIsAuthentic(frame: MeshFrameCodec.Frame.Presence, key: ByteArray): Boolean {
-        val macInput = MeshFrameCodec.presenceMacInput(frame.groupId, frame.senderId, frame.timestamp)
+     *  function so [handlePresence] keeps its return count within detekt's limit. [groupId] is the
+     *  real group [handlePresence] just resolved from [frame]'s opaque `handle` (decision 38). */
+    private suspend fun presenceIsAuthentic(
+        frame: MeshFrameCodec.Frame.Presence,
+        groupId: String,
+        key: ByteArray,
+    ): Boolean {
+        val macInput = MeshFrameCodec.presenceMacInput(groupId, frame.senderId, frame.timestamp)
         val macOk = CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)
-        return macOk && presencePassesSenderIdentityChecks(frame, macInput)
+        return macOk && presencePassesSenderIdentityChecks(frame, groupId, macInput)
     }
 
     /** The sender-identity pin/signature checks specific to presence, split out of [handlePresence]
-     *  purely to keep that function's own return count within detekt's limit — both failures here have
-     *  the same effect (hard reject, logged distinctly) as an ordinary [authOk] failure. See
-     *  [pinOrCheckSenderKey]'s doc for why a CHANGED public key is a hard reject here specifically
-     *  (this is the only frame type that carries one to pin), unlike an absent one elsewhere. */
+     *  purely to keep that function's own return count within detekt's limit — both failures here
+     *  have the same effect (hard reject, logged distinctly) as any other group-key check failure.
+     *  See [pinOrCheckSenderKey]'s doc for why a CHANGED public key is a hard reject here
+     *  specifically (this is the only frame type that carries one to pin), unlike an absent one
+     *  elsewhere. [groupId] is the real group [handlePresence] resolved (decision 38). */
     private suspend fun presencePassesSenderIdentityChecks(
         frame: MeshFrameCodec.Frame.Presence,
+        groupId: String,
         macInput: ByteArray,
     ): Boolean {
-        val pin = pinOrCheckSenderKey(frame.groupId, frame.senderId, frame.senderPublicKey)
+        val pin = pinOrCheckSenderKey(groupId, frame.senderId, frame.senderPublicKey)
         if (pin == SenderKeyPinResult.CHANGED) {
             // Re-pinned, not dropped — see pinOrCheckSenderKey's doc. Logged loudly because the
             // benign explanation (peer reinstalled / Keystore reset) and the hostile one (a member
@@ -840,14 +912,14 @@ class RelayResponder(
             Log.w(
                 "RelayResponder",
                 "sender ${frame.senderId.take(SENDER_ID_LOG_CHARS)} presented a NEW public key for " +
-                    "group ${frame.groupId.take(SENDER_ID_LOG_CHARS)} — re-pinned (benign after a " +
+                    "group ${groupId.take(SENDER_ID_LOG_CHARS)} — re-pinned (benign after a " +
                     "reinstall; otherwise possible impersonation)"
             )
             DiagnosticsLog.event("identity", "re-pinned key for ${frame.senderId.take(SENDER_ID_LOG_CHARS)}")
-            // Deliberately falls through: the frame still had to pass authOk's group-key HMAC, and
-            // its own signature is checked below against the key we just accepted.
+            // Deliberately falls through: the frame still had to pass the group-key MAC, and its
+            // own signature is checked below against the key we just accepted.
         }
-        if (!verifySignatureIfPinned(frame.groupId, frame.senderId, frame.signature, macInput)) {
+        if (!verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)) {
             Log.w(
                 "RelayResponder",
                 "presence signature failed verification under the pinned key — dropping (possible impersonation)"
@@ -858,17 +930,30 @@ class RelayResponder(
         return true
     }
 
-    private suspend fun handleNickname(frame: MeshFrameCodec.Frame.Nickname) {
-        val macInput = MeshFrameCodec.nicknameMacInput(
-            frame.nickname.groupId, frame.nickname.senderId, frame.nickname.username, frame.nickname.updatedAt
-        )
-        if (!authOk(frame.nickname.groupId, frame.nickname.mac) { macInput }) {
+    /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
+     *  [frame.handle] to a real (groupId, key) pair first. Unlike [handleEvidMeta], a resolution
+     *  failure routes to a genuinely NEW opaque-custody path ([takeOpaqueNicknameCustody]) rather
+     *  than storing a row with a null groupId — see that function's own doc for why this is a new
+     *  capability, not a like-for-like port of the old behavior. */
+    private suspend fun handleNickname(frame: MeshFrameCodec.Frame.Nickname, peerAddress: String) {
+        val resolved = repo.resolveGroupKeyByHandle(frame.handle)
+        if (resolved == null) {
+            takeOpaqueNicknameCustody(frame, peerAddress)
+            return
+        }
+        ingestResolvedNickname(resolved.first, resolved.second, frame)
+    }
+
+    /** The member path for a nickname whose group we could actually resolve. Split from
+     *  [handleNickname] to keep both functions' return counts within detekt's limit — same reason
+     *  [ingestOpenedSos] is split from [handleSos]. */
+    private suspend fun ingestResolvedNickname(groupId: String, key: ByteArray, frame: MeshFrameCodec.Frame.Nickname) {
+        val macInput = MeshFrameCodec.nicknameMacInput(groupId, frame.senderId, frame.username, frame.updatedAt)
+        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(key, macInput), frame.mac)) {
             Log.w("RelayResponder", "nickname failed auth for a group we hold — dropping")
             return
         }
-        val nickSignatureOk = verifySignatureIfPinned(
-            frame.nickname.groupId, frame.nickname.senderId, frame.nickname.signature, macInput
-        )
+        val nickSignatureOk = verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)
         if (!nickSignatureOk) {
             Log.w(
                 "RelayResponder",
@@ -876,7 +961,36 @@ class RelayResponder(
             )
             return
         }
-        relay.ingestNickname(frame.nickname)
+        relay.ingestNickname(
+            NicknameEntity(
+                groupId, frame.senderId, frame.username, frame.updatedAt, frame.mac, frame.signature, frame.handle
+            )
+        )
+    }
+
+    /** New (decision 38, docs/DECISIONS.md) — before this, nickname had no blind-relay path at all,
+     *  but tracing the existing push code showed that gap was already moot in practice: every
+     *  nickname push path (`currentCatalogKeys`/`framesToPushOnConnect`/`presenceAndPositionFrames`/
+     *  `handleCatalogFilter`) is scoped to `repo.groupDao.getActiveGroups()` only, so a
+     *  blind-relay-held row (stored under the old vacuous-auth-pass scheme) was never re-served to
+     *  anyone — a dead end, not a working feature. This IS a working feature: an in-memory
+     *  `OpaqueFrameRelay` custody, same shape SOS/position/presence already use. No hop field exists
+     *  on this wire frame (never did), so `hop`/`maxHops` here are fixed bookkeeping for
+     *  `OpaqueFrameRelay`'s own ceiling check only, not a real propagation-depth limit — bounded
+     *  instead by `OpaqueFrameRelay`'s own entry-count/age limits, acceptable given nicknames' low
+     *  volume/urgency relative to SOS/position. */
+    private fun takeOpaqueNicknameCustody(frame: MeshFrameCodec.Frame.Nickname, peerAddress: String) {
+        val accepted = opaqueNickname.offer(
+            dedupKey = OpaqueFrameRelay.dedupKey(
+                frame.handle, frame.senderId.toByteArray(), frame.updatedAt.toString().toByteArray()
+            ),
+            hop = 0,
+            maxHops = RelayEngine.DEFAULT_TTL,
+            viaPeer = peerAddress,
+        ) { MeshFrameCodec.reframeNicknameForRelay(frame) }
+        if (accepted) {
+            DiagnosticsLog.event("relay", "carrying opaque nickname (not a member)")
+        }
     }
 
     private suspend fun handleCatalogFilter(
@@ -950,11 +1064,12 @@ class RelayResponder(
     }
 
     /** Re-frames a stored, already-sealed SOS for push — decision 37 (docs/DECISIONS.md), same
-     *  "forward the original ciphertext verbatim" reasoning as [floodForwardSos]. `sealed` is null
-     *  only transiently during construction, never for a stored row (see [SosEntity.sealed]'s own
-     *  doc), so `!!` here documents an invariant rather than papering over a real null case. */
+     *  "forward the original ciphertext verbatim" reasoning as [floodForwardSos]. `sealed`/`handle`
+     *  are null only transiently during construction, never for a stored row (see
+     *  [SosEntity.sealed]/`handle`'s own docs), so `!!` here documents an invariant rather than
+     *  papering over a real null case. */
     private fun reframeStoredSos(sos: SosEntity): ByteArray =
-        MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, sos.sealed!!)
+        MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, sos.ttl, sos.hop, sos.sealed!!)
 
     /** Pushes [items] one at a time via [encode]/[respond] until either [items] is exhausted or
      *  [remainingBudget] items have been pushed — the shared shape behind each of
@@ -1030,7 +1145,7 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.EvidChunk -> handleEvidChunk(frame)
                 is MeshFrameCodec.Frame.PositionSealed -> handlePositionSealed(frame, peerAddress)
                 is MeshFrameCodec.Frame.Presence -> handlePresence(frame, peerAddress)
-                is MeshFrameCodec.Frame.Nickname -> handleNickname(frame)
+                is MeshFrameCodec.Frame.Nickname -> handleNickname(frame, peerAddress)
                 is MeshFrameCodec.Frame.CatalogFilter -> handleCatalogFilter(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.Manifest -> handleManifest(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.WifiDirectCap -> handleWifiDirectCap(peerAddress)

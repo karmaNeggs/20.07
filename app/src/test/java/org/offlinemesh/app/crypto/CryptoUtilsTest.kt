@@ -151,4 +151,57 @@ class CryptoUtilsTest {
         val b = CryptoUtils.encryptWithNonce(key, "same plaintext".toByteArray(), nonce)
         assertArrayEquals(a, b)
     }
+
+    // ---------- windowSeconds (decision 38, docs/DECISIONS.md): generalized in place ----------
+    // rotatingAdvertisementId/candidateAdvertisementIds gained an explicit windowSeconds param so
+    // MeshFrameCodec.groupHandle (GATT_GROUP_HANDLE_WINDOW_SECONDS, 72h) could reuse the exact same
+    // HMAC(groupKey, epoch) construction the beacon's own ID_WINDOW_SECONDS (60s) already used,
+    // rather than duplicating it. Every test above calls these with no windowSeconds argument at
+    // all, which is itself proof the beacon's own default-param behavior is unaffected.
+
+    @Test
+    fun `a custom windowSeconds changes the rotation cadence`() {
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        // Within the same custom window, still stable...
+        assertArrayEquals(
+            CryptoUtils.rotatingAdvertisementId(key, epoch, windowSeconds = 3600L),
+            CryptoUtils.rotatingAdvertisementId(key, epoch + 1800, windowSeconds = 3600L),
+        )
+        // ...but the default 60s window would already have rotated past that same +1800s gap.
+        assertFalse(
+            CryptoUtils.rotatingAdvertisementId(key, epoch).contentEquals(
+                CryptoUtils.rotatingAdvertisementId(key, epoch + 1800)
+            )
+        )
+    }
+
+    @Test
+    fun `the GATT window and the beacon's own window never collide for the same key and epoch`() {
+        // Domain separation, confirmed empirically (not just argued in the doc comment): the same
+        // groupKey computing a handle for both purposes at the same instant must never produce the
+        // same bytes, which would otherwise let a GATT frame be mistaken for a beacon id or vice versa.
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        val beaconId = CryptoUtils.rotatingAdvertisementId(key, epoch)
+        val gattHandle = CryptoUtils.rotatingAdvertisementId(key, epoch, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS)
+        assertFalse(beaconId.contentEquals(gattHandle))
+    }
+
+    @Test
+    fun `candidate handles under the GATT window tolerate real elapsed time, not just clock skew`() {
+        // The property GroupRepository.resolveGroupKeyByHandle depends on: a handle computed once
+        // at creation time must still be one of the receiver's 3 candidates even hours later, since
+        // a GATT frame (unlike a beacon payload) can realistically sit in a relay queue that long.
+        val key = randomKey()
+        val createdAt = 1_700_000_000L
+        val handleAtCreation = CryptoUtils.rotatingAdvertisementId(
+            key, createdAt, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS
+        )
+        val receivedMuchLater = createdAt + 6 * 60 * 60 // 6 hours later, well past any beacon-scale tolerance
+        val candidatesAtReceiveTime = CryptoUtils.candidateAdvertisementIds(
+            key, receivedMuchLater, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS
+        )
+        assertTrue(candidatesAtReceiveTime.any { it.contentEquals(handleAtCreation) })
+    }
 }
