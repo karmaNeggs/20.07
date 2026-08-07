@@ -1,5 +1,64 @@
 # Changelog
 
+## [0.7.3-dev] — Closes out P2: SOS preview UI, multi-hop position, raised hop ceiling, catalogue filter, and the SOS/message split
+
+Five decisions land in this checkpoint (31-35), finishing everything in P2's own scope except
+receive-side use of the catalogue filter. Full reasoning in `docs/DECISIONS.md`; this is a summary.
+
+**Decision 31 closes the last named follow-up from decision 29**: a Tier B SOS content preview was
+verified but never shown to the user, only logged. New `BroadcastSosPreview` caches the verified
+preview in memory only (never persisted — still not a real `SosEntity`, missing fields a stored
+record requires, same as before). Deliberately has no staleness clock of its own: it only returns a
+cached preview when its id still matches `HopTracker.bestActiveSos`'s current answer — the same
+source its hop-gradient already comes from — rather than tracking freshness a second, independent
+way. Wired through the same group-teardown lifecycle decision 30 gave `PositionTracker` (cleared on
+group delete, swept on the existing periodic prune). `NavigateScreen` now shows it: quoted, labeled
+"unconfirmed preview, connecting to verify," and suppressed once the real, GATT-confirmed SOS
+message already exists.
+
+**Decision 32 closes decision 27's "own gossip design, out of scope" deferral**: position broadcast
+over Tier B was single-hop only (the originating device's own fix, heard only by its direct
+neighbours). Now, whenever a device has no GPS fix of its own to broadcast, it relays the closest
+position it's holding for someone else instead of leaving that slot empty — reusing the exact same
+relay-selection and verbatim-forwarding machinery GATT relay already uses, no new loop-prevention
+mechanism needed (distance-vector relaxation is already loop-safe on its own, the same property
+presence/SOS hop-gradients already relied on). Also fixed a real bug found while wiring this up: the
+receive side was reading a stale, frozen hop value baked into the encrypted position body instead of
+the envelope hop that relaying actually updates — invisible while Tier B was single-hop, would have
+silently mis-tracked every relayed position's distance once hops started varying.
+
+**Decision 33: position relay hop ceiling raised 4 → 120.** Direct ask: maximize real reach through
+an unbroken relay chain, not bounded by this app's own 3-8-person group size. 120 is the largest
+value the wire format's 1-byte hop field safely supports below its reserved "unknown" sentinel (255)
+— reaching hundreds of kilometers would need a 2-byte field, a real wire break deliberately not made
+this pass. Also fixed a real precision gap this surfaced: the radar's stale-dot fade used to be a
+flat 180-second window, unrelated to a position's real (now much larger) staleness budget — a dot
+now fades relative to its own actual eligibility window instead.
+
+**Decision 34: catalogue digests over the broadcast tier — the last P2-scoped Tier B payload item.**
+Stopped first: sizing the filter by held-item count (the obvious, GATT-matching approach) would let
+any passive scanner infer roughly how much content a group holds, and watch that estimate change
+over time, without ever connecting. After seeing the real functional cost of the privacy-preserving
+alternative (a fixed-size filter's usefulness collapses past ~50 items), item-count-scaled sizing was
+kept anyway — a deliberate, weighed exception. Found and fixed a real budget bug before shipping:
+position plus the bare SOS hop-gradient (no content) plus a maxed filter overruns the ~251-byte
+budget on its own — the filter is now the lowest-priority field in the beacon, dropped first whenever
+it doesn't fit. Broadcast side only this pass; nothing yet consumes a received filter.
+
+**Decision 35: the SOS/message split.** Every message sent in this app has always been modeled as an
+SOS — there was never a separate casual-chat type, so every ordinary message silently triggered the
+loud emergency notification and the Tier B SOS broadcast machinery. Fixed with one new flag
+(`SosEntity.isAlert`) rather than a parallel message type: storage, relay, and catalog sync stay
+exactly as they were for every message, alert or not; only the hop-gradient, the alarm-style
+notification, and the Tier B content preview now require it. The group chat screen gained a
+dedicated, clearly-marked SOS action, separate from its now-quiet default Send button. The SOS
+broadcast preview's byte cap also dropped from 100 to 65 bytes, sized for a short, actionable alert
+now that it only ever governs genuine emergencies.
+
+367 tests (up from 337), detekt clean, both variants compile/test/assemble green. **Wire-format
+note:** decision 35 bumped the shared frame version — a pre-this-checkpoint test build cannot talk
+to this one until reflashed.
+
 ## [0.7.1-dev] — First v0.7.0-dev hardware round: two bugs and a gap fixed, radar polish
 
 First live 3-phone test of P2's Tier B broadcast work (2026-08-06). Found and fixed two real bugs
