@@ -1,6 +1,6 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-06 (session continued twice past the previous
+**RESUME HERE — current status as of 2026-08-06 (session continued several times past the previous
 end-of-session checkpoint).** This is the single status block to trust; anything else in this
 document (including inline "STATUS" notes inside Part 7 below) is detail underneath this, not a
 competing source. If a phase's own section below ever seems to disagree with this block, this block
@@ -53,18 +53,70 @@ is current and that section is what's stale.
   nickname set after a P3 link was already open never reaching that peer (nicknames were only ever
   pushed once, on connect — now also pushed every periodic `refreshFramesToPush`, same fix decision
   20 already gave presence/position). Radar contrast/brightness/dot-sharpness also raised a second
-  time per this round's UI feedback. Full detail in `docs/DECISIONS.md` decision 30. 342 tests,
-  detekt clean. **These fixes are NOT yet hardware-confirmed themselves** — next round needed.
-- **Version bumped to v0.7.1-dev and a fresh in-tree debug APK is ready to hand off for its own
-  hardware smoke-test round**: `releases/20.07-v0.7.1-dev-debug.apk` (replaces the v0.7.0-dev one),
-  built from the exact commit this checkpoint describes, `versionCode`/`versionName` confirmed via
-  `aapt dump badging` before committing, not assumed. This is the FIRST APK containing decision 30's
-  fixes — nothing before this point was installable with them. **GitHub Pages is still stale**
-  (still serves v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh is a separate,
-  not-yet-done step; the in-tree APK is what's ready right now.
-- **Committed and pushed, on `main`, through `870c3f9`** (the v0.7.1-dev version bump + debug APK;
-  decision 30's own code+docs landed first as `53da503`). Working tree clean as of this checkpoint.
-  If you find uncommitted changes when resuming, they're from a session after this one.
+  time per this round's UI feedback. Full detail in `docs/DECISIONS.md` decision 30. **These fixes
+  are NOT yet hardware-confirmed themselves** — next round needed.
+- **Same day, decision 29's own named follow-up closed (decision 31): full UI surfacing of the
+  broadcast SOS content preview.** New `BroadcastSosPreview` — in-memory-only, no staleness clock of
+  its own, freshness delegated entirely to `HopTracker.bestActiveSos` (avoiding a second,
+  independently-aging channel feeding one SOS display — the exact bug shape the historical Pass 13
+  SOS-hop bug already was). Wired through the identical group-teardown lifecycle decision 30 just
+  gave `PositionTracker`. `NavigateScreen` now shows it, quoted and labeled "unconfirmed preview,"
+  suppressed once the real `SosEntity` for that id exists in Room. Full detail in
+  `docs/DECISIONS.md` decision 31. **Also NOT hardware-confirmed** — no live SOS was raised during
+  decision 30's round.
+- **Same day, decision 27's own "own gossip design, out of scope" deferral closed (decision 32):
+  multi-hop position propagation over the broadcast tier.** Our own GPS fix always wins Tier B's one
+  position slot when we have one; when we don't, `BeaconRadio.relayedPositionFrameForBroadcastTier`
+  relays the closest position we're holding for someone else instead, reusing `RelayResponder.
+  selectPositionsToRelay` and `MeshFrameCodec.reframePositionForRelay` unchanged — no new loop-
+  prevention mechanism needed, since plain distance-vector relaxation (already relied on for
+  presence/SOS hop-gradients) is loop-safe on a broadcast medium without split horizon, which has no
+  broadcast equivalent anyway. Found and fixed a real bug while wiring the receive side: it was
+  reading the sealed body's frozen inner hop instead of the envelope hop relaying actually
+  increments — invisible while single-hop, would have silently mis-tracked distance the moment hops
+  started varying. Full detail in `docs/DECISIONS.md` decision 32. **Also NOT hardware-confirmed.**
+  - 348 tests (unchanged — pure composition of already-tested pieces plus one bug fix in existing
+    call paths), detekt clean, both variants compile/test/assemble (incl. `lintVitalRelease`) green.
+- **Same day, three more decisions (33-35) closed the rest of P2's own scope, per explicit user
+  direction — `maxPositionRelayHops` raised, the catalogue filter shipped, and a real architectural
+  miss fixed.** Full detail in `docs/DECISIONS.md`; pointer only:
+  - **Decision 33 — position relay hop ceiling 4 -> 120** (user's own ask: real multi-km reach
+    through an unbroken relay chain). Landed on 120, the largest value the 1-byte hop field safely
+    supports below `UNKNOWN_HOP`'s 255 sentinel — hundreds of km would need a 2-byte field, a real
+    wire break deliberately not made this pass. Also fixed `RadarView`'s stale-dot fade, previously a
+    flat 180s window blind to a position's real (now much larger) staleness budget.
+  - **Decision 34 — catalogue digests over Tier B, the last P2-scoped payload item.** Stopped first:
+    GATT's own item-count-scaled filter sizing would leak a group's approximate content volume to any
+    passive scanner, worse still since Tier B beacons are per-group. **User chose dynamic sizing
+    anyway**, after seeing the concrete functional cost of a fixed size (false-positive rate collapses
+    past ~50 items) — a deliberate, weighed exception, not a reversal of the standing privacy-first
+    preference. Found and fixed a real budget bug first: position + the bare SOS hop-gradient (no
+    content) + a maxed filter overruns 251B on its own — the filter is now the lowest-priority field,
+    dropped first when it doesn't fit. Broadcast side only; receive-side consumption is a named
+    follow-up.
+  - **Decision 35 — the SOS/message split.** Every message in this app has always been an
+    `SosEntity` — there was never a separate casual-chat type, so every chat message silently
+    triggered the loud alarm notification and Tier B's SOS hop-gradient/preview. **User's fix: reuse
+    everything, gate only the alert-specific side effects behind one new `SosEntity.isAlert` flag** —
+    storage/relay/catalog-sync stay unconditional for every message; only the hop-gradient,
+    notification, and (transitively, for free) the Tier B preview require it. `GroupChatScreen`
+    gained a dedicated SOS action separate from its now-quiet default Send. Bumped
+    `MeshFrameCodec.VERSION` 4 -> 5 (a real wire break — no pre-decision-35 device can talk to this
+    build until reflashed). Landed alongside: the SOS preview cap trimmed 100 -> 65 bytes.
+  - 367 tests, detekt clean, both variants compile/test/assemble green. **NOT hardware-confirmed.**
+- **Version bumped to v0.7.3-dev and a fresh in-tree debug APK is ready to hand off for its own
+  hardware smoke-test round**: `releases/20.07-v0.7.3-dev-debug.apk` (replaces the v0.7.1-dev one —
+  the v0.7.2-dev bump was superseded before its own APK was ever built, folded into this checkpoint
+  instead), built from the exact commit this checkpoint describes, `versionCode`/`versionName`
+  confirmed via `aapt dump badging` before committing, not assumed. This is the FIRST APK containing
+  decisions 31-35's work — nothing before this point was installable with it, and because of decision
+  35's `VERSION` bump, no PRIOR test APK can talk to it. **GitHub Pages is still stale** (still serves
+  v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh is a separate, not-yet-done
+  step; the in-tree APK is what's ready right now.
+- **Committed, on `main`, through `1e63778`** (the v0.7.3-dev version bump + debug APK; decisions
+  31-35's own code+docs landed first as `5737c81`; decision 30's own checkpoint landed earlier as
+  `ccd29f6`). Working tree clean as of this checkpoint. If you find uncommitted changes when
+  resuming, they're from a session after this one.
 - **Sequencing, stated explicitly (corrected 2026-08-06, user clarification): the sustained
   multi-hour/multi-device field test is planned to happen AFTER P2 is built and sim-hardened, not
   as a gate P2 has to wait behind.** A 10-device/multi-hour session is expensive and not easily
@@ -802,18 +854,91 @@ was traced (via `DiagnosticsLog`) to other nearby devices' blind-relay traffic p
 deliberate `maxPositionRelayHops = 4` ceiling — correct behavior for more than 3 devices in range,
 not a defect. Full detail in `docs/DECISIONS.md` decision 30.
 
+**Same day, closing decision 29's own named follow-up (decision 31): full UI surfacing of the
+broadcast SOS content preview.** New `BroadcastSosPreview` — in-memory-only, one entry per group,
+deliberately no staleness clock of its own: `forGroupIfBest(groupId, currentBestSosId)` only
+returns a match when the caller-supplied id agrees with `HopTracker.bestActiveSos(groupId)`'s
+current answer, the same source the preview's own hop-gradient (decision 28) already comes from —
+avoiding a second, independently-aging channel feeding the same SOS display, the exact bug shape
+this app was bitten by once before (the historical Pass 13 SOS-hop bug). Wired through the same
+group-teardown lifecycle decision 30 just established for `PositionTracker` (`clearForGroup` at the
+delete-group call site, `pruneOrphaned` in the existing periodic sweep) — a second ble-layer
+in-memory tracker without that same wiring would have been a foreseeable repeat of the gap decision
+30 just fixed. UI: `NavigateScreen` (both the GPS-fix and hop-fallback branches) shows it quoted,
+labeled "unconfirmed preview, connecting to verify," and suppresses it entirely once a real
+`SosEntity` for that id already exists in Room — so it never sits alongside or disagrees with the
+fuller confirmed message already in the group's normal chat feed. Still not a real `SosEntity` —
+same missing-fields reasoning as decision 29. New `BroadcastSosPreviewTest.kt` (pure JVM, no
+Android deps) covers the freshness contract and the teardown paths.
+
+**Same day, closing decision 27's own "own gossip design, out of scope" deferral (decision 32):
+multi-hop position propagation over the broadcast tier.** The real design question — what loop
+prevention even means on an omnidirectional broadcast medium, where GATT relay's split-horizon
+premise ("never route back toward the peer that taught it to us") has no equivalent since there is
+no single "peer" to route away from — turns out to already be answered: plain distance-vector
+relaxation (a report only replaces the current value if strictly better) is loop-safe on its own,
+the same property decisions 26/28 already relied on for presence/SOS hop-gradients and
+`PositionTracker.offer` already implements for GATT relay. Our own GPS fix always wins Tier B's one
+position slot when we have one; new `BeaconRadio.relayedPositionFrameForBroadcastTier` only runs
+when we don't, reusing `RelayResponder.selectPositionsToRelay` (called with `toPeer = null`, no
+peer to exclude on a broadcast) and forwarding the winning record's sealed bytes verbatim via
+`MeshFrameCodec.reframePositionForRelay` — same building blocks GATT relay already uses, unmodified.
+**Found and fixed a real bug while wiring the receive side**: `ingestBroadcastTierPosition` was
+reading the sealed body's frozen inner hop instead of the envelope's hop that relaying actually
+increments — invisible while Tier B was single-hop (both always 0), but would have silently stored
+every relayed position as a direct hop-0 fix once this decision made the envelope hop vary. Fixed to
+match `RelayResponder.ingestOpenedPosition`'s own already-documented choice. No dedicated new test —
+every building block composed here (`selectPositionsToRelay`, the envelope-vs-inner-hop divergence,
+`PositionTracker.offer`'s self-correction) is already covered elsewhere and unmodified in its own
+logic; `BeaconRadio` itself has no direct unit test file (needs real Android BLE APIs), same
+constraint every Tier B decision has carried.
+
+**Same day, three more decisions (33-35) closed the rest of P2's own scope, per explicit user
+direction to maximize position reach and fix a real architectural miss:**
+- **Decision 33: `maxPositionRelayHops` raised 4 -> 120** (user's own request — real multi-km reach
+  through an unbroken relay chain, not bounded by group size), landing on 120 as the largest value
+  the existing 1-byte hop field safely supports (255 reserved as `UNKNOWN_HOP`'s sentinel); reaching
+  "hundreds of km" would need a 2-byte field, a real wire break deliberately not made this pass.
+  Surfaced a real precision gap: `RadarView`'s stale-dot fade was a flat 180s window, unrelated to a
+  position's real (now much larger) staleness budget — fixed to scale per-dot via new
+  `PositionTracker.effectiveMaxAgeSecondsFor`.
+- **Decision 34: catalogue digests over Tier B, the last P2-scoped payload item.** Stopped first —
+  a size that scales with held item count (GATT's own default) would let a passive scanner infer a
+  group's content volume, and watch it change over consecutive beacons, without ever connecting.
+  Presented the tradeoff; **user chose dynamic sizing anyway**, weighing it against the concrete
+  functional cost of a fixed size (false-positive rate collapses past ~50 items — nearly useless for
+  exactly the busy/escalating case the leak mattered most for) — a deliberate, case-by-case exception
+  to the standing privacy-first preference, not a reversal of it. Found and fixed a real budget bug
+  before shipping: position + the bare SOS hop-gradient (no content) + a maxed filter overruns 251B
+  on its own, so the filter is the lowest-priority field, dropped first when it doesn't fit.
+  Broadcast side only — receive-side consumption is a named follow-up.
+- **Decision 35: the SOS/message split — a real, not hypothetical, miss caught mid-session.** Every
+  message in this app has always been an `SosEntity` — there was never a separate casual-chat type,
+  so every chat message was silently triggering the loud alarm notification and Tier B's SOS hop-
+  gradient/preview. **User's fix, chosen over a parallel entity: reuse everything, gate only the
+  alert-specific side effects behind one new `SosEntity.isAlert` flag** — hop-gradient, notification,
+  and (for free, transitively) the Tier B preview all now require it; storage/relay/catalog-sync stay
+  unconditional for every message. `GroupChatScreen` gained a dedicated, always-visible SOS action
+  separate from its now-quiet default Send. Landed alongside this: the SOS preview cap trimmed
+  100 -> 65 bytes (`"SOS: "` + ~60 chars), now that it only ever governs genuine emergencies.
+
 **No P2-specific blocker remains on continuing this work.** Per the RESUME HERE block's sequencing
 note: the sustained multi-hour field session is planned for AFTER P2 is built, as the one
 comprehensive field validation of the whole v2 stack — it is not a gate P2 needs to wait behind.
 Still refines "audibly loud again within one interval of leaving" to closer to two intervals,
-measured — unaffected by any of the above. **Still not started**: full UI surfacing of the SOS
-content preview, multi-hop position propagation, thumbnails/catalogue digests (§5.1's own Tier B
-payload list), the Tier 2/3 gates. 342 tests, detekt clean, both variants compile/test/assemble
-(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **Partially hardware-confirmed
-as of decision 30** (2026-08-06, 3 phones): presence hop-gradient and single-hop position both ran
-live and surfaced the two real bugs + one gap fixed in decision 30 — SOS hop-gradient and SOS content
-preview still untested on real hardware (no live SOS raised during that round), and decision 30's own
-fixes need their own confirming round next.
+measured — unaffected by any of the above. **Still not started**: thumbnails (P5, not actually P2's
+scope) and Tier B catalogue filter receive-side consumption (decision 34's own named follow-up — the
+filter is broadcast and decoded, nothing yet tests a peer's holdings against it or acts on the
+result). The Tier 2/3 hardware gates remain not started for all of P2. 367 tests, detekt clean, both
+variants compile/test/assemble (`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green.
+**Partially hardware-confirmed as of decision 30** (2026-08-06, 3 phones): presence hop-gradient and
+single-hop position both ran
+live and surfaced the two real bugs + one gap fixed in decision 30 — SOS hop-gradient, SOS content
+preview, and decisions 31-35's work (UI surfacing, multi-hop position, the raised hop ceiling, the
+catalogue filter, and the SOS/message split) are all still untested on real hardware. Decision 35 in
+particular bumped the shared `MeshFrameCodec.VERSION` (4 -> 5) — no pre-decision-35 device can talk
+to a build past this checkpoint until reflashed. Decision 30's own fixes still need their own
+confirming round too.
 *Tier 1: S2, S3, S4, S7 — Trickle holds per-node broadcast cost flat as density rises; presence
 freshness stays inside the window with connections disabled entirely; S3 shows the device audibly
 loud again within one interval of leaving.*
