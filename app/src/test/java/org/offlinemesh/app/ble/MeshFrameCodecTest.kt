@@ -11,7 +11,6 @@ import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
-import org.offlinemesh.app.data.SosEntity
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.security.SecureRandom
@@ -27,102 +26,213 @@ class MeshFrameCodecTest {
     private val fakeSha256 = "a".repeat(64) // valid 32-byte-hex shape, content doesn't matter here
     private fun randomKey() = ByteArray(32).also { SecureRandom().nextBytes(it) }
 
+    // ---------- SOS (decision 37, docs/DECISIONS.md): AES-GCM sealed, same shape as position ----------
+    // sealSos/openSos replaced the old cleartext-plus-HMAC (sosMacInput) scheme entirely — a
+    // non-member relay used to be able to read SOS message text directly; now it moves opaque bytes,
+    // same as it always has for position. groupId/id/ttl/hop stay in the cleartext envelope (see
+    // Frame.SosSealed's own doc) so blind relaying still works without ever opening the seal.
+
     @Test
-    fun `sos frame round-trips`() {
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "need help at the north gate", timestamp = 1_700_000_000_000L, ttl = 8, hop = 2,
-            mac = ByteArray(16) { it.toByte() }
+    fun `sos frame is opaque without the group key and opens correctly with it`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            groupId = "group-1", key = key, id = "sos-1", senderId = "sender-1",
+            message = "need help at the north gate", timestamp = 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 2,
         )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertEquals(sos.id, decoded.sos.id)
-        assertEquals(sos.groupId, decoded.sos.groupId)
-        assertEquals(sos.senderId, decoded.sos.senderId)
-        assertEquals(sos.message, decoded.sos.message)
-        assertEquals(sos.timestamp, decoded.sos.timestamp)
-        assertEquals(sos.ttl, decoded.sos.ttl)
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertEquals("group-1", decoded.groupId)
+        assertEquals("sos-1", decoded.id)
+        assertEquals(8, decoded.ttl)
         // hop must round-trip independently of ttl (docs/DECISIONS.md decision 16 — the whole
         // point of adding it was decoupling hop-from-origin from a ttl a degree-aware relay may
         // clamp by more than 1 in a single hop).
-        assertEquals(sos.hop, decoded.sos.hop)
-        assertArrayEquals(sos.mac, decoded.sos.mac)
-        assertEquals(false, decoded.sos.senderIsMe) // always false on the receiving side, by design
+        assertEquals(2, decoded.hop)
+        // Wrong key must not open it.
+        assertNull(MeshFrameCodec.openSos(decoded.sealed, randomKey()))
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        assertEquals("sender-1", body.senderId)
+        assertEquals("need help at the north gate", body.message)
+        assertEquals(1_700_000_000_000L, body.timestamp)
+        assertFalse(body.isAlert)
     }
 
     @Test
-    fun `sos frame with default hop (0, an origin-authored SOS) round-trips`() {
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16),
+    fun `sos frame with hop 0 (an origin-authored SOS) round-trips`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
         )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertEquals(0, decoded.sos.hop)
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertEquals(0, decoded.hop)
     }
 
     @Test
     fun `sos frame round-trips isAlert true`() {
         // decision 35, docs/DECISIONS.md — splits the loud/broadcast alert treatment from ordinary
         // quiet messages sharing this same entity/frame.
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "medical emergency", timestamp = 1_700_000_000_000L, ttl = 8,
-            isAlert = true, mac = ByteArray(16),
-        )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertTrue(decoded.sos.isAlert)
-    }
-
-    @Test
-    fun `sos frame with default isAlert (false, an ordinary quiet message) round-trips`() {
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "meet at gate 3", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16),
-        )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertFalse(decoded.sos.isAlert)
-    }
-
-    @Test
-    fun `sos mac input is sensitive to isAlert, not just the message`() {
-        // The real property decision 35 needed: a relay must not be able to flip isAlert
-        // undetected, in either direction — silencing a real emergency or manufacturing a false
-        // alarm for content it never actually authored.
         val key = randomKey()
-        val quiet = CryptoUtils.authTag(
-            key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", "help", 1000L, isAlert = false)
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "medical emergency", 1_700_000_000_000L,
+            isAlert = true, ttl = 8, hop = 0,
         )
-        val alert = CryptoUtils.authTag(
-            key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", "help", 1000L, isAlert = true)
-        )
-        assertFalse("flipping isAlert with everything else unchanged must change the mac", quiet.contentEquals(alert))
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        assertTrue(body.isAlert)
     }
 
     @Test
-    fun `sos frame round-trips a signature alongside the mac`() {
+    fun `sos frame round-trips isAlert false`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "meet at gate 3", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        assertFalse(body.isAlert)
+    }
+
+    @Test
+    fun `tampering with any byte of a sealed sos makes it fail to open, including a flipped isAlert`() {
+        // Supersedes the old sosMacInput-based tests (decision 37 removed that scheme entirely):
+        // AES-GCM authenticates senderId/message/timestamp/isAlert as one unit, so a relay can no
+        // longer flip isAlert — or rewrite any part of the message, including past the old scheme's
+        // 255-byte mac-input truncation bug — without invalidating the GCM tag outright, rather than
+        // needing a dedicated per-field check the way the old scheme did.
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val tampered = decoded.sealed.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
+        assertNull(MeshFrameCodec.openSos(tampered, key))
+    }
+
+    @Test
+    fun `sealing the same sos id twice produces identical ciphertext`() {
+        // Regression guard for sealSos's deterministic, id-derived nonce (see sosNonce's own doc):
+        // unlike position (resealed repeatedly, needs an in-process counter to disambiguate same-
+        // second sends), a given SOS id is sealed exactly once ever — content is immutable — so
+        // re-sealing identical content must reproduce identical bytes. This is what lets
+        // reframeSosForRelay forward the ORIGINAL ciphertext verbatim across every hop instead of
+        // re-encrypting, which would otherwise break blind-relay dedup the same way it would for
+        // position.
+        val key = randomKey()
+        val a = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val b = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val decodedA = MeshFrameCodec.decode(a) as MeshFrameCodec.Frame.SosSealed
+        val decodedB = MeshFrameCodec.decode(b) as MeshFrameCodec.Frame.SosSealed
+        assertTrue(decodedA.sealed.contentEquals(decodedB.sealed))
+    }
+
+    @Test
+    fun `sos frame carries a signature inside the seal, verifiable once opened`() {
+        val key = randomKey()
         val pair = SenderIdentity.generateKeyPair()
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8,
-            mac = ByteArray(16), signature = SenderIdentity.sign(pair.privateKey, "sos-1".toByteArray())
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0, signingPrivateKey = pair.privateKey,
         )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertArrayEquals(sos.signature, decoded.sos.signature)
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertTrue(SenderIdentity.verify(pair.publicKey, body.signature!!, body.signedBytes))
     }
 
     @Test
-    fun `sos frame with no signature round-trips a null signature`() {
-        val sos = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "need help", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16)
+    fun `sos signature detects impersonation even though the group-key seal is still valid`() {
+        // Same threat model as position's equivalent test: a malicious GROUP MEMBER legitimately
+        // holds the group key (so the GCM seal opens fine) but forges a senderId they don't hold
+        // the Ed25519 private key for.
+        val key = randomKey()
+        val impostor = SenderIdentity.generateKeyPair()
+        val realSender = SenderIdentity.generateKeyPair()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "real-sender-id", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0, signingPrivateKey = impostor.privateKey,
         )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertNull(decoded.sos.signature)
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key) // GCM auth passes — same group key
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertFalse(SenderIdentity.verify(realSender.publicKey, body.signature!!, body.signedBytes))
+        assertTrue(SenderIdentity.verify(impostor.publicKey, body.signature!!, body.signedBytes))
+    }
+
+    @Test
+    fun `sos frame with no signing key round-trips a null signature`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 0,
+        )
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        assertNull(body.signature)
+    }
+
+    @Test
+    fun `sos frame carries id, ttl, and hop in the cleartext envelope, readable without any key`() {
+        // The property blind relaying depends on (decision 37's whole point): a phone with no group
+        // key must still be able to dedup on id, flood-control on ttl, and advance hop — none of
+        // that requires ever opening the seal. See RelayResponder.takeOpaqueSosCustody.
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", randomKey(), "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+            isAlert = false, ttl = 8, hop = 2,
+        )
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertEquals("sos-1", decoded.id)
+        assertEquals(8, decoded.ttl)
+        assertEquals(2, decoded.hop)
+    }
+
+    @Test
+    fun `reframeSosForRelay changes only ttl and hop, never the sealed bytes`() {
+        val key = randomKey()
+        val original = MeshFrameCodec.decode(
+            MeshFrameCodec.sealSos(
+                "group-1", key, "sos-1", "sender-1", "need help", 1_700_000_000_000L,
+                isAlert = false, ttl = 8, hop = 0,
+            )
+        ) as MeshFrameCodec.Frame.SosSealed
+
+        val relayed = MeshFrameCodec.decode(
+            MeshFrameCodec.reframeSosForRelay(
+                original.groupId, original.id, original.ttl - 1, original.hop + 1, original.sealed
+            )
+        ) as MeshFrameCodec.Frame.SosSealed
+
+        assertEquals(7, relayed.ttl)
+        assertEquals(1, relayed.hop)
+        assertTrue(original.sealed.contentEquals(relayed.sealed))
+        // And it still opens correctly for an actual member, unchanged by the relay hop/ttl.
+        val body = MeshFrameCodec.openSos(relayed.sealed, key)
+        checkNotNull(body)
+        assertEquals("sender-1", body.senderId)
     }
 
     @Test
@@ -471,48 +581,38 @@ class MeshFrameCodecTest {
         assertEquals(17, decoded.totalChunks)
     }
 
-    // ---------- sosMacInput must authenticate the FULL message, not just its first 255 bytes ----------
-    // sosMacInput used writeStr (1-byte length prefix, silently truncates at 255) while encodeSos
-    // put the full message on the wire via writeStr16 — so the MAC covered only the first 255
-    // bytes. Any relay, including a non-member blind carrier with no key, could rewrite everything
-    // past byte 255 and every member would still verify the forged message as authentic.
+    // ---------- MAX_SOS_MESSAGE_BYTES is enforced by openSos, not decode ----------
+    // Unlike the old cleartext scheme, decode() never looks inside the sealed blob — it only parses
+    // the envelope — so a hostile over-length message can't be rejected until a member with the
+    // group key actually opens it. That's an acceptable tradeoff (openSos still refuses to hand back
+    // an oversized body before anything downstream touches it) rather than a gap, since a non-member
+    // relay could never have checked this cap either way — it's not the auth boundary, just a sanity
+    // cap on what a real member's own UI would ever construct.
 
     @Test
-    fun `sos mac input is sensitive to every byte of a long message, not just the first 255`() {
-        val key = ByteArray(32) { it.toByte() }
-        val head = "A".repeat(255)
-        val original = head + "MEET AT THE NORTH GATE"
-        val tampered = head + "MEET AT THE POLICE LINE"
-        val macOriginal =
-            CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", original, 1000L, isAlert = false))
-        val macTampered =
-            CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", tampered, 1000L, isAlert = false))
-        assertFalse(
-            "tail of a long SOS message must be authenticated",
-            macOriginal.contentEquals(macTampered)
+    fun `openSos rejects a message exceeding MAX_SOS_MESSAGE_BYTES`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1),
+            1000L, isAlert = false, ttl = 8, hop = 0,
         )
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertNull(MeshFrameCodec.openSos(decoded.sealed, key))
     }
 
     @Test
-    fun `decode rejects an sos frame whose message exceeds MAX_SOS_MESSAGE_BYTES`() {
-        val tooLong = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES + 1), timestamp = 1000L, ttl = 8,
-            mac = ByteArray(16)
+    fun `openSos still accepts a message at exactly MAX_SOS_MESSAGE_BYTES`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSos(
+            "group-1", key, "sos-1", "sender-1", "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES),
+            1000L, isAlert = false, ttl = 8, hop = 0,
         )
-        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeSos(tooLong)))
-    }
-
-    @Test
-    fun `decode still accepts an sos frame at exactly MAX_SOS_MESSAGE_BYTES`() {
-        val atLimit = SosEntity(
-            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
-            message = "x".repeat(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES), timestamp = 1000L, ttl = 8,
-            mac = ByteArray(16)
-        )
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(atLimit))
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertEquals(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES, decoded.sos.message.length)
+        val decoded = MeshFrameCodec.decode(sealed)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        val body = MeshFrameCodec.openSos(decoded.sealed, key)
+        checkNotNull(body)
+        assertEquals(MeshFrameCodec.MAX_SOS_MESSAGE_BYTES, body.message.length)
     }
 
     @Test

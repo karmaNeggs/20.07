@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.7.4-dev] — SOS body encryption (P6's first slice)
+
+Decision 37 (`docs/DECISIONS.md`), P6's first slice: `docs/DECISIONS.md`/`NEXT_STEPS.md`'s long-
+flagged "SOS message text is authenticated but not encrypted" gap is closed. Since this app's
+earliest build passes, `SosEntity.message`/`senderId`/`timestamp`/`isAlert` travelled over GATT as
+cleartext plus a separate `HMAC(group_key)` tag — readable by any nearby non-member relay that
+simply connects, no key required to read (only to forge). Position got the equivalent AES-GCM
+treatment back at v2/v3; SOS now gets it too.
+
+`Frame.Sos` replaced with `Frame.SosSealed(groupId, id, ttl, hop, sealed)` — only `groupId`/`id`/
+`ttl`/`hop` stay in the cleartext envelope (same shape `Frame.PositionSealed` already uses), so a
+non-member blind relay can still dedup, flood-control, and carry an SOS onward without ever reading
+it. New `MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`/`reframeSosForRelay`, mirroring
+`encodePosition`/`openPosition`/`reframePositionForRelay` exactly — a failed decrypt IS the auth
+failure now, replacing the old separate mac check for this one frame type (evidence-meta and
+nicknames are unchanged, still HMAC-plus-cleartext). `RelayResponder.handleSos` gained a genuine
+blind-relay path (`takeOpaqueSosCustody`) — impossible before this decision, since the old scheme's
+auth check vacuously passed for a non-member (nothing was gained by refusing to read already-
+cleartext content). `MeshFrameCodec.VERSION` 5 → 6, `AppDatabase` v8 → v9
+(`SosEntity.mac`/`signature` → one `sealed: ByteArray?`).
+
+Found and fixed a real bug while finishing this checkpoint: `RelayEngine.createSos` was storing
+`sealSos`'s fully-framed wire output directly as `SosEntity.sealed`, but every consumer of that
+field treats it as raw ciphertext only — left as originally committed, every self-authored SOS would
+have double-framed on its first send. Fixed by splitting the raw sealing step into a new
+`MeshFrameCodec.sealSosBody`, which `createSos` now calls directly.
+
+370 tests (up from 367), detekt clean, both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`) green. **NOT hardware-confirmed** —
+the `VERSION` 6 wire break means no pre-checkpoint test APK can talk to this build until reflashed.
+
 ## [0.7.3-dev] — Closes out P2: SOS preview UI, multi-hop position, raised hop ceiling, catalogue filter, and the SOS/message split
 
 Five decisions land in this checkpoint (31-35), finishing everything in P2's own scope except

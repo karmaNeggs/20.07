@@ -549,7 +549,8 @@ class BeaconRadio(
     /** A short, authenticated broadcast preview of [sosId]'s message, if we hold one worth showing
      *  — see [MeshProtocol.SosAlert.Content]'s own doc for the wire shape and decision 29
      *  (`docs/DECISIONS.md`) for why it's computed with [MeshFrameCodec.broadcastSosMacInput]
-     *  (excludes `senderId`), NOT [MeshFrameCodec.sosMacInput] (the GATT-authoritative scheme).
+     *  (excludes `senderId`), a deliberately separate, non-interchangeable scheme from the GATT-
+     *  authoritative [MeshFrameCodec.sealSos]/[MeshFrameCodec.openSos] seal (decision 37).
      *  Sourced from whichever `SosEntity` [sosId] names — OUR OWN or a relayed one we're holding,
      *  either way (the content was already verified once, under the OTHER scheme, before it was
      *  stored — see `RelayResponder.handleSos`). Cached per-id, not time-based: SOS content is

@@ -200,12 +200,15 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 
 ## Security model
 
-- **Confidentiality**: GPS positions and evidence photo bytes are sealed with **AES-256-GCM**
-  under the group's random 256-bit key before they ever go on the wire — a phone relaying them
-  without the key sees only opaque ciphertext.
-- **Authenticity**: SOS, evidence headers, nicknames, and presence heartbeats carry a truncated
-  **HMAC-SHA256** (128-bit) tag under the group key. A phone without the key can relay these but
-  cannot forge one a real member will act on — verified with a constant-time comparison.
+- **Confidentiality**: GPS positions, evidence photo bytes, and SOS message text are sealed with
+  **AES-256-GCM** under the group's random 256-bit key before they ever go on the wire — a phone
+  relaying them without the key sees only opaque ciphertext. The GCM tag itself is the
+  authentication for these three (a failed decrypt IS the auth failure — there's no separate mac
+  to forge or check).
+- **Authenticity**: evidence headers, nicknames, and presence heartbeats (none of which carry
+  confidential content) carry a truncated **HMAC-SHA256** (128-bit) tag under the group key
+  instead of a full seal. A phone without the key can relay these but cannot forge one a real
+  member will act on — verified with a constant-time comparison.
 - **Per-sender authenticity, additive to the above**: every member also has their own per-group
   Ed25519 keypair (not a per-device identity — a device gets a fresh keypair for each group it
   joins, so it can't be linked across groups). A signature under this key rides alongside the
@@ -227,10 +230,6 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 **What this does *not* protect against** — read this before relying on the app for anything
 where it matters:
 
-- **SOS message text is authenticated but not encrypted.** Unlike positions and evidence, the
-  free-text body of an SOS travels in the clear (with an auth tag) so that non-member phones can
-  still relay it — meaning any nearby phone running this app, member or not, can read the
-  contents of an SOS message, not just detect that one was sent.
 - **Group IDs are not hidden on the wire.** SOS/evidence/nickname frames carry their `groupId`
   in the clear. An adversary who can capture mesh traffic (even without any group's key) can
   correlate which packets belong to the same group and build a traffic-analysis picture, even
@@ -393,7 +392,7 @@ unconfirmed one.
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.7.3-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.7.4-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain

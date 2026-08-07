@@ -117,8 +117,9 @@ object MeshProtocol {
     data class SosAlert(val id: String, val hop: Int, val content: Content? = null) {
         /** A short, authenticated preview of the SOS message itself — see decision 29
          *  (`docs/DECISIONS.md`) and [MeshFrameCodec.broadcastSosMacInput]'s own doc for why this
-         *  deliberately carries no `senderId`, unlike the GATT-authoritative `SosEntity`/`Frame.Sos`
-         *  it's sourced from. [timestamp] is the SOURCE `SosEntity`'s own creation timestamp, fixed
+         *  deliberately carries no `senderId`, unlike the GATT-authoritative `SosEntity`/
+         *  `Frame.SosSealed` it's sourced from. [timestamp] is the SOURCE `SosEntity`'s own creation
+         *  timestamp, fixed
          *  — NOT re-stamped to "now" on every broadcast the way [BroadcastTierBeacon.positionFrame]
          *  is, because [mac] is computed over it: re-stamping would invalidate a previously-computed
          *  mac for no benefit (SOS freshness is governed entirely by `HopTracker`'s own
@@ -174,9 +175,10 @@ object MeshProtocol {
      *
      * [SosAlert.content], when present (decision 29), is a short authenticated preview of the SOS
      * message itself — see [SosAlert.Content]'s own doc for why it carries no `senderId` and a
-     * fixed (not re-stamped) timestamp. Verified with [MeshFrameCodec.broadcastSosMacInput], NOT
-     * [MeshFrameCodec.sosMacInput] (the GATT-authoritative one) — a deliberately separate scheme,
-     * not interchangeable. The authoritative, fully-signed record (with sender identity) still
+     * fixed (not re-stamped) timestamp. Verified with [MeshFrameCodec.broadcastSosMacInput], a
+     * deliberately separate, non-interchangeable scheme from the GATT-authoritative
+     * [MeshFrameCodec.sealSos]/[MeshFrameCodec.openSos] seal (decision 37, `docs/DECISIONS.md`).
+     * The authoritative, fully-signed record (with sender identity) still
      * arrives over GATT once connected, which `BeaconRadio`'s existing blind-carrier policy already
      * attempts eagerly for every heard device, member or not — this is a preview, not the record.
      *

@@ -107,8 +107,9 @@ data class EvidenceEntity(
     // header (which would otherwise seed a bogus reassembly target). The chunks themselves are
     // already AES-GCM; this authenticates the metadata that steers them.
     val mac: ByteArray? = null,
-    // See SosEntity.signature's doc — same additive per-sender Ed25519 signature, same tolerance
-    // rules, over evidMacInput's canonical bytes instead of sosMacInput's.
+    // Same additive per-sender Ed25519 signature scheme SosEntity's own sealed body carries
+    // internally (see its doc) — this entity predates decision 37's seal and still travels as a
+    // separate column alongside mac, over evidMacInput's canonical bytes.
     val signature: ByteArray? = null
 ) {
     private fun scalars() = listOf(
@@ -178,11 +179,13 @@ data class NicknameEntity(
     val senderId: String,
     val username: String,
     val updatedAt: Long,
-    // HMAC(group_key) over the fields above — same authenticated-cleartext pattern as SosEntity/
-    // EvidenceEntity, so a non-member can't inject a fake display name for a real member.
+    // HMAC(group_key) over the fields above — same authenticated-cleartext pattern EvidenceEntity
+    // still uses (SosEntity moved to a full AES-GCM seal in decision 37; nicknames didn't need that
+    // since a display name has no confidentiality requirement), so a non-member can't inject a fake
+    // display name for a real member.
     val mac: ByteArray? = null,
-    // See SosEntity.signature's doc — same additive per-sender Ed25519 signature, same tolerance
-    // rules, over nicknameMacInput's canonical bytes instead of sosMacInput's.
+    // Same additive per-sender Ed25519 signature scheme EvidenceEntity.signature carries, over
+    // nicknameMacInput's canonical bytes instead of evidMacInput's.
     val signature: ByteArray? = null
 ) {
     private fun scalars() = listOf(groupId, senderId, username, updatedAt)

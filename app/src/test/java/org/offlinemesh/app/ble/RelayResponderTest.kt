@@ -31,8 +31,11 @@ import org.robolectric.RobolectricTestRunner
  * which touches [org.offlinemesh.app.data.GroupKeyStore]'s Android Keystore-backed
  * `EncryptedSharedPreferences`, unavailable under Robolectric (same constraint already documented
  * on [GroupRepository]'s own lazy `keyStore` property). `Frame.CatalogFilter` handling itself
- * never calls `authOk`/`getGroupKey` — unlike `Frame.Sos`/`Frame.EvidMeta` — so this constraint
- * doesn't limit what this file can actually cover.
+ * never calls `authOk`/`getGroupKey` — unlike `Frame.SosSealed`/`Frame.EvidMeta` — so this
+ * constraint doesn't limit what this file can actually cover. [sosFixture]'s [testGroupKey] is a
+ * plain in-test 32-byte array, not a [GroupRepository]-sourced one, for the same reason — it only
+ * needs to produce/open a real AES-GCM seal (decision 37, `docs/DECISIONS.md`), never to round-trip
+ * through Keystore.
  *
  * Robolectric-backed for the same reason [WifiDirectHandoffCoordinatorTest] is: [RelayEngine]
  * needs a real `Context` for its Room database.
@@ -62,9 +65,20 @@ class RelayResponderTest {
         }
     }
 
-    private fun sosFixture(id: String = "sos-1") = SosEntity(
+    // A fixed test-only group key (decision 37, docs/DECISIONS.md) — see the class doc above for
+    // why this can't come from GroupRepository.getGroupKey under Robolectric. Nothing here needs it
+    // to match any real group; it only has to consistently seal/open within this file.
+    private val testGroupKey = ByteArray(32) { it.toByte() }
+
+    private fun sosFixture(id: String = "sos-1", message: String = "help") = SosEntity(
         id = id, groupId = "group-1", senderId = "sender-1", senderIsMe = false,
-        message = "help", timestamp = System.currentTimeMillis(), ttl = RelayEngine.DEFAULT_TTL
+        message = message, timestamp = System.currentTimeMillis(), ttl = RelayEngine.DEFAULT_TTL,
+        // sealSosBody, NOT sealSos — SosEntity.sealed stores RAW sealed bytes, mirroring exactly
+        // what RelayEngine.createSos now does (and what RelayResponder.handleSos stores from an
+        // arriving frame's own envelope-stripped Frame.SosSealed.sealed) — see sealSosBody's own doc.
+        sealed = MeshFrameCodec.sealSosBody(
+            testGroupKey, id, "sender-1", message, System.currentTimeMillis(), isAlert = false
+        ),
     )
 
     // sha256 must be a real 32-byte (64 hex char) value — MeshFrameCodec's wire format always
@@ -87,10 +101,12 @@ class RelayResponderTest {
 
         assertEquals(1, responded.size)
         val decoded = MeshFrameCodec.decode(responded[0])
-        check(decoded is MeshFrameCodec.Frame.Sos)
-        assertEquals("sos-1", decoded.sos.id)
-        assertEquals("group-1", decoded.sos.groupId)
-        assertEquals("help", decoded.sos.message)
+        check(decoded is MeshFrameCodec.Frame.SosSealed)
+        assertEquals("sos-1", decoded.id)
+        assertEquals("group-1", decoded.groupId)
+        val body = MeshFrameCodec.openSos(decoded.sealed, testGroupKey)
+        checkNotNull(body)
+        assertEquals("help", body.message)
     }
 
     @Test
@@ -131,8 +147,8 @@ class RelayResponderTest {
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
 
         val ids = responded.mapNotNull { MeshFrameCodec.decode(it) }
-            .filterIsInstance<MeshFrameCodec.Frame.Sos>()
-            .map { it.sos.id }
+            .filterIsInstance<MeshFrameCodec.Frame.SosSealed>()
+            .map { it.id }
         assertEquals(listOf("sos-2"), ids)
     }
 
@@ -151,8 +167,8 @@ class RelayResponderTest {
         responder.handleIncoming(filterFrame, "peer1") { responded.add(it) }
 
         val pushedIds = responded.mapNotNull { MeshFrameCodec.decode(it) }
-            .filterIsInstance<MeshFrameCodec.Frame.Sos>()
-            .map { it.sos.id }
+            .filterIsInstance<MeshFrameCodec.Frame.SosSealed>()
+            .map { it.id }
         assertEquals("expected exactly the per-connection budget's worth pushed, not all 210", 200, pushedIds.size)
     }
 
@@ -166,7 +182,7 @@ class RelayResponderTest {
         val firstConnection = mutableListOf<ByteArray>()
         responder.handleIncoming(firstFilterFrame, "peer1") { firstConnection.add(it) }
         val firstPushedIds = firstConnection.mapNotNull { MeshFrameCodec.decode(it) }
-            .filterIsInstance<MeshFrameCodec.Frame.Sos>().map { it.sos.id }
+            .filterIsInstance<MeshFrameCodec.Frame.SosSealed>().map { it.id }
         assertEquals(200, firstPushedIds.size)
 
         // A fresh connection to the SAME peer resets the budget (MeshGattClient/MeshGattServer
@@ -182,7 +198,7 @@ class RelayResponderTest {
         val secondConnection = mutableListOf<ByteArray>()
         responder.handleIncoming(secondFilterFrame, "peer1") { secondConnection.add(it) }
         val secondPushedIds = secondConnection.mapNotNull { MeshFrameCodec.decode(it) }
-            .filterIsInstance<MeshFrameCodec.Frame.Sos>().map { it.sos.id }
+            .filterIsInstance<MeshFrameCodec.Frame.SosSealed>().map { it.id }
         // Exactly 10 items remain undelivered, but CatalogFilter is a probabilistic Bloom filter
         // (see its class doc): at a 200-item fill it has a real, non-negligible false-positive
         // rate, so an occasional one of the 10 can look "already held" and get skipped this round
@@ -235,8 +251,8 @@ class RelayResponderTest {
         val responded = mutableListOf<ByteArray>()
         responder.handleIncoming(peerFilterFrame, "peer1") { responded.add(it) }
         val pushedSosIds = responded.mapNotNull { MeshFrameCodec.decode(it) }
-            .filterIsInstance<MeshFrameCodec.Frame.Sos>()
-            .map { it.sos.id }
+            .filterIsInstance<MeshFrameCodec.Frame.SosSealed>()
+            .map { it.id }
         assertTrue("a ttl-0 item must never be pushed, even to a peer that doesn't have it", pushedSosIds.isEmpty())
     }
 
@@ -250,7 +266,7 @@ class RelayResponderTest {
         val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue(decoded.any { it is MeshFrameCodec.Frame.CatalogFilter })
         assertTrue("a filter fit — the SOS itself must not also be eagerly pushed",
-            decoded.none { it is MeshFrameCodec.Frame.Sos })
+            decoded.none { it is MeshFrameCodec.Frame.SosSealed })
     }
 
     @Test
@@ -262,9 +278,9 @@ class RelayResponderTest {
         val decoded = frames.mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue("expected no catalog filter frame when it can't possibly fit",
             decoded.none { it is MeshFrameCodec.Frame.CatalogFilter })
-        val pushedSos = decoded.filterIsInstance<MeshFrameCodec.Frame.Sos>().singleOrNull()
+        val pushedSos = decoded.filterIsInstance<MeshFrameCodec.Frame.SosSealed>().singleOrNull()
         assertTrue("expected the SOS to be pushed eagerly instead", pushedSos != null)
-        assertEquals("sos-1", pushedSos?.sos?.id)
+        assertEquals("sos-1", pushedSos?.id)
     }
 
     @Test

@@ -301,10 +301,41 @@ object MeshFrameCodec {
     // without re-encrypting on every hop.
     private fun sosNonce(id: String): ByteArray = CryptoUtils.sha256(id.toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
 
-    /** Seals the sensitive body with the group key before framing — same shape as [encodePosition]:
-     *  only a member holding the key can produce or read this, non-members that relay it move
-     *  opaque bytes. [signingPrivateKey] optional for the same reason [encodePosition]'s is (this
+    /** Produces JUST the raw AES-GCM sealed bytes — no envelope — for storing as
+     *  [SosEntity.sealed]: that field's own doc says it "mirrors [PositionTracker.Record.sealed]'s
+     *  exact shape," which is always raw ciphertext (what [decode]'s `FRAME_SOS` case extracts from
+     *  an arriving frame), never a full framed wire message. [sealSos] wraps this with
+     *  [reframeSosForRelay] for the "encode a frame to send right now" case; [RelayEngine.createSos]
+     *  calls this directly instead, since IT needs the raw bytes for storage, and the actual send
+     *  goes through [RelayResponder.floodForwardLocalSos] -> `reframeSosForRelay` moments later —
+     *  calling [sealSos] there instead would double-frame (an entire wire frame nested inside what
+     *  every reader downstream, e.g. [RelayResponder]'s `reframeStoredSos`, treats as raw
+     *  ciphertext). [signingPrivateKey] optional for the same reason [encodePosition]'s is (this
      *  device may have no sender identity for [groupId] yet). */
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    fun sealSosBody(
+        key: ByteArray,
+        id: String,
+        senderId: String,
+        message: String,
+        timestamp: Long,
+        isAlert: Boolean,
+        signingPrivateKey: ByteArray? = null,
+    ): ByteArray {
+        val inner = build { d ->
+            d.writeStr(senderId); d.writeSosMessage(message); d.writeLong(timestamp)
+            d.writeByte(if (isAlert) 1 else 0)
+        }
+        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
+        val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
+        return CryptoUtils.encryptWithNonce(key, innerWithSignature, sosNonce(id))
+    }
+
+    /** Seals the sensitive body with the group key AND frames it as a ready-to-send wire message in
+     *  one call — same shape as [encodePosition]. Only a member holding the key can produce or read
+     *  this, non-members that relay it move opaque bytes. See [sealSosBody]'s doc for why a caller
+     *  that needs to STORE the sealed bytes (rather than send them immediately) must call that
+     *  instead of this. */
     @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
     fun sealSos(
         groupId: String,
@@ -318,13 +349,7 @@ object MeshFrameCodec {
         hop: Int,
         signingPrivateKey: ByteArray? = null,
     ): ByteArray {
-        val inner = build { d ->
-            d.writeStr(senderId); d.writeSosMessage(message); d.writeLong(timestamp)
-            d.writeByte(if (isAlert) 1 else 0)
-        }
-        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
-        val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
-        val sealed = CryptoUtils.encryptWithNonce(key, innerWithSignature, sosNonce(id))
+        val sealed = sealSosBody(key, id, senderId, message, timestamp, isAlert, signingPrivateKey)
         return reframeSosForRelay(groupId, id, ttl, hop, sealed)
     }
 

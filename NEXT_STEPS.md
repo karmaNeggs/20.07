@@ -79,9 +79,6 @@ Earlier: A1, A2, B1, C1.
 
 ## Open decisions (real, deferred)
 
-- **SOS message text is authenticated but not encrypted** — it travels in the clear so non-member
-  phones can relay it, meaning any nearby phone can read SOS content. Needs a call before any real
-  deployment.
 - **WiFi Direct accelerator** — experimental, compile-verified only; `WifiP2pManager.connect()` may
   raise a system dialog on the peer that visibly breaks the disguise. Remove, or keep off?
 - **Long-range BT5 Coded PHY** — confirmed failing 100% on this hardware (circuit-broken now).

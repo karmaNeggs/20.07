@@ -337,7 +337,9 @@ class RelayResponder(
             // "never re-encrypt a relayed item" reasoning position/nickname relay already follow —
             // sealed is null only transiently during construction, never for a stored row.
             for (sos in relay.relayableSos()) {
-                sos.sealed?.let { frames += MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, it) }
+                sos.sealed?.let {
+                    frames += MeshFrameCodec.reframeSosForRelay(sos.groupId, sos.id, sos.ttl, sos.hop, it)
+                }
             }
             for (meta in relay.relayableEvidenceMeta()) frames += MeshFrameCodec.encodeEvidMeta(meta)
             for (g in repo.groupDao.getActiveGroups()) {
@@ -522,6 +524,17 @@ class RelayResponder(
             Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
             return
         }
+        ingestOpenedSos(frame, body, peerAddress)
+    }
+
+    /** The member path for an SOS we could actually open. Split from [handleSos] to keep both
+     *  functions' return counts within detekt's limit — same reason [ingestOpenedPosition] is split
+     *  from [handlePositionSealed]. */
+    private suspend fun ingestOpenedSos(
+        frame: MeshFrameCodec.Frame.SosSealed,
+        body: MeshFrameCodec.SosBody,
+        peerAddress: String,
+    ) {
         // Additive per-sender check: decrypting under the group key only proves SOME member
         // produced this; a pinned sender key catches a different member forging this one's SOS.
         if (!verifySignatureIfPinned(frame.groupId, body.senderId, body.signature, body.signedBytes)) {

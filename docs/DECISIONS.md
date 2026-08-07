@@ -1903,3 +1903,101 @@ summary to reflect both changes.
 No test/code impact — 367 tests unchanged, detekt clean, both variants compile/test/assemble green
 (same state as decision 35 left it). **Production code touched: none.** `PLAN-v2.md` only.
 
+## 37. SOS body encryption — closes `NEXT_STEPS.md`'s long-flagged "SOS text is authenticated but not encrypted" gap
+
+P6's first slice (`PLAN-v2.md` §4.4), user's explicit choice over P4/Couriers given this session's
+heavy privacy/security emphasis. Since this app's earliest build passes, `SosEntity.message` (and
+`senderId`/`timestamp`/`isAlert`) travelled over GATT as cleartext plus a separate `HMAC(group_key)`
+tag (`mac`) and an optional Ed25519 `signature` — authenticated, but readable by ANY nearby non-
+member relay that simply connects (no key needed to read, only to forge). Position solved the
+equivalent problem back at v2/v3 (AES-GCM sealing under the group key, decision 8-era); SOS never got
+the same treatment because it long predates that pattern. This decision brings SOS to parity.
+
+**Wire format**: `Frame.Sos` (four cleartext fields + `mac` + `signature`) replaced with
+`Frame.SosSealed(groupId, id, ttl, hop, sealed: ByteArray)` — `id`/`ttl`/`hop` stay in the cleartext
+envelope for exactly the reason position's `hop` does (a non-member blind relay must still be able to
+dedup on `id`, flood-control on `ttl`, and advance `hop` without ever reading the message); everything
+sensitive (`senderId`/`message`/`timestamp`/`isAlert`) moves inside one AES-GCM seal. New
+`MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`/`reframeSosForRelay`, mirroring
+`encodePosition`/`openPosition`/`reframePositionForRelay`'s exact shape — a failed decrypt (wrong
+key, tampered ciphertext, bad GCM tag) IS the auth failure now, replacing the old separate `authOk`
+check entirely for this one frame type (evidence-meta and nicknames still use `authOk`, unchanged).
+Nonce is deterministic, derived from `sha256(id)` alone (`sosNonce`) rather than position's
+per-second counter — a given SOS `id` is sealed exactly once, ever (content is immutable once
+created, decision 29's own note), so re-sealing the same `id` always reproduces the same ciphertext,
+which is what lets `reframeSosForRelay` forward the ORIGINAL bytes verbatim across every hop instead
+of re-encrypting (same "stable ciphertext for dedup" reasoning decision 22-era position work landed).
+`MeshFrameCodec.VERSION` 5 -> 6. `AppDatabase` v8 -> v9 (`SosEntity.mac`/`signature` columns replaced
+with one `sealed: ByteArray?`), `fallbackToDestructiveMigration` as usual pre-1.0.
+
+**`RelayResponder.handleSos` split into member/blind-relay paths, same shape `handlePositionSealed`/
+`takeOpaqueCustody` already use for position** — this split was IMPOSSIBLE before this decision: the
+old scheme's `authOk` vacuously passed for a group we hold no key to (cleartext was already readable
+either way, so there was nothing gained by refusing to read it), so every SOS silently took the
+member-shaped path regardless of membership. Now a non-member genuinely cannot read a sealed SOS, so
+it needs its own opaque-custody path — new `takeOpaqueSosCustody`, reusing `OpaqueFrameRelay` the same
+way position's own opaque path does, `RelayEngine.DEFAULT_TTL` as the blind-relay hop ceiling (no
+group-key-derived signal to size this from otherwise).
+
+**A real bug found today while fixing this session's checkpoint**, not present in decision 35 or
+earlier: `RelayEngine.createSos` was calling `sealSos` (which returns a FULLY FRAMED wire message —
+type/version/groupId/id/ttl/hop plus the sealed blob) and storing that directly as `SosEntity.sealed`.
+Every consumer of `SosEntity.sealed` (`RelayResponder.reframeStoredSos`, `floodForwardSos`, and the
+receive-side `handleSos` itself) treats that field as RAW ciphertext only — exactly what `decode()`
+extracts from an arriving frame's envelope, and exactly what `SosEntity.sealed`'s own doc comment
+says it holds ("mirrors `PositionTracker.Record.sealed`'s exact shape"). Left as committed, every
+locally-authored SOS (`MeshService.sendSos` -> `createSos` -> `floodForwardLocalSos`) would have
+double-framed on its very first send — an entire wire frame nested inside what `reframeSosForRelay`
+treats as opaque ciphertext — breaking every self-sent SOS message, both the immediate flood-forward
+and any later catalog-filter push of that same stored row. Root cause: `sealSos` and `encodePosition`
+share one shape (seal, then immediately frame for sending), which is right for position (never stored,
+only ever pushed fresh each ~20s cycle) but wrong for SOS (persisted, re-sent many times from storage
+across the item's whole relay lifetime). Fixed by splitting the seal step out: new
+`MeshFrameCodec.sealSosBody(key, id, senderId, message, timestamp, isAlert, signingPrivateKey):
+ByteArray` returns just the raw sealed bytes; `sealSos` now calls it then wraps with
+`reframeSosForRelay` for the "encode and send right now" case. `RelayEngine.createSos` switched to
+call `sealSosBody` directly. Caught only because finishing this checkpoint's test rewrite required
+building a realistic `SosEntity` fixture in `RelayResponderTest.kt` and running it through the actual
+catalog-filter push path — the exact kind of miss unit tests that only check envelope fields (not an
+end-to-end open) would never have caught; recorded as a reason to keep at least one round-trip test
+per frame type that goes all the way through `openX`, not just `decode`.
+
+**Two detekt findings fixed while getting this checkpoint back to green**, both pre-existing from the
+WIP commit's main-source changes, unrelated to the bug above: `RelayResponder.handleSos` had 3 return
+statements (limit 2) — split into `handleSos` (key lookup + opaque-custody dispatch + open) and a new
+`ingestOpenedSos` (signature check + store + hop-tracking + flood-forward), the exact same split
+`handlePositionSealed`/`ingestOpenedPosition` already established for position; and one line in
+`framesToPushOnConnect`'s MTU-fallback branch exceeded the max line length, wrapped.
+
+**Test rewrite** (`MeshFrameCodecTest.kt`, `RelayResponderTest.kt`): every SOS test now builds via
+`sealSos`/`sealSosBody` and asserts through `openSos`, mirroring `PositionSealed`'s existing coverage
+shape — opaque-without-key/opens-with-key, hop-0 origin case, `isAlert` true/false, signature
+round-trip, impersonation detection, no-signing-key case, envelope fields readable without any key,
+`reframeSosForRelay` changes only `ttl`/`hop` never the sealed bytes. The old `sosMacInput`-based
+tests (mac sensitive to `isAlert`, mac sensitive to the full message not just first 255 bytes) are
+superseded by one `tampering with any byte of a sealed sos` test — AES-GCM authenticates the entire
+plaintext as one unit, so a single test now covers what needed two dedicated tests under the old
+per-field-mac scheme. Two NEW tests with no old equivalent: `openSos rejects/still accepts a message
+at exactly MAX_SOS_MESSAGE_BYTES` (this cap moved from a `decode()`-time check to an `openSos`-time
+one, since `decode()` no longer looks inside the seal at all) and `sealing the same sos id twice
+produces identical ciphertext` (regression guard for the deterministic nonce's stability property,
+which `reframeSosForRelay` depends on). `RelayResponderTest.kt`'s `sosFixture` now seals with a fixed
+in-test 32-byte key (never `GroupRepository.getGroupKey`, unavailable under Robolectric — same
+constraint documented on this file's own class doc) via `sealSosBody`, matching the corrected
+production pattern.
+
+370 tests (up from 367 before this decision's test rewrite — net new coverage: the
+`MAX_SOS_MESSAGE_BYTES`-at-`openSos` pair and the nonce-stability test above; several old tests were
+consolidated 1:1 into their sealed-shape equivalents rather than adding a net-new count matching
+every old test 1:1). detekt clean, both variants compile/test/assemble (`assembleDebug`/
+`assembleRelease`) green. **Production code touched:** `MeshFrameCodec.kt` (`Frame.SosSealed`,
+`sealSosBody`/`sealSos`/`openSos`/`reframeSosForRelay`, `SosBody`, `VERSION` 6, `sosMacInput` removed),
+`Entities.kt` (`SosEntity.sealed` replacing `mac`/`signature`, doc updates on `EvidenceEntity`/
+`NicknameEntity` that referenced the now-removed `sosMacInput` by name), `AppDatabase.kt` (v9),
+`RelayEngine.kt` (`createSos` uses `sealSosBody`), `RelayResponder.kt` (`handleSos`/`ingestOpenedSos`
+split, `takeOpaqueSosCustody`, MTU-fallback line wrap), `MeshProtocol.kt`/`BeaconRadio.kt` (doc-only —
+updated stale comments naming the removed `sosMacInput`/old `Frame.Sos`; decision 29's
+`broadcastSosMacInput` broadcast-preview scheme is UNCHANGED, still deliberately separate from this
+GATT-authoritative scheme). **NOT hardware-confirmed** — the `VERSION` 6 wire break means no
+pre-checkpoint test APK can talk to this build until reflashed; next live round needed.
+

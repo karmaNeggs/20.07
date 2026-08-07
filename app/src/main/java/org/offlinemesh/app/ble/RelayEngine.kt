@@ -118,9 +118,11 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // where a null mac was at least a representable (if useless) state.
         val key = repo.getGroupKey(groupId) ?: error("no key for group")
         val signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
-        val sealed = MeshFrameCodec.sealSos(
-            groupId, key, id, senderId, truncated, timestamp, isAlert, DEFAULT_TTL, hop = 0, signingPrivateKey,
-        )
+        // sealSosBody, NOT sealSos — this needs the RAW sealed bytes to store on SosEntity.sealed
+        // (see that field's own doc and sealSosBody's), not a full pre-framed wire message. The
+        // actual frame is built moments later, from these same stored bytes, when the caller
+        // (MeshService.sendSos) invokes RelayResponder.floodForwardLocalSos.
+        val sealed = MeshFrameCodec.sealSosBody(key, id, senderId, truncated, timestamp, isAlert, signingPrivateKey)
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, isAlert = isAlert,
