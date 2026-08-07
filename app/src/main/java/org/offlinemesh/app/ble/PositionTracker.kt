@@ -154,5 +154,15 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
          *  independent reconnect cycle that hop's propagation depends on. */
         internal fun effectiveMaxAgeSeconds(baseMaxAgeSeconds: Long, hop: Int): Long =
             baseMaxAgeSeconds + hop.coerceAtLeast(0) * PER_HOP_SLACK_SECONDS
+
+        /** [effectiveMaxAgeSeconds] pinned to this class's own [BASE_MAX_AGE_SECONDS] — the single
+         *  source of truth callers outside this file should use (decision 33, `docs/DECISIONS.md`)
+         *  rather than re-declaring the 180s literal themselves the way `RadarView`'s fade curve
+         *  used to. Public specifically so `RadarCanvas` can size a dot's fade-out window to the
+         *  SAME staleness budget [forGroup] actually enforces for it, instead of an unrelated flat
+         *  constant that stopped matching once `RelayResponder.maxPositionRelayHops` grew from 4 to
+         *  a much larger ceiling — a hop-120 position's real staleness budget is over 90 minutes,
+         *  not the ~3-6 minutes the old flat constant assumed. */
+        fun effectiveMaxAgeSecondsFor(hop: Int): Long = effectiveMaxAgeSeconds(BASE_MAX_AGE_SECONDS, hop)
     }
 }

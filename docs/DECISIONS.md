@@ -1543,3 +1543,330 @@ existing pruning loop), `RelayResponder.kt` (nicknames added to periodic refresh
 `RadarView.kt` (contrast/brightness/sharpness). **These fixes are NOT yet hardware-confirmed** — the
 bugs they address were; the fixes themselves are new this pass and need their own live round.
 
+## 31. P2: full UI surfacing of the broadcast SOS content preview — the last named follow-up from decision 29
+
+Closes decision 29's own "full UI surfacing of this preview — showing it to the user before the
+GATT-confirmed record arrives — is a named follow-up, not silently dropped." Until now,
+`BeaconRadio.verifyBroadcastSosContent` verified a broadcast SOS content preview's mac and did
+nothing with it beyond a bare `DiagnosticsLog` line — never shown to the user, never reachable from
+the UI layer at all.
+
+**Design constraint carried over from decision 29: still not a real `SosEntity`.** A preview is
+missing fields (`senderId`, `ttl`, the GATT-authoritative mac/signature) a stored record requires,
+so inserting it into Room would misrepresent what's actually known — same reasoning, unchanged.
+
+**New `BroadcastSosPreview`: in-memory-only, one entry per group, deliberately no staleness clock
+of its own.** Same "never persisted" shape as `PositionTracker`, for the same privacy reason. The
+one real design choice: rather than give this cache its own age-based expiry — a second,
+independent notion of "is this still current" — `forGroupIfBest(groupId, currentBestSosId)` only
+returns a match when the caller-supplied id agrees with `HopTracker.bestActiveSos(groupId)`'s
+current answer, the SAME source this preview's own hop-gradient (decision 28) already comes from.
+Two independently-aging channels feeding one SOS display is the exact bug shape this app was
+already bitten by once (the historical Pass 13 SOS-hop bug, `NEXT_STEPS.md`/this log's own early
+history) — delegating freshness to `HopTracker` rather than duplicating it avoids reintroducing
+that class of bug by construction, not by discipline. SOS content is immutable once created
+(decision 29's own note), so `offer()` is a plain overwrite — no dedup/compare needed.
+
+**Wired through the same in-memory-state lifecycle decision 30 just established for
+`PositionTracker`**: `MeshService` holds it publicly alongside `hopTracker`/`positionTracker`,
+`GroupChatScreen`'s delete-group flow clears it immediately (`clearForGroup`), and the existing
+periodic pruning loop sweeps orphans (`pruneOrphaned`) as the safety net for automatic
+`expireGroups`. Introducing a second ble-layer per-group in-memory tracker without the identical
+teardown wiring decision 30 just added for the first one would have been a foreseeable repeat of
+the same gap one decision later.
+
+**UI: `NavigateScreen`, both branches (GPS fix present or not).** Reads
+`hopTracker.bestActiveSos(groupId)` once (previously two separate lookups —
+`bestActiveSosHop` for the hop count, nothing for the id — now one, since the preview needs the id
+too), then looks up the preview keyed against that same id, and — the actual "don't duplicate the
+confirmed message" rule — suppresses it entirely once a real `SosEntity` for that id already exists
+in `sosList` (Room), so a user never sees a preview sitting alongside or disagreeing with the fuller
+confirmed message already in the group's normal chat feed. Displayed quoted, explicitly labeled
+"unconfirmed preview, connecting to verify" (in `AppColors.Danger`, same as the hop-count line
+above it) — never presented with the same visual weight as a confirmed record.
+
+New `BroadcastSosPreviewTest.kt` (pure JVM, no Android deps — same tier as `HopTrackerTest`/
+`PositionTrackerTest`): the id-match/id-mismatch/no-cache-entry freshness contract, overwrite
+behavior, and the `clearForGroup`/`pruneOrphaned` teardown paths, mirroring
+`PositionTrackerTest`'s equivalent decision-30 cases.
+
+348 tests (up from 342: +6, all in the new `BroadcastSosPreviewTest`). detekt clean, both variants
+compile/test/assemble (incl. `lintVitalRelease`) green. **Production code touched:** new
+`BroadcastSosPreview.kt`, `BeaconRadio.kt` (constructor param, `offer()` call site),
+`MeshService.kt` (holds it, wires teardown), `GroupChatScreen.kt` (wires `clearForGroup`),
+`NavigateScreen.kt` (the actual UI surfacing). **NOT hardware-confirmed** — no live SOS was raised
+during decision 30's hardware round, so this path (like SOS hop-gradient/content before it) has
+never run on real hardware.
+
+**What P2 still doesn't carry:** multi-hop position propagation over broadcast; thumbnails and
+catalogue digests (§5.1's own Tier B payload list). Tier 2/3 hardware gates remain not started for
+all of P2.
+
+## 32. P2: multi-hop position propagation over the broadcast tier — closing decision 27's "own gossip design, out of scope" deferral
+
+Decision 27 shipped single-hop Tier B position broadcast deliberately: "a Tier B receiver does not
+re-broadcast a position it heard from someone else — extended advertising has no natural 'relay'
+the way GATT store-and-forward has one, so genuine multi-hop position propagation over broadcast
+would need its own gossip design, out of scope here." This closes that deferral.
+
+**The core design question: what does loop prevention even mean on a broadcast medium?** GATT
+relay's existing `RelayResponder.selectPositionsToRelay` uses split horizon — never advertise a
+route back toward the specific peer that taught it to us — because GATT links are point-to-point,
+so "back toward" is meaningful. A Tier B beacon is omnidirectional: everyone in range hears the
+exact same payload, so there is no single "peer" to route a broadcast away from; split horizon's
+own premise doesn't have a broadcast equivalent. Decision 26/28 already answered this question once
+for presence/SOS hop-gradients, just never named it as the same question: plain distance-vector
+relaxation — `HopTracker.considerNeighborReport`, "a report only replaces the current value if it's
+actually better" — is loop-safe on its own without split horizon, because a worse or equal-or-later
+copy of the same fact is simply rejected wherever it's heard, so it can never get re-picked-up for
+further relay. `PositionTracker.offer` already has the identical shape (`staleOrWorse` rejection,
+"the shorter path wins at an equal timestamp"), already proven for GATT relay — extending it to
+Tier B needed no new mechanism, just recognizing the existing one already applies.
+
+**Design: our own fix always wins the one position slot; relay only fills what would otherwise be
+dead airtime.** Tier B has room for exactly one position frame per beacon (the same ~251B budget
+decision 29 already fights over with SOS content). When `BeaconRadio` has a current GPS fix, that's
+still always the highest-value thing to put in that slot — nothing else can source it. New
+`BeaconRadio.relayedPositionFrameForBroadcastTier(groupId)` only runs when `broadcastTierPositionFrame`
+is null (no fix this cycle) and no SOS content is claiming the slot instead: it calls
+`RelayResponder.selectPositionsToRelay(positionTracker.forGroup(groupId), repo.deviceId,
+MAX_POSITION_RELAY_HOPS, limit = 1)` — the SAME function GATT relay uses, called with `toPeer = null`
+(no peer to exclude on a broadcast), reused unchanged rather than duplicated — and forwards the
+winning record's original sealed bytes verbatim via `MeshFrameCodec.reframePositionForRelay`, same
+"never re-encrypt a relayed position" reasoning `positionFramesToPush`'s own doc gives for GATT.
+`MAX_POSITION_RELAY_HOPS = 4` in `BeaconRadio`'s companion object, kept in sync with
+`RelayResponder`'s own private `maxPositionRelayHops` by doc only — same cross-file-constant pattern
+`PositionTracker.PER_HOP_SLACK_SECONDS`/`HopTracker.PER_HOP_SLACK_MS` already use, since there's no
+shared ble-internal type to hang a single source of truth off instead. The relay candidate's
+identity (`senderId:hop:timestampSec`, not the frame's own bytes) is folded into
+`evaluateBroadcastTierAdvertising`'s existing payloadKey so the radio still only restarts when
+something actually changed, this time including "the relay candidate itself changed."
+
+**Real bug found and fixed while wiring the receive side: `ingestBroadcastTierPosition` was reading
+the wrong hop.** `MeshFrameCodec.decode` on a position frame returns `Frame.PositionSealed(groupId,
+hop, sealed)` — an ENVELOPE hop, visible without the group key, which is what every relay on the
+path actually increments (`reframePositionForRelay`'s whole reason for existing). The AES-GCM-sealed
+inner body ALSO carries its own hop field, baked in once by the ORIGINAL sender at seal time and
+frozen forever after — `RelayResponder.ingestOpenedPosition`'s own comment already documents
+choosing the envelope's `frame.hop` over the inner `body.hop` for exactly this reason. `BeaconRadio`'s
+Tier B receive path was using `body.hop` (the frozen inner one) instead — invisible while Tier B was
+single-hop-only (both were always 0, decision 27), but wrong the moment this decision made the
+envelope hop actually vary: every relayed position would have been stored as if it were hop 0, a
+direct fix, defeating `PositionTracker`'s own hop-based staleness/relay-limiting entirely. Fixed to
+match GATT's own established, documented choice — decode the whole `Frame.PositionSealed`, use
+`frame.hop`, not `body.hop`, everywhere `positionTracker.offer` is called. Also now enforces the
+same relay ceiling GATT's receive path already does (`frame.hop >= MAX_POSITION_RELAY_HOPS` is
+dropped) rather than trusting an arbitrarily high envelope hop.
+
+**No dedicated new `BeaconRadio`-level test** — same constraint every Tier B decision so far has
+carried: `BeaconRadio` has no direct unit test file at all (needs real Android BLE APIs). Every
+building block this decision composes is already tested elsewhere and unmodified in its own logic:
+`RelayResponder.selectPositionsToRelay` (`RelayResponderPositionSelectionTest`, including the
+`toPeer` omitted/null case this decision actually uses), `MeshFrameCodec.reframePositionForRelay`/
+`openPosition`'s envelope-vs-inner-hop divergence after a relay (`MeshFrameCodecTest`, "reframe
+PositionForRelay changes only the hop, never the sealed bytes" — the exact property this decision's
+bug fix depends on), and `PositionTracker.offer`'s self-correcting distance-vector semantics
+(`PositionTrackerTest`). 348 tests (unchanged — this decision is pure composition plus one bug fix
+in already-covered call paths, not new pure-JVM-testable logic). detekt clean, both variants
+compile/test/assemble green. **Production code touched:** `BeaconRadio.kt`
+(`relayedPositionFrameForBroadcastTier`, `evaluateBroadcastTierAdvertising`'s slot-choice/payloadKey,
+`ingestBroadcastTierPosition`'s hop-source fix), `MeshProtocol.kt` (doc only — `positionFrame`'s
+class doc updated to describe the relay fallback). **NOT hardware-confirmed** — no multi-device,
+multi-hop-in-range scenario has been tested on real hardware for this path yet.
+
+**What P2 still doesn't carry:** thumbnails and catalogue digests (§5.1's own Tier B payload list —
+thumbnails specifically belongs to the not-yet-started P5 media phase, not P2; catalogue digests is
+P2-scoped but genuinely underdesigned — the existing GATT `CatalogFilter` alone (~256B) doesn't fit
+Tier B's entire ~251B budget, a real tradeoff question rather than a mechanical extension, deferred
+pending that design call). Tier 2/3 hardware gates remain not started for all of P2.
+
+## 33. Position relay hop ceiling raised 4 -> 120, and RadarView's stale-dot fade made hop-aware
+
+User asked directly: `maxPositionRelayHops = 4` should maximize real reach (multi-km, "even 100s of
+km... given the relays are in place and no gap in ranges") rather than stay pinned near this app's
+own 3-8-person group-size scope — a position/presence frame's relay depth isn't actually bounded by
+group membership at all, since ANY phone (member or not) can carry a frame one hop further via the
+blind-relay architecture; a long, unbroken chain of relays can legitimately span far more physical
+distance than the group itself has members.
+
+**Checked first: was 4 ever actually justified?** No — `RelayResponder.kt:59`'s `maxPositionRelayHops
+= 4` had zero documented reasoning anywhere in the codebase or this decision log, unlike nearly every
+other tuned constant here. Best inference: it happened to comfortably cover the stated 3-8 person
+scope (PLAN-v2.md §5.5), never revisited once the blind-relay chain could legitimately span far more
+devices than that.
+
+**The real ceiling: the wire format, not an arbitrary safety margin.** The envelope hop field is a
+single unsigned byte, and `MeshProtocol.UNKNOWN_HOP = 255` is already reserved as a sentinel — so any
+real value has to sit meaningfully below 255. At realistic outdoor BLE range per hop, that caps
+*achievable* reach at tens of km, not hundreds — hundreds of km would need thousands of hops, which
+cannot fit in one byte regardless of the constant's value. Reaching that would need a real wire-format
+break (widening the hop field to 2 bytes) — bigger and riskier than any format change made so far this
+session, since it would land after v0.7.0/0.7.1-dev are already out on real test phones. **User chose
+not to make that break now**, opting for the largest value the current format safely supports instead:
+120, comfortably below the 255 sentinel, shared (by doc only, matching `PositionTracker
+.PER_HOP_SLACK_SECONDS`/`HopTracker.PER_HOP_SLACK_MS`'s precedent) between `RelayResponder
+.maxPositionRelayHops` and `BeaconRadio.MAX_POSITION_RELAY_HOPS` — the latter also reused unchanged
+for opaque (blind-carried) presence custody, which already shared one ceiling with position before
+this change.
+
+**A real precision gap this surfaced: `RadarView`'s stale-dot fade was a flat 180s window,
+independent of hop.** `PositionTracker.effectiveMaxAgeSeconds` already scales a position's real
+eligibility window with hop count (+45s per hop, matching each hop's own independent reconnect-cycle
+delay) — at hop 120 that's over 90 minutes. But `RadarView`'s fade curve capped out at a flat 180s
+(`STALE_FADE_END_SECONDS`), sized back when the practical hop range was 4-8 hops (180-360s). Past 180s,
+every dot — 3 minutes old or 90 minutes old — read identically at the same minimum-alpha "ghost" level,
+losing all precision exactly where a genuinely long relay chain would make it matter most. **Fixed**:
+new `RadarDot.maxAgeSeconds` (per-dot, sourced from `PositionTracker.effectiveMaxAgeSecondsFor(hop)`,
+a new public convenience wrapper avoiding a duplicated 180s literal) replaces the flat constant in the
+fade calculation — a dot now fades relative to its OWN real staleness budget, not an unrelated fixed
+window. All three call sites that construct `RadarDot` (`NavigateScreen`, `HomeScreen`,
+`GroupChatScreen`) updated; `NavigateScreen`'s own `PlacedPeer` intermediate gained the matching field.
+
+350 tests (up from 348: 3 new `PositionTrackerTest` cases for `effectiveMaxAgeSecondsFor`). detekt
+clean, both variants compile/test/assemble green. **Production code touched:** `RelayResponder.kt`/
+`BeaconRadio.kt` (the constant, now documented), `PositionTracker.kt` (`effectiveMaxAgeSecondsFor`),
+`RadarView.kt` (`RadarDot.maxAgeSeconds`, fade calc), `NavigateScreen.kt`/`HomeScreen.kt`/
+`GroupChatScreen.kt` (threading the real per-dot value through). **NOT hardware-confirmed** — no
+long relay chain has been tested on real hardware.
+
+## 34. P2: catalogue digests over the broadcast tier, deliberately fixed-size — the last P2-scoped Tier B payload item
+
+Closes §5.1's Tier B payload table's remaining P2-scoped item (thumbnails belongs to the not-yet-
+started P5 media phase, not P2). Stopped before building this one too: the obvious approach — reuse
+GATT's existing `CatalogFilter.build()`, whose size scales with held item count (`sizeBitsFor
+(itemCount) = (itemCount * 10).coerceIn(64, 4096)`) — would let ANY passive BLE scanner, member or
+not, infer roughly how much content a group holds just from the broadcast filter's byte length, and
+watch that estimate change **over consecutive beacons**. Given this app's actual threat model (a
+hostile state actor scanning during a protest), a rising filter size is a passively-readable "an
+incident is escalating here" signal, obtainable without ever connecting to a device — sharper than
+the abstract "reveals content volume" framing first given, since Tier B beacons are per-group (one
+per rotating group id), so the leak is precise to a single group's location and moment, not blurred
+across every group the way GATT's own combined filter already deliberately is.
+
+**Presented three options; user picked dynamic sizing, accepting the leak** — after being shown the
+concrete cost of the alternative: at a FIXED small size (128 bits, chosen to fit Tier B's budget),
+false-positive rate degrades sharply past this app's own stated common case (`CatalogFilter`'s class
+doc: "tens of items, not hundreds") — ~4.6% at 20 items, ~46% at 50, ~90% at 100 — meaning a fixed
+filter goes nearly USELESS for exactly the busy/escalating-incident case where the security concern
+was sharpest, while a dynamic filter stays close to the tuned ~1% rate at any scale. **User chose
+functionality over closing this specific leak, a deliberate exception weighed case-by-case, not a
+reversal of the standing "stop before shipping new passive-exposure surface" preference** — SOS
+content specifically (decision 29) still got the privacy-preserving path when asked, because that
+leak was sharper (identity) and the cost of avoiding it was lower.
+
+**Design: new `RelayEngine.catalogKeysForGroup(groupId)`** — a per-group sibling of
+`RelayResponder.currentCatalogKeys()` (which deliberately COMBINES every active group for GATT's
+"one filter per connection" design); this one is scoped to a single group, matching Tier B's own
+per-group beacon structure, and must not fold another group's activity in. New `SosDao.idsForGroup`
+added to match `EvidenceDao`'s existing equivalent. `CatalogFilter.build` gained an optional
+`forcedSizeBits` param (used here; GATT's own call sites are unaffected, still item-count-scaled by
+default). `BeaconRadio` caches the built filter per group, keyed on the group's actual held-item SET
+(not a timer or the global `catalogEpoch`, which would rebuild too eagerly for unrelated groups'
+changes) — `CatalogFilter.build` re-randomizes its seed on every call by design (GATT's own anti-
+repeat-false-positive reasoning), which would otherwise look like a changed payload on every
+advertise-check tick, fighting this channel's hard-won "only touch the radio when something real
+changed" discipline (Pass 12-14's history).
+
+**A real bug found and fixed before it shipped: the filter can't just always be attached.**
+Decision 29's position/SOS-content exclusion only fires when actual SOS *content* is present — the
+bare SOS hop-gradient (id+hop, no content) can legitimately coexist with position. That combination,
+maxed, plus a maxed catalog filter totals 274 bytes — genuinely over `BROADCAST_TIER_BUDGET_BYTES`
+(251, promoted from an assumed-not-enforced test-only literal to a real named constant this
+decision, since this is the first time anything needed a RUNTIME check rather than a compile-time-
+provable one). Not assumed safe — found live while computing the real worst-case matrix, the same
+discipline every prior Tier B budget claim in this file has followed. **Fix**: new
+`BeaconRadio.buildBroadcastTierPayload` computes the beacon WITHOUT the filter first, and only
+attaches it if what's left still fits; the filter is the lowest-priority field of the four this
+beacon carries, since a dropped filter costs nothing today (nothing consumes it on receipt yet — see
+next paragraph) while a dropped position or hop-gradient would be a real regression. The OTHER
+achievable combination (SOS content maxed, no position, plus a maxed filter — 199 bytes) fits with
+real margin, confirmed directly in a test alongside the overflow case, not assumed either way.
+
+**Broadcast side only this pass — receive-side consumption is a named follow-up, not silently
+dropped**, same shape decision 29 left its own UI surfacing (closed two decisions later, in decision
+31). The filter is decoded and available (`MeshProtocol.BroadcastTierBeacon.catalogFilter`); nothing
+yet tests a peer's holdings against it or acts on the result (e.g. prioritizing a reconnect).
+
+359 tests (up from 350: `CatalogFilter.forcedSizeBits` coverage, `RelayEngine.catalogKeysForGroup`'s
+per-group scoping, the wire round-trip/malformed-input/budget-overflow cases for the new field).
+detekt clean, both variants compile/test/assemble green. **Production code touched:** `CatalogFilter
+.kt` (`forcedSizeBits`), `Daos.kt` (`SosDao.idsForGroup`), `RelayEngine.kt`
+(`catalogKeysForGroup`), `MeshProtocol.kt` (wire format's fourth optional block,
+`BROADCAST_TIER_BUDGET_BYTES`), `BeaconRadio.kt` (`catalogFilterFrameForBroadcastTier`,
+`buildBroadcastTierPayload`). **NOT hardware-confirmed.**
+
+## 35. The SOS/message split: every message was secretly an emergency alert — a real, not hypothetical, miss
+
+Surfaced while explaining why the SOS broadcast-preview byte cap mattered: this app has never had a
+separate "casual message" concept. `GroupChatScreen`'s ordinary compose box has always called
+`MeshService.sendSos()` — the SAME `SosEntity`, mac scheme, hop-gradient tracking, and
+`IMPORTANCE_HIGH`/`CATEGORY_ALARM` push notification, for every single message, not just genuine
+emergencies. This was the app's original, deliberate design from its earliest build passes (treat
+everything as if it might matter, since a protest-coordination context can't assume most messages
+are casual) — not a bug introduced this session. But it meant every byte-budget decision this whole
+P2 session (decisions 29, 31, 32, 34) was implicitly calibrated against "SOS fires on every message,"
+inflating how often position/content/filter would actually contend for the same Tier B slot, and
+meant the loud alarm notification fired for routine chat too.
+
+**Chosen fix: reuse everything, gate only the alert-specific side effects on one new flag** — not a
+parallel `MessageEntity`/DAO/frame from scratch. New `SosEntity.isAlert: Boolean = false`. The
+storage/relay/catalog-filter pipeline is completely unchanged and unconditional for every message,
+alert or not (this is deliberate: `RelayEngine.catalogKeysForGroup`/`currentCatalogKeys` must keep
+including everything, or normal message sync breaks). Only three things gate on `isAlert == true`:
+- **The SOS hop-gradient.** `MeshService.sendSos`'s `hopTracker.markSosOrigin` (our own authored
+  alert) and `RelayResponder.handleSos`'s `hopTracker.considerDirectHop` (a received one) both now
+  check `isAlert` first. Every OTHER path that ever feeds this table (`BeaconRadio`'s Tier B receive
+  side, decision 26/28) only ever propagates a hop/id pair that already passed through one of these
+  two gates upstream — so the invariant "this table only ever holds alert-flagged ids" holds
+  transitively across the whole mesh without needing to re-check it at every hop.
+- **The alarm-style notification.** `RelayResponder.handleSos`'s `onSosReceived(frame.sos,
+  groupName)` call is now inside the same `isAlert` check as the hop-gradient feed above.
+- **The Tier B broadcast content preview.** No code change needed here at all — `BeaconRadio
+  .sosContentFor` sources exclusively from `hopTracker.bestActiveSos(groupId)`, which (per the first
+  bullet) can now only ever name an alert-flagged id.
+
+**Wire format**: `Frame.Sos` gains an `isAlert` byte (`MeshFrameCodec.VERSION` 4 -> 5, same
+established "bump when a frame type's own shape gains a field" precedent as v4's own hop-byte
+addition — this is a shared version byte across every frame type, a blunt but simple and safe choice
+given the only devices in the field are the user's own test phones, freshly reflashed each round,
+same reasoning as decision 28's earlier format break). `sosMacInput` folds `isAlert` in as an
+authenticated byte — without this, a relay could silently flip an emergency into a routine message
+(suppressing a real alert) or a routine message into an emergency (manufacturing a false alarm),
+neither detectable by a receiver. `RelayEngine.createSos(groupId, text, isAlert = false)` — the
+default keeps every existing call site (aside from the two updated below) behaviorally identical.
+`AppDatabase` version 7 -> 8 (`fallbackToDestructiveMigration`, already this app's established,
+deliberate pre-1.0 policy — nothing worth preserving across a schema change yet).
+
+**UI**: `GroupChatScreen`'s existing Send action stays the default (`isAlert` unset — quiet). A NEW,
+separate, always-Danger-tinted "Send as SOS" action sits beside it — deliberately its OWN control,
+not a mode toggle on the same button, so raising a real emergency is never a matter of remembering to
+flip a setting mid-crisis. `SosComposeScreen` (the multi-group broadcast composer) is inherently
+`isAlert = true` throughout — its whole purpose already was broadcasting an emergency. Both compose
+screens show a live byte counter against `MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES`, relevant to the
+alert path specifically (a quiet message never competes for the Tier B preview slot at all).
+`GroupChatScreen`'s feed (`FeedRow`) now visually marks `isAlert` items in `AppColors.Danger` (the
+one color this app reserves exclusively for SOS) with an inline "SOS" label — previously every
+message rendered identically regardless of what it actually was.
+
+**Also landed in the same pass: the SOS broadcast-preview cap trimmed 100 -> 65 bytes** —
+`"SOS: "` (5 bytes) plus roughly 60 characters, matching what a genuine short, keyword-style
+emergency alert ("medical emergency, gate 3") actually needs, now that this cap only ever governs
+real emergencies rather than arbitrary chat content. Recomputed worst-case Tier B budget arithmetic
+throughout `MeshProtocol.kt`'s doc and `MeshProtocolBroadcastTierTest.kt`'s assertions accordingly
+(SOS-content-plus-filter worst case: 199 bytes, down from 234 at the old 100-byte cap).
+
+367 tests (up from 359: wire round-trip + mac-sensitivity coverage for `isAlert` in
+`MeshFrameCodecTest`, `ingestSos` preserving `isAlert` through relay in `RelayEngineTest`). No new
+test for the `isAlert`-gating decision logic itself in `RelayResponder.handleSos`/`MeshService
+.sendSos` — both hit the same documented Android Keystore/Robolectric wall as every other
+`authOk`-gated handler in this file (`RelayResponderSenderIdentityTest`'s own class doc), and the
+gating itself is a trivial conditional wrap around already-covered calls, not new decision logic
+worth extracting into its own pure function the way `checkSenderKeyPin`/`signatureCheckPasses` were.
+detekt clean, both variants compile/test/assemble green. **Production code touched:** `Entities.kt`
+(`SosEntity.isAlert`), `AppDatabase.kt` (v8), `MeshFrameCodec.kt` (`VERSION` 5, `sosMacInput`,
+`encodeSos`/`decodeSos`), `RelayEngine.kt` (`createSos`), `MeshService.kt` (`sendSos`),
+`RelayResponder.kt` (`handleSos`'s gating), `MeshProtocol.kt` (the 65-byte cap),
+`GroupChatScreen.kt`/`SosComposeScreen.kt` (UI). **NOT hardware-confirmed** — the wire-format bump
+means this needs its own fresh test round; no v0.7.x-era device can talk to a build past this point
+without updating.
+

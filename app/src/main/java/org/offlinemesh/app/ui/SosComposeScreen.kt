@@ -13,6 +13,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
+import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.data.GroupRepository
 
@@ -51,6 +52,25 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
                 label = { Text("Message (optional)") }, modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp)
             )
+            // Everything sent from this screen is isAlert = true (decision 35, docs/DECISIONS.md),
+            // so the Tier B broadcast-preview cap is always relevant here, unlike GroupChatScreen's
+            // shared compose box.
+            if (message.isNotBlank()) {
+                val alertBytes = remember(message) { message.toByteArray(Charsets.UTF_8).size }
+                val overAlertPreviewLimit = alertBytes > MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES
+                Text(
+                    if (overAlertPreviewLimit) {
+                        "$alertBytes bytes — only a hop-count alert shows instantly; the message " +
+                            "itself still arrives once connected"
+                    } else {
+                        "$alertBytes / ${MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES} bytes — " +
+                            "fits the instant broadcast preview"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (overAlertPreviewLimit) AppColors.Warning else AppColors.OnSurfaceMuted,
+                    modifier = Modifier.padding(top = 4.dp)
+                )
+            }
             Spacer(Modifier.height(24.dp))
             Text("Send to", style = MaterialTheme.typography.titleSmall, color = AppColors.OnSurfaceMuted)
             Spacer(Modifier.height(8.dp))
@@ -84,7 +104,7 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
                 onClick = {
                     scope.launch {
                         for (groupId in selected) {
-                            meshService?.sendSos(groupId, message.ifBlank { "SOS" })
+                            meshService?.sendSos(groupId, message.ifBlank { "SOS" }, isAlert = true)
                         }
                         onSent()
                     }

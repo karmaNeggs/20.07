@@ -53,6 +53,16 @@ data class SosEntity(
     // carry (see MeshFrameCodec.Frame.PositionSealed.hop, added v0.4.0/decision 8) — HopTracker
     // must never derive a hop count from ttl consumed again; see docs/DECISIONS.md decision 16.
     val hop: Int = 0,
+    // Decision 35 (docs/DECISIONS.md): every message in this app is a SosEntity — there was never a
+    // separate "casual chat" type — but until now every single one also triggered the loud, alarm-
+    // style notification and the Tier B broadcast-tier hop-gradient/content-preview treatment,
+    // which only makes sense for a genuine emergency. This is the ONE new field that splits the
+    // two: false (default — the normal "Send" action) is a quiet message, relayed and catalog-
+    // filter-synced exactly like today but with none of the alert-only side effects; true (a
+    // dedicated SOS action) gets all of them, same as every SosEntity did before this decision.
+    // Authenticated by [mac] (part of sosMacInput's covered bytes) so a relay can't flip it
+    // undetected in either direction — silencing a real emergency or manufacturing a false alarm.
+    val isAlert: Boolean = false,
     // HMAC(group_key) over the immutable fields (everything but ttl/hop). A member verifies this
     // before ever showing or acting on the SOS, so a phone without the key can't inject a fake
     // emergency. Stored (not just recomputed) so a non-member blind carrier can relay it onward
@@ -66,7 +76,7 @@ data class SosEntity(
     // treated differently.
     val signature: ByteArray? = null
 ) {
-    private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl, hop)
+    private fun scalars() = listOf(id, groupId, senderId, senderIsMe, message, timestamp, ttl, hop, isAlert)
 
     override fun equals(other: Any?): Boolean {
         if (this === other) return true

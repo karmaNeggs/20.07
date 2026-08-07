@@ -21,6 +21,7 @@ import androidx.compose.material.icons.filled.Badge
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -38,7 +39,9 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.ble.MeshFrameCodec
+import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
+import org.offlinemesh.app.ble.PositionTracker
 import org.offlinemesh.app.ble.RelayEngine
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.EvidenceEntity
@@ -95,10 +98,11 @@ fun GroupChatScreen(
         val me = myLocation ?: return@remember emptyList()
         svc.positionTracker.forGroup(groupId).mapNotNull { (_, record) ->
             val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+            val maxAgeSeconds = PositionTracker.effectiveMaxAgeSecondsFor(record.hop).toFloat()
             placePeerOnRadar(
                 me.latitude, me.longitude, me.accuracy,
                 record.lat, record.lon, record.accuracyM, heading
-            )?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
+            )?.let { RadarDot(groupColor, it.distanceMeters, it.screenAngleDegrees, ageSeconds, maxAgeSeconds) }
         }
     }
 
@@ -180,6 +184,27 @@ fun GroupChatScreen(
                 item { Spacer(Modifier.height(4.dp)) }
             }
 
+            // Decision 35 (docs/DECISIONS.md): every message here is still the same SosEntity/
+            // relay pipeline underneath — this counter only matters for the SOS action below, since
+            // a quiet (non-alert) message never competes for Tier B's broadcast-preview budget at
+            // all. Shown only once there's text to judge, so an empty compose row stays uncluttered.
+            if (messageText.isNotBlank()) {
+                val alertBytes = remember(messageText) { messageText.toByteArray(Charsets.UTF_8).size }
+                val overAlertPreviewLimit = alertBytes > MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES
+                Text(
+                    if (overAlertPreviewLimit) {
+                        "$alertBytes bytes — if sent as SOS, only shows a hop-count alert instantly; " +
+                            "the message itself still arrives once connected"
+                    } else {
+                        "$alertBytes / ${MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES} bytes — " +
+                            "fits the instant SOS broadcast preview"
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (overAlertPreviewLimit) AppColors.Warning else AppColors.OnSurfaceMuted,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -200,6 +225,8 @@ fun GroupChatScreen(
                     placeholder = { Text("Type message or share evidence") }
                 )
 
+                // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B
+                // hop-gradient/preview, just relayed and catalog-filter-synced like everything else.
                 Box(
                     Modifier.size(44.dp).clip(CircleShape)
                         .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
@@ -211,6 +238,23 @@ fun GroupChatScreen(
                         },
                     contentAlignment = Alignment.Center
                 ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted) }
+
+                // The dedicated alert action (isAlert = true) — decision 35: only this button feeds
+                // the SOS hop-gradient, the Tier B broadcast preview, and the loud notification.
+                // Deliberately its own always-Danger-tinted control (not a mode toggle on the same
+                // Send button) so raising a real SOS is never a matter of remembering to flip a
+                // setting mid-crisis.
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape)
+                        .background(AppColors.Danger)
+                        .clickable(enabled = messageText.isNotBlank()) {
+                            scope.launch {
+                                meshService?.sendSos(groupId, messageText, isAlert = true)
+                                messageText = ""
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) { Icon(Icons.Filled.Warning, contentDescription = "Send as SOS", tint = Color.White) }
             }
 
             TextButton(
@@ -235,9 +279,11 @@ fun GroupChatScreen(
                 TextButton(onClick = {
                     scope.launch {
                         repo.dismantleGroup(groupId)
-                        // PositionTracker is in-memory, owned by MeshService, not Room - dismantleGroup
-                        // can't reach it itself (see PositionTracker.clearForGroup's own doc, decision 30).
+                        // PositionTracker/BroadcastSosPreview are in-memory, owned by MeshService, not
+                        // Room - dismantleGroup can't reach them itself (see PositionTracker
+                        // .clearForGroup's own doc, decision 30).
                         meshService?.positionTracker?.clearForGroup(groupId)
+                        meshService?.broadcastSosPreview?.clearForGroup(groupId)
                         showDeleteDialog = false
                         onDeleted()
                     }
@@ -329,18 +375,23 @@ private fun FeedRow(
     fun label(senderId: String, isMe: Boolean): String =
         if (isMe) "you" else nicknameMap[senderId]?.takeIf { it.isNotBlank() } ?: senderId.take(8)
 
-    val (sender, isMe, body, time) = when (item) {
-        is FeedItem.Message -> Quad(
+    val row = when (item) {
+        is FeedItem.Message -> Quint(
             label(item.sos.senderId, item.sos.senderIsMe),
-            item.sos.senderIsMe, item.sos.message, item.sos.timestamp
+            item.sos.senderIsMe, item.sos.message, item.sos.timestamp, item.sos.isAlert
         )
-        is FeedItem.File -> Quad(
+        is FeedItem.File -> Quint(
             label(item.evidence.senderId, item.evidence.senderIsMe),
             item.evidence.senderIsMe,
             if (item.evidence.complete) "File received — tap to view" else "Receiving file: ${item.receivedChunks} / ${item.evidence.totalChunks} chunks",
-            item.evidence.timestamp
+            item.evidence.timestamp, false
         )
     }
+    val sender = row.sender
+    val isMe = row.isMe
+    val body = row.body
+    val time = row.time
+    val isAlert = row.isAlert
     val viewable = item is FeedItem.File && item.evidence.complete
     val timeText = remember(time) { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time)) }
     Column(
@@ -364,17 +415,27 @@ private fun FeedRow(
                 color = if (isMe) AppColors.OnSurfaceMuted else groupColor,
                 fontWeight = FontWeight.SemiBold
             )
+            // Decision 35 (docs/DECISIONS.md): the one visual marker distinguishing a flagged
+            // emergency from an ordinary quiet message in the feed — AppColors.Danger is reserved
+            // for exactly this, nothing else in this app's palette uses it.
+            if (isAlert) {
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "SOS", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall,
+                    color = AppColors.Danger, fontWeight = FontWeight.Bold
+                )
+            }
         }
         Text(
             body,
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.bodyMedium,
-            color = AppColors.OnSurface
+            color = if (isAlert) AppColors.Danger else AppColors.OnSurface
         )
     }
 }
 
-private data class Quad(val sender: String, val isMe: Boolean, val body: String, val time: Long)
+private data class Quint(val sender: String, val isMe: Boolean, val body: String, val time: Long, val isAlert: Boolean)
 
 /** Opens a completed evidence file in whatever app the user has for its mime type (gallery, photo
  *  viewer) — the file itself never leaves app-private storage; [FileProvider] only grants the

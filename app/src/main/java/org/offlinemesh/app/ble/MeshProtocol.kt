@@ -20,6 +20,16 @@ object MeshProtocol {
     const val UNKNOWN_HOP: Int = 255
     const val ROTATING_ID_LEN: Int = 6
 
+    /** BLE extended advertising's in-place-update budget — see [encodeBroadcastTierBeacon]'s own
+     *  doc for the full worst-case arithmetic this bounds. Previously only checked by tests
+     *  (individual field ceilings were proven, per achievable combination, to always sum under this
+     *  — see decisions 26-29); promoted to a real named constant for decision 34, once the catalogue
+     *  filter turned out to need an actual RUNTIME check (`BeaconRadio.evaluateBroadcastTierAdvertising`
+     *  drops the filter, not position or the SOS hop-gradient, when the combination wouldn't fit —
+     *  see that function's own doc for why position+SOS-id/hop-without-content+filter is the one
+     *  combination that can overrun this on its own). */
+    const val BROADCAST_TIER_BUDGET_BYTES = 251
+
     private val UTF8 = StandardCharsets.UTF_8
     private const val UNSIGNED_BYTE_MASK = 0xFF
     private const val UNSIGNED_SHORT_MASK = 0xFFFF
@@ -78,12 +88,24 @@ object MeshProtocol {
     /** Absolute ceiling on [SosAlert.Content.message] — deliberately much smaller than
      *  [MeshFrameCodec.MAX_SOS_MESSAGE_BYTES] (2000): this is a broadcast preview competing for
      *  space with everything else in a ~251B in-place update, not the authoritative GATT record,
-     *  which has no such pressure. 120 bytes is enough for a short, actionable alert ("medical
-     *  emergency, gate 3 stairwell") without crowding out the rest of the payload — see
+     *  which has no such pressure. Trimmed 120 -> 100 (decision 34) -> 65 (decision 35,
+     *  `docs/DECISIONS.md`) — roughly `"SOS: "` (5 bytes) plus 60 characters, matching the actual
+     *  shape a genuine emergency alert needs now that decision 35 splits alert-flagged `SosEntity`s
+     *  from ordinary quiet messages: "medical emergency, gate 3" fits easily, and a short,
+     *  unambiguous keyword-style alert is exactly what this preview is for — see
      *  [encodeBroadcastTierBeacon]'s own doc for the full worst-case budget arithmetic. A message
      *  longer than this is simply not attached (see `BeaconRadio`'s sourcing logic) — the hop-
      *  gradient-only [SosAlert] still goes out either way. */
-    const val MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES = 120
+    const val MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES = 65
+
+    /** Absolute ceiling on [encodeBroadcastTierBeacon]'s optional [BroadcastTierBeacon.catalogFilter]
+     *  block — the exact worst-case wire size of `MeshFrameCodec.encodeCatalogFilter` at a FIXED
+     *  128-bit filter (decision 34, `docs/DECISIONS.md`): type(1)+version(1)+seed(8)+sizeBits(2)+
+     *  bitsLenPrefix(2)+bits(16) = 30. Fixed, not item-count-scaled like the GATT `CatalogFilter`'s
+     *  own dynamic sizing — see `CatalogFilter.build`'s `forcedSizeBits` param doc for why: a size
+     *  that scales with a group's held item count would let a passive scanner infer roughly how
+     *  much content a group holds, and watch that change over time, without ever connecting. */
+    const val MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES = 30
 
     /** Fixed HMAC-SHA256 output length — see [MeshFrameCodec.broadcastSosMacInput]'s doc for what
      *  this authenticates and, critically, what it deliberately leaves out. */
@@ -128,11 +150,14 @@ object MeshProtocol {
      * beacon already carries [rotatingGroupId] separately), so a receiver decodes it with the exact
      * same `MeshFrameCodec.decode`/`openPosition` pipeline the GATT path already uses, no new
      * crypto or framing code, and inherits [MeshFrameCodec.encodePosition]'s nonce-safety
-     * engineering (see its own doc) for free. Deliberately single-hop only: a Tier B receiver does
-     * NOT re-broadcast a position it heard from someone else — extended advertising has no natural
-     * "relay" the way a GATT store-and-forward blind carrier does, so multi-hop position propagation
-     * still goes through the existing GATT path unchanged; Tier B only ever carries the
-     * broadcaster's OWN current fix (hop 0).
+     * engineering (see its own doc) for free. Single-hop from the broadcaster's OWN current fix
+     * (hop 0) whenever it has one — the highest-value thing it can put in this one slot, since
+     * nothing else can source it. When it doesn't (no GPS fix this cycle), decision 32
+     * (`docs/DECISIONS.md`) has it relay the closest position it's holding for someone else instead
+     * of leaving the slot empty (`BeaconRadio.relayedPositionFrameForBroadcastTier`, reusing
+     * `MeshFrameCodec.reframePositionForRelay` — same "forward the sealed bytes verbatim, only the
+     * envelope hop changes" approach GATT relay already used), which is what makes Tier B position
+     * propagation genuinely multi-hop rather than reaching only the origin's own direct neighbours.
      *
      * [activeSos], when present, is `HopTracker.bestActiveSos(groupId)`'s result at encode time —
      * the nearest known active SOS (ours or a relayed one we're holding), by its REAL id, not a
@@ -155,24 +180,48 @@ object MeshProtocol {
      * arrives over GATT once connected, which `BeaconRadio`'s existing blind-carrier policy already
      * attempts eagerly for every heard device, member or not — this is a preview, not the record.
      *
-     * All three optional pieces (position, sos id/hop, sos content) are ALWAYS length-prefixed in
-     * the encoded output (a zero length means "absent"), rather than "trailing bytes present or
-     * not" — this is what lets independently-optional variable-length fields coexist unambiguously.
-     * Worst-case total, computed not assumed: header(8) + positionLen(2)+
+     * [catalogFilter], when present (decision 34, `docs/DECISIONS.md`), is `MeshFrameCodec.
+     * encodeCatalogFilter`'s FULL output for a FIXED-size (not item-count-scaled)
+     * [CatalogFilter] over this one group's own held SOS/evidence-header/nickname keys
+     * (`RelayEngine.catalogKeysForGroup`) — see [MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES]'s own doc
+     * for why fixed, not dynamic like GATT's own filter. `BeaconRadio` caches the built filter per
+     * group and only rebuilds (re-seeding) it when that group's actual held item set changes, not
+     * on every advertise-check tick — `CatalogFilter.build` re-randomizes its seed on every call by
+     * design, which would otherwise look like a changed payload every cycle and fight this
+     * channel's own "only touch the radio when something real changed" discipline. Not yet consumed
+     * on receipt by anything (decoded and available, no behavior wired to it yet) — a named
+     * follow-up, not silently dropped, same shape decision 29 originally left for its own content
+     * preview's UI surfacing (closed two decisions later, in decision 31).
+     *
+     * All four optional pieces (position, sos id/hop, sos content, catalog filter) are ALWAYS
+     * length-prefixed in the encoded output (a zero length means "absent"), rather than "trailing
+     * bytes present or not" — this is what lets independently-optional variable-length fields
+     * coexist unambiguously. Worst-case total, computed not assumed: header(8) + positionLen(2)+
      * [MAX_BROADCAST_TIER_POSITION_FRAME_BYTES](180) + sosIdLen(1)+
      * [MAX_BROADCAST_TIER_SOS_ID_BYTES](48)+sosHop(1) + msgLen(2)+
-     * [MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES](120)+timestamp(8)+mac(32) = 400 bytes — OVER the ~251B
-     * budget if all three were maxed simultaneously. In practice this never happens: `BeaconRadio`
-     * deliberately omits [positionFrame] whenever [activeSos] carries content (see its own sourcing
-     * logic) — an emergency preview takes priority over a routine position refresh for however many
-     * seconds the SOS stays active. With position omitted, worst case is header(8) + positionLen-
-     * absent(2) + sosIdLen(1)+48+1 + msgLen(2)+120+8+32 = 222 bytes, comfortably inside budget —
-     * checked directly in a test, not assumed.
+     * [MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES](65)+timestamp(8)+mac(32) + catalogFilterLen(2)+
+     * [MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES](30) = 379 bytes — OVER [BROADCAST_TIER_BUDGET_BYTES]
+     * if everything were maxed simultaneously. In practice position and SOS content never coexist:
+     * `BeaconRadio` deliberately omits [positionFrame] whenever [activeSos] carries content (see its
+     * own sourcing logic) — an emergency preview takes priority over a routine position refresh for
+     * however many seconds the SOS stays active. That still leaves TWO achievable combinations that
+     * can each exceed budget on their own once the filter is added: position + SOS id/hop WITHOUT
+     * content (decision 29's exclusion only fires when actual content is present, not for the bare
+     * hop-gradient) totals header(8)+positionLen(2)+180+sosIdLen(1)+48+1+msgLen-absent(2)+
+     * catalogFilterLen(2)+30 = 274 bytes; SOS content maxed (no position) totals header(8)+
+     * positionLen-absent(2)+sosIdLen(1)+48+1+msgLen(2)+65+8+32+catalogFilterLen(2)+30 = 199 bytes.
+     * The first genuinely overruns [BROADCAST_TIER_BUDGET_BYTES] — found live while building this
+     * (decision 34), not assumed safe — so the catalog filter is the lowest-priority field of the
+     * four: `BeaconRadio.evaluateBroadcastTierAdvertising` computes the beacon WITHOUT it first and
+     * only attaches it if what's left still fits, dropping the filter (never position or the SOS
+     * hop-gradient) on a cycle where it wouldn't. A dropped filter costs nothing today (nothing
+     * consumes it yet — see [catalogFilter]'s own doc); a dropped position or hop-gradient would be
+     * a real regression.
      */
     // LongParameterList: wire-protocol scalars/blocks, matching MeshFrameCodec's own established
-    // pattern. CyclomaticComplexMethod: three independent optional blocks (position, sos id/hop,
-    // sos content), each with its own eligibility check - same shape as decodeBroadcastTierBeacon's
-    // own matching suppress below, for the same reason.
+    // pattern. CyclomaticComplexMethod: four independent optional blocks (position, sos id/hop, sos
+    // content, catalog filter), each with its own eligibility check - same shape as
+    // decodeBroadcastTierBeacon's own matching suppress below, for the same reason.
     @Suppress("LongParameterList", "CyclomaticComplexMethod")
     fun encodeBroadcastTierBeacon(
         type: Byte,
@@ -180,6 +229,7 @@ object MeshProtocol {
         presenceHop: Int,
         positionFrame: ByteArray? = null,
         activeSos: SosAlert? = null,
+        catalogFilter: ByteArray? = null,
     ): ByteArray {
         val includePosition = positionFrame != null && positionFrame.size <= MAX_BROADCAST_TIER_POSITION_FRAME_BYTES
         val sosIdBytes = activeSos?.id?.toByteArray(UTF8)
@@ -189,12 +239,16 @@ object MeshProtocol {
         val msgBytes = content?.message?.toByteArray(UTF8)
         val includeContent = includeSos && msgBytes != null && msgBytes.isNotEmpty() &&
             msgBytes.size <= MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES && content.mac.size == MAC_LEN
+        val includeCatalogFilter = catalogFilter != null &&
+            catalogFilter.size <= MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES
         val headerLen = 1 + ROTATING_ID_LEN + 1
-        // header + positionLen prefix + sosIdLen prefix + msgLen prefix, all always present
-        var size = headerLen + 2 + 1 + 2
+        // header + positionLen prefix + sosIdLen prefix + msgLen prefix + catalogFilterLen prefix,
+        // all always present
+        var size = headerLen + 2 + 1 + 2 + 2
         if (includePosition) size += positionFrame!!.size
         if (includeSos) size += sosIdBytes!!.size + 1 // + hop byte
         if (includeContent) size += msgBytes!!.size + Long.SIZE_BYTES + MAC_LEN
+        if (includeCatalogFilter) size += catalogFilter!!.size
         val buf = ByteBuffer.allocate(size)
         buf.put(type)
         buf.put(rotatingGroupId.copyOf(ROTATING_ID_LEN))
@@ -212,6 +266,8 @@ object MeshProtocol {
             buf.putLong(content.timestamp)
             buf.put(content.mac)
         }
+        buf.putShort(if (includeCatalogFilter) catalogFilter!!.size.toShort() else 0)
+        if (includeCatalogFilter) buf.put(catalogFilter!!)
         return buf.array()
     }
 
@@ -221,14 +277,16 @@ object MeshProtocol {
         val presenceHop: Int,
         val positionFrame: ByteArray? = null,
         val activeSos: SosAlert? = null,
+        val catalogFilter: ByteArray? = null,
     )
 
-    // ReturnCount/CyclomaticComplexMethod: malformed-input guard clauses for three independent
+    // ReturnCount/CyclomaticComplexMethod: malformed-input guard clauses for four independent
     // optional blocks - same reasoning as encodeBroadcastTierBeacon's own matching suppress above.
     @Suppress("ReturnCount", "CyclomaticComplexMethod")
     fun decodeBroadcastTierBeacon(bytes: ByteArray): BroadcastTierBeacon? {
         val headerLen = 1 + ROTATING_ID_LEN + 1
-        if (bytes.size < headerLen + 2 + 1 + 2) return null // header + all three always-present length prefixes
+        // header + all four always-present length prefixes
+        if (bytes.size < headerLen + 2 + 1 + 2 + 2) return null
         val type = bytes[0]
         val rid = bytes.copyOfRange(1, 1 + ROTATING_ID_LEN)
         val pHop = bytes[1 + ROTATING_ID_LEN].toInt() and UNSIGNED_BYTE_MASK
@@ -260,7 +318,13 @@ object MeshProtocol {
             SosAlert.Content(message, timestamp, mac)
         } else null
         val activeSos = sosId?.let { SosAlert(it, sosHop, content) }
-        return BroadcastTierBeacon(type, rid, pHop, positionFrame, activeSos)
+        if (buf.remaining() < 2) return null // catalogFilterLen prefix itself missing — malformed
+        val catalogFilterLen = buf.short.toInt() and UNSIGNED_SHORT_MASK
+        if (catalogFilterLen > MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES || buf.remaining() < catalogFilterLen) {
+            return null
+        }
+        val catalogFilter = if (catalogFilterLen > 0) ByteArray(catalogFilterLen).also { buf.get(it) } else null
+        return BroadcastTierBeacon(type, rid, pHop, positionFrame, activeSos, catalogFilter)
     }
 
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —

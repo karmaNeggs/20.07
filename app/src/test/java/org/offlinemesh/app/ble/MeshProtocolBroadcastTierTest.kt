@@ -7,16 +7,20 @@ import org.junit.Test
 
 /**
  * Tier 1: [MeshProtocol.encodeBroadcastTierBeacon]/[MeshProtocol.decodeBroadcastTierBeacon] — the
- * Tier B (PLAN-v2.md §5.1) wire format, decisions 26-28 (`docs/DECISIONS.md`). Round-trip and
+ * Tier B (PLAN-v2.md §5.1) wire format, decisions 26-29 and 34 (`docs/DECISIONS.md`). Round-trip and
  * malformed-input coverage, same discipline as every other frame codec in this app even though this
  * one is new and small — a beacon payload is attacker-reachable (any nearby radio, no auth gate at
  * the decode layer) so decode() must never throw on truncated/garbage bytes.
  *
  * Rewritten for decision 28: [MeshProtocol.encodeBeacon]'s `sosHop` field was dropped from this
  * format (confirmed dead — `grep`'d, never read by any receiver, legacy or Tier B) and replaced by
- * an [MeshProtocol.SosAlert] block keyed on the real SOS id, not a rough aggregate. Both the
- * position and SOS blocks are now ALWAYS length-prefixed in the encoded output (zero length means
- * absent), which is what lets two independently-optional variable-length fields coexist.
+ * an [MeshProtocol.SosAlert] block keyed on the real SOS id, not a rough aggregate. All four blocks
+ * (position, sos id/hop, sos content, and — decision 34 — catalog filter) are ALWAYS length-prefixed
+ * in the encoded output (zero length means absent), which is what lets independently-optional
+ * variable-length fields coexist. The catalog filter is the one field that genuinely can't just
+ * always be attached, though — see the "TOGETHER overrun the budget" test below for the real
+ * combination (position + bare SOS hop-gradient, no content) that forced a runtime, not just a
+ * compile-time-assumed, size check in `BeaconRadio`.
  */
 class MeshProtocolBroadcastTierTest {
 
@@ -170,7 +174,7 @@ class MeshProtocolBroadcastTierTest {
     }
 
     @Test
-    fun `worst-case position-plus-hop-gradient payload (no content) stays within the 251B advertising budget`() {
+    fun `worst-case position-plus-hop-gradient payload (no content, no filter) stays within the 251B budget`() {
         val maxPosition = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_POSITION_FRAME_BYTES)
         val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
@@ -179,10 +183,29 @@ class MeshProtocolBroadcastTierTest {
         )
         // BLE extended advertising's in-place-update budget - see encodeBroadcastTierBeacon's own
         // doc for the worst-case arithmetic this is checking directly rather than assuming.
-        val extendedAdvertisingInPlaceUpdateBudget = 251
-        assertEquals(242, encoded.size)
-        assert(encoded.size <= extendedAdvertisingInPlaceUpdateBudget) {
+        assertEquals(244, encoded.size)
+        assert(encoded.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
             "worst-case Tier B beacon (${encoded.size}B) must fit the ~251B in-place-update budget"
+        }
+    }
+
+    @Test
+    fun `position plus hop-gradient plus a maxed catalog filter TOGETHER overrun the budget`() {
+        // The real combination decision 34 (docs/DECISIONS.md) found live while building the Tier B
+        // catalogue filter: decision 29's position/SOS-content exclusion does NOT cover the bare
+        // hop-gradient (id+hop, no content), so this combination is achievable in production and
+        // does overrun BROADCAST_TIER_BUDGET_BYTES on its own — this is exactly why BeaconRadio
+        // must decide whether the filter fits at runtime rather than assuming it always does.
+        val maxPosition = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_POSITION_FRAME_BYTES)
+        val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
+        val maxFilter = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = maxPosition,
+            activeSos = MeshProtocol.SosAlert(maxSosId, 1), catalogFilter = maxFilter,
+        )
+        assertEquals(274, encoded.size)
+        assert(encoded.size > MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
+            "this combination is expected to overrun the budget — BeaconRadio must never send it as-is"
         }
     }
 
@@ -262,7 +285,7 @@ class MeshProtocolBroadcastTierTest {
     }
 
     @Test
-    fun `worst-case payload with content but no position (BeaconRadio's own priority trade) stays within budget`() {
+    fun `worst-case payload with content but no position, no filter (BeaconRadio's priority trade) fits budget`() {
         val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
         val maxMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES)
         val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = ByteArray(32))
@@ -270,10 +293,81 @@ class MeshProtocolBroadcastTierTest {
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = null,
             activeSos = MeshProtocol.SosAlert(maxSosId, 1, content),
         )
-        val extendedAdvertisingInPlaceUpdateBudget = 251
-        assertEquals(222, encoded.size)
-        assert(encoded.size <= extendedAdvertisingInPlaceUpdateBudget) {
+        assertEquals(169, encoded.size)
+        assert(encoded.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
             "worst-case content-bearing Tier B beacon (${encoded.size}B) must fit the ~251B budget"
         }
+    }
+
+    @Test
+    fun `worst-case content-bearing payload PLUS a maxed catalog filter still fits budget`() {
+        // Unlike the position+hop-gradient+filter combination above, this one DOES fit — decision
+        // 34's own reasoning for why the filter only needs to be dropped in the other case, not
+        // this one.
+        val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
+        val maxMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES)
+        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = ByteArray(32))
+        val maxFilter = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = null,
+            activeSos = MeshProtocol.SosAlert(maxSosId, 1, content), catalogFilter = maxFilter,
+        )
+        assertEquals(199, encoded.size)
+        assert(encoded.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
+            "worst-case content-bearing Tier B beacon plus a maxed filter (${encoded.size}B) must still fit"
+        }
+    }
+
+    // ---------- catalogFilter (decision 34) ----------
+
+    @Test
+    fun `catalogFilter round-trips verbatim alongside the other header fields`() {
+        val fakeFilter = ByteArray(30) { (it * 3).toByte() } // stand-in for a real encodeCatalogFilter output
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 1, catalogFilter = fakeFilter,
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)
+
+        assertEquals(1, decoded?.presenceHop)
+        assertArrayEquals(fakeFilter, decoded?.catalogFilter)
+        assertNull(decoded?.positionFrame)
+        assertNull(decoded?.activeSos)
+    }
+
+    @Test
+    fun `catalogFilter coexists with position and activeSos content without interfering`() {
+        val fakeFrame = ByteArray(150) { it.toByte() }
+        val fakeFilter = ByteArray(20) { (it * 5).toByte() }
+        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(32))
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 2, positionFrame = fakeFrame,
+            activeSos = MeshProtocol.SosAlert("sos-1", 0, content), catalogFilter = fakeFilter,
+        )
+        val decoded = MeshProtocol.decodeBroadcastTierBeacon(encoded)
+
+        assertArrayEquals(fakeFrame, decoded?.positionFrame)
+        assertEquals("help", decoded?.activeSos?.content?.message)
+        assertArrayEquals(fakeFilter, decoded?.catalogFilter)
+    }
+
+    @Test
+    fun `catalogFilter past the size ceiling is silently omitted, not truncated into a corrupt bitmap`() {
+        val oversized = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES + 1)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, catalogFilter = oversized,
+        )
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded)?.catalogFilter)
+        val noOptionalBlocks = MeshProtocol.encodeBroadcastTierBeacon(MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0)
+        assertEquals(noOptionalBlocks.size, encoded.size)
+    }
+
+    @Test
+    fun `decode rejects a catalogFilter length prefix that overruns the actual bytes`() {
+        val fakeFilter = ByteArray(20)
+        val encoded = MeshProtocol.encodeBroadcastTierBeacon(
+            MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, catalogFilter = fakeFilter,
+        )
+        // Truncate after the length prefix claims 20 bytes are coming, but only leave 5.
+        assertNull(MeshProtocol.decodeBroadcastTierBeacon(encoded.copyOf(encoded.size - 15)))
     }
 }

@@ -67,6 +67,13 @@ class BeaconRadio(
     // signing key RelayResponder's own positionFramesToPush already uses, just sourced here too so
     // BeaconRadio doesn't need a RelayResponder reference for this one additive feature.
     private val positionTracker: PositionTracker,
+    // SOS content preview cache (decision 29/30) - same reasoning: additive, single-feature
+    // dependency rather than bundled into a DTO, matching positionTracker's own placement here.
+    private val broadcastSosPreview: BroadcastSosPreview,
+    // Tier B catalogue filter (decision 34) needs RelayEngine.catalogKeysForGroup — the one Tier B
+    // feature so far that needs the actual held-item catalog, not just tracker state, so this is a
+    // real new dependency rather than another single-purpose tracker matching the pattern above.
+    private val relay: RelayEngine,
     private val locationTracker: LocationTracker,
     private val serviceScope: CoroutineScope,
     private val currentTier: () -> MeshService.PowerTier,
@@ -166,6 +173,13 @@ class BeaconRadio(
     private var broadcastTierSosContentCacheId: String? = null
     private var broadcastTierSosContentCache: MeshProtocol.SosAlert.Content? = null
     private var broadcastTierSosContentCached = false
+    // Tier B catalogue filter cache (decision 34) — per group, keyed on that group's last-seen
+    // held-item key SET (order-independent), not a timer: CatalogFilter.build() re-randomizes its
+    // seed on every call by design (GATT's own anti-repeat-false-positive reasoning), which would
+    // look like a changed payload on every advertise-check tick if rebuilt unconditionally, fighting
+    // this file's own "only touch the radio when something real changed" discipline. Rebuilt (and
+    // re-seeded) only when the group's actual held items differ from what's cached.
+    private val broadcastTierCatalogFilterCache = ConcurrentHashMap<String, Pair<Set<String>, ByteArray>>()
 
     /** Safe to call more than once, and safe to follow with a fresh [startAdvertising]/
      *  [startScanning] later (see [MeshService.setMeshActive]'s "go offline"/"go active" cycle) —
@@ -495,6 +509,43 @@ class BeaconRadio(
         return nowMs
     }
 
+    /** When we have no GPS fix of our own to broadcast this cycle, relay the closest position
+     *  we're currently holding for another group member instead — the change that makes Tier B
+     *  position propagation genuinely multi-hop rather than single-hop-from-the-origin-only
+     *  (decision 32, `docs/DECISIONS.md`; decision 27 named this "its own gossip design, out of
+     *  scope" at the time). Only ever called when [broadcastTierPositionFrame] is null (see
+     *  [evaluateBroadcastTierAdvertising]) — our own fix always wins that one slot when we have
+     *  one, since nothing else can source it; relaying only fills what would otherwise be dead
+     *  airtime.
+     *
+     *  Reuses [RelayResponder.selectPositionsToRelay] unchanged — the same split-horizon-capable
+     *  selection GATT relay already uses — called with `toPeer = null` since a broadcast has no
+     *  single directional peer to route a route away from (split horizon's whole premise doesn't
+     *  have a broadcast equivalent). Forwards the ORIGINAL sealed bytes verbatim via
+     *  [MeshFrameCodec.reframePositionForRelay], same "never re-encrypt a relayed position"
+     *  reasoning [RelayResponder.positionFramesToPush]'s own doc gives for GATT relay.
+     *
+     *  Loop safety is inherited entirely from [PositionTracker.offer]'s existing "only a strictly
+     *  better report is ever accepted" rule — already proven for presence/SOS hop-gradients
+     *  (decisions 26/28) — plus [MAX_POSITION_RELAY_HOPS]'s hop ceiling. No NEW loop-prevention
+     *  mechanism needed: a worse (older, or same-timestamp-higher-hop) copy of the same sender's
+     *  position is simply rejected by `offer()` wherever it's heard, so it never gets re-picked-up
+     *  for further relay — the same self-correcting distance-vector shape presence/SOS hop
+     *  tracking already relies on, just carrying full content instead of a scalar.
+     *
+     *  Returns the frame paired with a cheap identity key (`senderId:hop:timestampSec`, not the
+     *  frame's own bytes) purely so [evaluateBroadcastTierAdvertising] can fold it into its
+     *  existing payloadKey change-detection without hex-encoding a whole sealed position on every
+     *  check-cycle just to notice when the relay candidate itself changes. */
+    private fun relayedPositionFrameForBroadcastTier(groupId: String): Pair<ByteArray, String>? {
+        val (senderId, record) = RelayResponder.selectPositionsToRelay(
+            positionTracker.forGroup(groupId), repo.deviceId, MAX_POSITION_RELAY_HOPS, limit = 1,
+        ).firstOrNull() ?: return null
+        val sealed = record.sealed ?: return null
+        val frame = MeshFrameCodec.reframePositionForRelay(groupId, record.hop + 1, sealed)
+        return frame to "$senderId:${record.hop}:${record.timestampSec}"
+    }
+
     /** A short, authenticated broadcast preview of [sosId]'s message, if we hold one worth showing
      *  — see [MeshProtocol.SosAlert.Content]'s own doc for the wire shape and decision 29
      *  (`docs/DECISIONS.md`) for why it's computed with [MeshFrameCodec.broadcastSosMacInput]
@@ -523,11 +574,72 @@ class BeaconRadio(
         return content
     }
 
+    /** Builds (or reuses the cached) Tier B catalogue filter for [groupId] — a FIXED-size
+     *  [CatalogFilter] over [RelayEngine.catalogKeysForGroup] (decision 34, `docs/DECISIONS.md`),
+     *  not the item-count-scaled sizing GATT's own filter uses — see [MeshProtocol
+     *  .MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES]'s doc for why: a size that scales with a group's
+     *  held item count would let a passive scanner infer roughly how much content a group holds,
+     *  and watch that estimate change over time, without ever connecting — a real new signal this
+     *  channel doesn't otherwise expose. Returns the encoded frame paired with a cheap identity key
+     *  (the held-item set's own `hashCode()`, not the frame's bytes) purely so
+     *  [evaluateBroadcastTierAdvertising] can fold it into its existing payloadKey change-detection
+     *  without re-hashing the filter's own content every check-cycle, same shape
+     *  [relayedPositionFrameForBroadcastTier] already uses for the same reason. Null (and clears the
+     *  cache entry) when the group currently holds nothing worth advertising — a filter over zero
+     *  items has no possible sync value, not worth the bytes. */
+    @Suppress("ReturnCount") // empty-catalog / cache-hit / rebuilt-fresh early-outs read clearer than nesting
+    private suspend fun catalogFilterFrameForBroadcastTier(groupId: String): Pair<ByteArray, Int>? {
+        val keys = relay.catalogKeysForGroup(groupId)
+        if (keys.isEmpty()) {
+            broadcastTierCatalogFilterCache.remove(groupId)
+            return null
+        }
+        val keySet = keys.toSet()
+        val cached = broadcastTierCatalogFilterCache[groupId]
+        if (cached != null && cached.first == keySet) return cached.second to keySet.hashCode()
+        val filter = CatalogFilter.build(keys, forcedSizeBits = TIER_B_CATALOG_FILTER_BITS)
+        val frame = MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.sizeBits, filter.toBits())
+        broadcastTierCatalogFilterCache[groupId] = keySet to frame
+        return frame to keySet.hashCode()
+    }
+
+    /** Encodes the Tier B beacon, attaching [catalogFilter] only if there's still room after
+     *  [positionFrame]/[activeSos] have already claimed theirs this cycle. Found live while
+     *  building this (decision 34, `docs/DECISIONS.md`): position and the SOS hop-gradient (id+hop,
+     *  NOT content — decision 29's own exclusion only fires when actual content is present) can
+     *  legitimately coexist, and that combination plus a maxed filter overruns
+     *  [MeshProtocol.BROADCAST_TIER_BUDGET_BYTES] on its own — confirmed directly in a test, not
+     *  assumed. The filter is the lowest-priority field of the four this beacon can carry: a dropped
+     *  filter costs nothing today (nothing consumes it on receipt yet — see
+     *  [MeshProtocol.BroadcastTierBeacon.catalogFilter]'s own doc), while a dropped position or
+     *  hop-gradient would be a real regression. Returns the final payload bytes paired with the
+     *  identity key actually used (null when the filter was dropped), for
+     *  [evaluateBroadcastTierAdvertising]'s own payloadKey change-detection. */
+    @Suppress("ReturnCount") // no-filter / doesn't-fit / attached early-outs read clearer than nesting
+    private fun buildBroadcastTierPayload(
+        type: Byte,
+        rid: ByteArray,
+        presenceHop: Int,
+        positionFrame: ByteArray?,
+        activeSos: MeshProtocol.SosAlert?,
+        catalogFilter: Pair<ByteArray, Int>?,
+    ): Pair<ByteArray, Int?> {
+        val payloadWithoutFilter =
+            MeshProtocol.encodeBroadcastTierBeacon(type, rid, presenceHop, positionFrame, activeSos)
+        if (catalogFilter == null) return payloadWithoutFilter to null
+        val fits = payloadWithoutFilter.size + 2 + catalogFilter.first.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES
+        if (!fits) return payloadWithoutFilter to null
+        val payload = MeshProtocol.encodeBroadcastTierBeacon(
+            type, rid, presenceHop, positionFrame, activeSos, catalogFilter.first,
+        )
+        return payload to catalogFilter.second
+    }
+
     @SuppressLint("MissingPermission")
-    // CyclomaticComplexMethod: three independent optional payload concerns (presence hop, position
-    // reseal, sos alert) plus the suppression/payload-key/advertising-set-lifecycle branches this
-    // section's sibling functions already carry at similar complexity - splitting further would
-    // scatter one radio operation's decision across more functions than it clarifies.
+    // CyclomaticComplexMethod: four independent optional payload concerns (presence hop, position
+    // reseal, sos alert, catalog filter) plus the suppression/payload-key/advertising-set-lifecycle
+    // branches this section's sibling functions already carry at similar complexity - splitting
+    // further would scatter one radio operation's decision across more functions than it clarifies.
     @Suppress("CyclomaticComplexMethod")
     private suspend fun evaluateBroadcastTierAdvertising(type: Byte, groupId: String, key: ByteArray, rid: ByteArray) {
         if (broadcastTierDisabledForSession) return
@@ -545,9 +657,23 @@ class BeaconRadio(
         // SOS stays the nearest active one — see encodeBroadcastTierBeacon's own doc for the budget
         // arithmetic this trade is based on (both maxed together would overrun the ~251B update).
         val hasSosContent = activeSos?.content != null
-        val positionForThisCycle = if (hasSosContent) null else broadcastTierPositionFrame
-        val payloadKey = "$groupId:${rid.toHex()}:$presenceHop:$positionMarker:" +
-            "${activeSos?.id}:${activeSos?.hop}:$hasSosContent"
+        // Our own fix always wins the one position slot when we have one — nothing else can source
+        // it. When we don't, relay the closest position we're holding for someone else instead of
+        // leaving the slot empty (decision 32, docs/DECISIONS.md) — only computed when it could
+        // actually be used, same lazy shape sosContentFor's cache already follows.
+        val relayedPosition = if (broadcastTierPositionFrame == null && !hasSosContent) {
+            relayedPositionFrameForBroadcastTier(groupId)
+        } else {
+            null
+        }
+        val positionForThisCycle = if (hasSosContent) null else (broadcastTierPositionFrame ?: relayedPosition?.first)
+        // Lowest priority of everything in this beacon — see buildBroadcastTierPayload's own doc
+        // (decision 34, docs/DECISIONS.md) for why it can't just always be attached.
+        val catalogFilter = catalogFilterFrameForBroadcastTier(groupId)
+        val (payload, catalogFilterKey) =
+            buildBroadcastTierPayload(type, rid, presenceHop, positionForThisCycle, activeSos, catalogFilter)
+        val payloadKey = "$groupId:${rid.toHex()}:$presenceHop:$positionMarker:${relayedPosition?.second}:" +
+            "${activeSos?.id}:${activeSos?.hop}:$hasSosContent:$catalogFilterKey"
         if (broadcastTierTrickle.isSuppressed()) {
             if (broadcastTierAdvertisingActive) {
                 try { adv.stopAdvertisingSet(broadcastTierAdvertisingSetCallback) } catch (e: Exception) {
@@ -559,7 +685,6 @@ class BeaconRadio(
             return
         }
         if (payloadKey == broadcastTierCurrentPayloadKey && broadcastTierAdvertisingActive) return
-        val payload = MeshProtocol.encodeBroadcastTierBeacon(type, rid, presenceHop, positionForThisCycle, activeSos)
         val params = AdvertisingSetParameters.Builder()
             .setLegacyMode(false)
             .setConnectable(false)
@@ -847,17 +972,30 @@ class BeaconRadio(
      *  against whatever's pinned for this sender, reused directly rather than duplicated), so a
      *  position without a valid signature under an already-pinned key is dropped exactly as it
      *  would be over GATT — Tier B does not get a weaker trust bar just because it's connectionless.
-     *  [positionFrame] is `MeshFrameCodec.encodePosition`'s full output (see that field's own doc on
-     *  [MeshProtocol.encodeBroadcastTierBeacon]) — decoded with the ordinary `MeshFrameCodec.decode`
-     *  pipeline, which is what actually recovers the raw sealed bytes [MeshFrameCodec.openPosition]
-     *  needs. Passes [sealed] through to [PositionTracker.offer] (not left null) so this position
-     *  stays eligible for further GATT relay, extending it past this device's own radio range —
-     *  see [PositionTracker.Record.sealed]'s own doc for why forwarding the original ciphertext
-     *  verbatim (rather than re-sealing) matters for downstream dedup. */
+     *  [positionFrame] is `MeshFrameCodec.encodePosition`'s (or, for a relayed position, `Mesh
+     *  FrameCodec.reframePositionForRelay`'s — same wire shape) full output — decoded with the
+     *  ordinary `MeshFrameCodec.decode` pipeline, which is what actually recovers the raw sealed
+     *  bytes [MeshFrameCodec.openPosition] needs. Passes [sealed] through to [PositionTracker.offer]
+     *  (not left null) so this position stays eligible for further relay (both GATT and, since
+     *  decision 32, Tier B itself), extending it past this device's own radio range — see
+     *  [PositionTracker.Record.sealed]'s own doc for why forwarding the original ciphertext verbatim
+     *  (rather than re-sealing) matters for downstream dedup.
+     *
+     *  Stores the DECODED FRAME's `hop` (the envelope's), not `body.hop` (the sealed inner body's) —
+     *  same reasoning `RelayResponder.ingestOpenedPosition`'s own comment gives: the envelope's hop
+     *  is the one every relay on the path actually increments (via `reframePositionForRelay`,
+     *  decision 32), including a relay that only ever holds the opaque bytes; the inner body's hop
+     *  is frozen at whatever it was when the ORIGINAL sender first sealed it (always 0) and never
+     *  changes again. Indistinguishable from the envelope's hop while Tier B was single-hop-only
+     *  (decision 27) — both were always 0 — so this only became an observable bug once decision 32
+     *  made the envelope's hop actually vary. Also enforces the same relay ceiling GATT's own
+     *  receive path does (`frame.hop < maxPositionRelayHops`) rather than trusting an arbitrarily
+     *  high envelope hop a malicious or buggy relay could claim. */
     private suspend fun ingestBroadcastTierPosition(groupId: String, positionFrame: ByteArray) {
-        val sealed = (MeshFrameCodec.decode(positionFrame) as? MeshFrameCodec.Frame.PositionSealed)?.sealed ?: return
+        val frame = MeshFrameCodec.decode(positionFrame) as? MeshFrameCodec.Frame.PositionSealed ?: return
+        if (frame.hop >= MAX_POSITION_RELAY_HOPS) return
         val key = repo.getGroupKey(groupId) ?: return
-        val body = MeshFrameCodec.openPosition(sealed, key) ?: return
+        val body = MeshFrameCodec.openPosition(frame.sealed, key) ?: return
         if (body.senderId == repo.deviceId) return // never ingest our own broadcast fix back into our own tracker
         val pinned = repo.peerKeyDao.get(groupId, body.senderId)?.publicKey
         if (!RelayResponder.signatureCheckPasses(pinned, body.signature, body.signedBytes)) {
@@ -865,7 +1003,8 @@ class BeaconRadio(
             return
         }
         positionTracker.offer(
-            groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, body.hop, sealed = sealed,
+            groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, frame.hop,
+            sealed = frame.sealed,
         )
     }
 
@@ -880,8 +1019,11 @@ class BeaconRadio(
      *  [MeshProtocol.encodeBroadcastTierBeacon]'s own doc). Verified content is logged only, not
      *  stored: a broadcast preview is missing fields (`senderId`, `ttl`, the GATT-authoritative mac/
      *  signature) a real `SosEntity` requires, so it deliberately does not get inserted into
-     *  storage or notify the user directly here — full UI surfacing of this preview (ahead of the
-     *  GATT-confirmed record) is a named follow-up, not silently dropped. */
+     *  storage here. Cached in [broadcastSosPreview] instead (decision 30's own follow-up to this
+     *  class's earlier "full UI surfacing... is a named follow-up" note) — the UI layer (see
+     *  `NavigateScreen`) reads it keyed against `HopTracker.bestActiveSos`, the same source this
+     *  preview's own hop gradient already comes from, so it disappears the moment the underlying
+     *  SOS itself does without this class needing its own separate staleness logic. */
     private fun verifyBroadcastSosContent(groupId: String, sosId: String, content: MeshProtocol.SosAlert.Content) {
         val key = repo.getGroupKey(groupId) ?: return
         val macInput = MeshFrameCodec.broadcastSosMacInput(sosId, groupId, content.message, content.timestamp)
@@ -889,6 +1031,7 @@ class BeaconRadio(
             Log.w(TAG, "broadcast-tier SOS content failed mac verification — dropping")
             return
         }
+        broadcastSosPreview.offer(groupId, sosId, content.message, content.timestamp)
         DiagnosticsLog.event("recv", "broadcast-tier SOS content preview verified (no GATT connection needed)")
     }
 
@@ -918,6 +1061,27 @@ class BeaconRadio(
         // See handleResult's own doc (decision 30) for why this is computed once and combined with
         // the propagated candidate, rather than each being fed to HopTracker independently.
         private const val DIRECT_HEARING_HOP = 1
+
+        // Raised from 4 to 120, same value and same reasoning as RelayResponder's own private
+        // maxPositionRelayHops — see that constant's own doc (decision 33, docs/DECISIONS.md) for
+        // why 120: comfortably below the 1-byte hop field's real ceiling (255, MeshProtocol
+        // .UNKNOWN_HOP's own sentinel) while giving real multi-kilometer reach through an unbroken
+        // relay chain. Kept in sync by doc only (see relayedPositionFrameForBroadcastTier's own doc,
+        // decision 32), same pattern PositionTracker.PER_HOP_SLACK_SECONDS/HopTracker
+        // .PER_HOP_SLACK_MS already use for a cross-file constant with no shared ble-internal
+        // dependency to hang it off instead.
+        private const val MAX_POSITION_RELAY_HOPS = 120
+
+        // Fixed Tier B catalogue filter size (decision 34, docs/DECISIONS.md) — 128, not item-
+        // count-scaled like GATT's own CatalogFilter.sizeBitsFor. See CatalogFilter.build's
+        // forcedSizeBits param doc and MeshProtocol.MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES's own
+        // doc for why fixed: a size that scales with a group's held item count would leak roughly
+        // how much content that group holds to any passive scanner, without them ever connecting.
+        // 128 bits keeps the worst-case encoded frame (30 bytes) safely under budget alongside a
+        // maxed SOS content preview (real margin, not razor-thin), at the cost of a false-positive
+        // rate that degrades for a large catalog — acceptable for this app's stated common case
+        // (CatalogFilter's own class doc: "tens of items, not hundreds").
+        private const val TIER_B_CATALOG_FILTER_BITS = 128
 
         /** `internal`, pure — same testability shape as [roundRobinDwellMs]. Returns the
          *  [ScanSettings.setReportDelay] value to use for the current measured [degree] of distinct

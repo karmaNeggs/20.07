@@ -76,6 +76,17 @@ class RelayEngineTest {
     }
 
     @Test
+    fun `ingestSos preserves isAlert unchanged through ingestion`() = runTest {
+        // decision 35, docs/DECISIONS.md — a relayed emergency must still read as an emergency, and
+        // a relayed ordinary message must not suddenly start reading as one.
+        relay.ingestSos(sosFixture("sos-alert").copy(isAlert = true))
+        relay.ingestSos(sosFixture("sos-quiet").copy(isAlert = false))
+        val stored = relay.relayableSos().associateBy { it.id }
+        assertTrue(stored.getValue("sos-alert").isAlert)
+        assertFalse(stored.getValue("sos-quiet").isAlert)
+    }
+
+    @Test
     fun `ingestSos increments hop by exactly 1, independent of ttl`() = runTest {
         // docs/DECISIONS.md decision 16 / PLAN-v2.md P1: hop must be a dedicated, always-plus-1
         // counter, never derived from (or coupled to) however much ttl a degree-aware relay clamp
@@ -110,5 +121,35 @@ class RelayEngineTest {
         val before = relay.catalogEpoch
         relay.ingestSos(sosFixture())
         assertTrue(relay.catalogEpoch == before)
+    }
+
+    // ---------- catalogKeysForGroup (decision 34 — BeaconRadio's Tier B catalogue filter) ----------
+
+    @Test
+    fun `catalogKeysForGroup returns the expected sos and evid key format`() = runTest {
+        relay.ingestSos(sosFixture("sos-1"))
+        relay.ingestEvidenceMeta(evidenceFixture("evid-1"))
+        val keys = relay.catalogKeysForGroup("group-1")
+        assertTrue(keys.contains("sos:sos-1"))
+        assertTrue(keys.contains("evid:evid-1"))
+    }
+
+    @Test
+    fun `catalogKeysForGroup is scoped to one group, unlike currentCatalogKeys' combined list`() = runTest {
+        // The whole point of decision 34's per-group variant: a Tier B beacon is broadcast per
+        // group, and folding another group's activity in would both misrepresent what the filter
+        // covers and widen the passive-observable signal decision 34 already accepted a narrower
+        // version of.
+        relay.ingestSos(sosFixture("sos-1").copy(groupId = "group-1"))
+        relay.ingestSos(sosFixture("sos-2").copy(groupId = "group-2"))
+        val group1Keys = relay.catalogKeysForGroup("group-1")
+        assertTrue(group1Keys.contains("sos:sos-1"))
+        assertFalse("group-1's filter must not include group-2's item", group1Keys.contains("sos:sos-2"))
+        AppDatabase.get(context).sosDao().deleteForGroup("group-2")
+    }
+
+    @Test
+    fun `catalogKeysForGroup returns an empty list for a group with nothing held`() = runTest {
+        assertTrue(relay.catalogKeysForGroup("group-1").isEmpty())
     }
 }

@@ -47,6 +47,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
+import org.offlinemesh.app.ble.PositionTracker
 import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.data.GroupEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -93,10 +94,11 @@ fun HomeScreen(
                 val records = svc.positionTracker.forGroup(g.id)
                 records.mapNotNull { (_, record) ->
                     val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
+                    val maxAgeSeconds = PositionTracker.effectiveMaxAgeSecondsFor(record.hop).toFloat()
                     val placed = placePeerOnRadar(
                         me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading
                     )
-                    placed?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds) }
+                    placed?.let { RadarDot(color, it.distanceMeters, it.screenAngleDegrees, ageSeconds, maxAgeSeconds) }
                 }
             }
         }

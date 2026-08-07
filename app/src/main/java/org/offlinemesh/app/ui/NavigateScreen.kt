@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import org.offlinemesh.app.ble.BroadcastSosPreview
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.ble.PositionTracker
@@ -30,12 +31,15 @@ import org.offlinemesh.app.data.SosEntity
  * Bluetooth, no GPS and no compass.
  */
 /** One placed peer on this screen's radar — [ageSeconds] is how old the [PositionTracker.Record]
- *  it was placed from is, fed to [RadarDot] so [RadarCanvas] can fade a stale one. */
+ *  it was placed from is, and [maxAgeSeconds] is that same record's own staleness budget
+ *  (`PositionTracker.effectiveMaxAgeSecondsFor`, decision 33) — both fed to [RadarDot] so
+ *  [RadarCanvas] can fade a stale one against its own real budget, not a flat window. */
 private data class PlacedPeer(
     val senderId: String,
     val distanceMeters: Float,
     val screenAngleDegrees: Float,
     val ageSeconds: Float,
+    val maxAgeSeconds: Float,
 )
 
 @Suppress("CyclomaticComplexMethod", "LongMethod")
@@ -58,9 +62,12 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
     val groupPresenceHop = remember(radarTick, groupId, meshService) {
         meshService?.hopToGroupPresence(groupId) ?: MeshProtocol.UNKNOWN_HOP
     }
-    val sosHop = remember(radarTick, groupId, meshService) {
-        meshService?.hopTracker?.bestActiveSosHop(groupId) ?: MeshProtocol.UNKNOWN_HOP
+    // bestActiveSos, not bestActiveSosHop, so sosPreview below can key off the SAME id this hop
+    // count came from rather than a second, independent lookup.
+    val sosBest = remember(radarTick, groupId, meshService) {
+        meshService?.hopTracker?.bestActiveSos(groupId)
     }
+    val sosHop = sosBest?.second ?: MeshProtocol.UNKNOWN_HOP
     val bluetoothEnabled by (meshService?.bluetoothEnabled?.collectAsState() ?: remember { mutableStateOf(true) })
     val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
 
@@ -83,13 +90,24 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
     // too rough — placePeerOnRadar's own honesty gate, reused here rather than duplicated).
     val sosList by db.sosDao().observeForGroup(groupId).collectAsState(initial = emptyList())
 
+    // Broadcast-tier SOS content preview (decision 29/30, docs/DECISIONS.md) — unconfirmed until
+    // the GATT-authoritative SosEntity for this same id arrives, so hidden the moment that record
+    // shows up in sosList rather than sitting alongside (and potentially disagreeing with) the
+    // confirmed message already flowing through the group's normal chat feed.
+    val sosPreview = remember(sosBest, sosList, meshService) {
+        val bestId = sosBest?.first ?: return@remember null
+        if (sosList.any { it.id == bestId }) return@remember null
+        meshService?.broadcastSosPreview?.forGroupIfBest(groupId, bestId)
+    }
+
     val placedPeers = remember(radarTick, positions, heading) {
         val me = myLocation ?: return@remember emptyList()
         positions.mapNotNull { (senderId, record) ->
             placePeerOnRadar(me.latitude, me.longitude, me.accuracy, record.lat, record.lon, record.accuracyM, heading)
                 ?.let {
                     val ageSeconds = (System.currentTimeMillis() / 1000 - record.timestampSec).toFloat()
-                    PlacedPeer(senderId, it.distanceMeters, it.screenAngleDegrees, ageSeconds)
+                    val maxAgeSeconds = PositionTracker.effectiveMaxAgeSecondsFor(record.hop).toFloat()
+                    PlacedPeer(senderId, it.distanceMeters, it.screenAngleDegrees, ageSeconds, maxAgeSeconds)
                 }
         }
     }
@@ -131,7 +149,7 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                     style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center
                 )
                 Spacer(Modifier.height(16.dp))
-                HopFallback(groupPresenceHop, sosHop)
+                HopFallback(groupPresenceHop, sosHop, sosPreview)
             } else {
                 Text("Hold the phone flat — dots show which way to walk.", style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center)
                 if (compassLowAccuracy) {
@@ -151,7 +169,9 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                 RadarCanvas(
                     dots = placedPeers.map { peer ->
                         val color = if (peer.senderId in activeSosSenders) AppColors.Danger else groupColor
-                        RadarDot(color, peer.distanceMeters, peer.screenAngleDegrees, peer.ageSeconds)
+                        RadarDot(
+                            color, peer.distanceMeters, peer.screenAngleDegrees, peer.ageSeconds, peer.maxAgeSeconds,
+                        )
                     },
                     headingDegrees = heading
                 )
@@ -173,6 +193,7 @@ fun NavigateScreen(groupId: String, meshService: MeshService?) {
                     val sosLabel = sosGpsDistanceMeters?.let { "Active SOS: ${it.toInt()}m away" }
                         ?: "Active SOS: $sosHop hop(s) away"
                     Text(sosLabel, color = AppColors.Danger, style = MaterialTheme.typography.titleMedium)
+                    SosPreviewText(sosPreview)
                 }
             }
         }
@@ -201,12 +222,25 @@ private fun nearestSosGpsDistance(
 }
 
 @Composable
-private fun HopFallback(groupHop: Int, sosHop: Int) {
+private fun HopFallback(groupHop: Int, sosHop: Int, sosPreview: BroadcastSosPreview.Content?) {
     Text(
         if (groupHop == MeshProtocol.UNKNOWN_HOP) "No group member in range yet" else "$groupHop hop(s) to nearest group member",
         style = MaterialTheme.typography.titleMedium
     )
     if (sosHop != MeshProtocol.UNKNOWN_HOP) {
         Text("Active SOS: $sosHop hop(s) away", color = AppColors.Danger)
+        SosPreviewText(sosPreview)
     }
+}
+
+/** The broadcast-tier SOS content preview (decision 29/30, `docs/DECISIONS.md`) — shown quoted and
+ *  explicitly labeled "unconfirmed" so it reads as distinct from an actual chat-feed SOS message,
+ *  which only appears once the GATT-authoritative record (with its own mac/signature) arrives. */
+@Composable
+private fun SosPreviewText(sosPreview: BroadcastSosPreview.Content?) {
+    if (sosPreview == null) return
+    Text(
+        "“${sosPreview.message}” — unconfirmed preview, connecting to verify",
+        style = MaterialTheme.typography.bodySmall, color = AppColors.Danger, textAlign = TextAlign.Center
+    )
 }

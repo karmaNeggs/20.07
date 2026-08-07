@@ -30,6 +30,22 @@ class PositionTrackerTest {
         assertEquals(180L, PositionTracker.effectiveMaxAgeSeconds(90L, hop = 2))
     }
 
+    // ---------- effectiveMaxAgeSecondsFor (decision 33 — RadarView's per-dot fade window) ----------
+
+    @Test
+    fun `effectiveMaxAgeSecondsFor pins the base window to this class's own 180s constant`() {
+        assertEquals(180L, PositionTracker.effectiveMaxAgeSecondsFor(hop = 0))
+        assertEquals(225L, PositionTracker.effectiveMaxAgeSecondsFor(hop = 1))
+    }
+
+    @Test
+    fun `effectiveMaxAgeSecondsFor at a large relay hop count gives a real multi-minute budget`() {
+        // The exact scenario decision 33 raised maxPositionRelayHops for: a position relayed
+        // through many hops must not be treated as fresh for only a few minutes, or a long-chain
+        // relay would arrive already "expired" on delivery.
+        assertEquals(5580L, PositionTracker.effectiveMaxAgeSecondsFor(hop = 120))
+    }
+
     @Test
     fun `a direct fix (hop 0) goes stale at exactly the base window`() {
         // 180s, widened from 90s after live measurement — see PositionTracker.maxAgeSeconds' note.

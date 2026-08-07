@@ -112,4 +112,38 @@ class CatalogFilterTest {
         }
         assertTrue("expected the wrong sizeBits to disagree with the correct one on at least one item", disagreement)
     }
+
+    // ---------- forcedSizeBits (decision 34 — BeaconRadio's fixed-size Tier B filter) ----------
+
+    @Test
+    fun `forcedSizeBits overrides the item-count-scaled default`() {
+        val f = CatalogFilter.build(listOf("sos:a", "sos:b", "sos:c"), forcedSizeBits = 128)
+        assertEquals(128, f.sizeBits)
+    }
+
+    @Test
+    fun `forcedSizeBits stays fixed regardless of how many items are added`() {
+        // The actual property decision 34 needed: two groups with wildly different catalog sizes
+        // must produce IDENTICALLY sized filters, so a passive observer can't infer content volume
+        // from wire size the way they could against the item-count-scaled default.
+        val small = CatalogFilter.build(listOf("sos:a"), forcedSizeBits = 128)
+        val large = CatalogFilter.build((0 until 500).map { "sos:$it" }, forcedSizeBits = 128)
+        assertEquals(128, small.sizeBits)
+        assertEquals(128, large.sizeBits)
+        assertEquals(small.toBits().size <= 16, large.toBits().size <= 16)
+    }
+
+    @Test
+    fun `a forced-size filter still round-trips membership correctly`() {
+        val f = CatalogFilter.build(listOf("sos:a", "evid:b"), seed = 7L, forcedSizeBits = 128)
+        val reconstructed = CatalogFilter.fromBits(f.toBits(), seed = 7L, sizeBits = f.sizeBits)
+        assertTrue(reconstructed.mightContain("sos:a"))
+        assertTrue(reconstructed.mightContain("evid:b"))
+    }
+
+    @Test
+    fun `omitting forcedSizeBits still uses the item-count-scaled default`() {
+        val f = CatalogFilter.build(listOf("sos:a"))
+        assertEquals(64, f.sizeBits) // MIN_SIZE_BITS floor for a single item, unaffected by this param
+    }
 }

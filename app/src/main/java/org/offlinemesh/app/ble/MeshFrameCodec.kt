@@ -82,7 +82,10 @@ object MeshFrameCodec {
     // rather than duplicate the literal, which is exactly what silently went stale across this bump.
     // v4: SOS frames gained a cleartext envelope hop byte (see SosEntity.hop's doc) — same
     // treatment as v3's position hop move, and for the same reason (docs/DECISIONS.md decision 16).
-    const val VERSION: Int = 4
+    // v5: SOS frames gained isAlert (see SosEntity.isAlert's doc, docs/DECISIONS.md decision 35) —
+    // splits the loud/broadcast alert treatment from ordinary quiet messages sharing this same
+    // entity/frame.
+    const val VERSION: Int = 5
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {
@@ -198,10 +201,21 @@ object MeshFrameCodec {
     // unverifiable frame through for relaying — could rewrite everything past byte 255 and every
     // member would still verify the forged message as authentic. See MAX_SOS_MESSAGE_BYTES for the
     // matching decode-time bound that keeps this field's size actually meaningful.
-    fun sosMacInput(id: String, groupId: String, senderId: String, message: String, timestamp: Long): ByteArray =
+    // isAlert covered here (decision 35, docs/DECISIONS.md) so a relay can't flip it undetected in
+    // either direction — silencing a real emergency (isAlert true -> false) or manufacturing a
+    // false alarm (false -> true) for content it never actually authored.
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's identical suppress
+    fun sosMacInput(
+        id: String,
+        groupId: String,
+        senderId: String,
+        message: String,
+        timestamp: Long,
+        isAlert: Boolean,
+    ): ByteArray =
         build { d ->
             d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId)
-            d.writeSosMessage(message); d.writeLong(timestamp)
+            d.writeSosMessage(message); d.writeLong(timestamp); d.writeByte(if (isAlert) 1 else 0)
         }
 
     /** Broadcast-tier counterpart to [sosMacInput] (decision 29, `docs/DECISIONS.md`) — deliberately
@@ -269,6 +283,8 @@ object MeshFrameCodec {
         // Cleartext envelope byte, same treatment as PositionSealed.hop — see SosEntity.hop's doc
         // for why this must never be derived from ttl.
         d.writeByte(sos.hop.coerceIn(0, 255))
+        // v5 (decision 35, docs/DECISIONS.md) — see SosEntity.isAlert's own doc.
+        d.writeByte(if (sos.isAlert) 1 else 0)
     }
 
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
@@ -480,7 +496,10 @@ object MeshFrameCodec {
                     val mac = buf.readBlob()
                     val signature = buf.readBlob()
                     val hop = buf.get().toInt() and 0xFF
-                    Frame.Sos(SosEntity(id, groupId, senderId, false, message, timestamp, ttl, hop, mac, signature))
+                    val isAlert = buf.get().toInt() != 0
+                    Frame.Sos(
+                        SosEntity(id, groupId, senderId, false, message, timestamp, ttl, hop, isAlert, mac, signature)
+                    )
                 }
                 FRAME_EVID_META -> {
                     val id = buf.readStr(); val groupId = buf.readStr(); val senderId = buf.readStr()

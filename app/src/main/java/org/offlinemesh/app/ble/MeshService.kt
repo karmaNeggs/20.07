@@ -63,6 +63,7 @@ class MeshService : Service() {
     private lateinit var relay: RelayEngine
     val hopTracker = HopTracker()
     val positionTracker = PositionTracker()
+    val broadcastSosPreview = BroadcastSosPreview()
     // Shared between RelayResponder (writes) and MeshGattClient (reads) — see its class doc /
     // PLAN-v2.md §5.2 (P0b).
     private val peerIdentity = PeerIdentityResolver()
@@ -255,7 +256,8 @@ class MeshService : Service() {
         ).also { it.start() }
         gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry)
         beaconRadio = BeaconRadio(
-            bluetoothManager, repo, hopTracker, positionTracker, locationTracker, serviceScope, ::currentTier,
+            bluetoothManager, repo, hopTracker, positionTracker, broadcastSosPreview, relay, locationTracker,
+            serviceScope, ::currentTier,
         ) { device, rssi ->
             gattClient.maybeConnect(device, rssi)
         }
@@ -283,11 +285,13 @@ class MeshService : Service() {
                 // left dangling until the next one 30 minutes later.
                 repo.expireGroups()
                 relay.pruneExpired()
-                // positionTracker is in-memory and expireGroups' dismantleGroup calls can't reach it
-                // themselves (decision 30) — this periodic sweep is the safety net for automatic
-                // expiry; a manual delete already clears its own group immediately (GroupChatScreen).
+                // positionTracker/broadcastSosPreview are in-memory and expireGroups' dismantleGroup
+                // calls can't reach them themselves (decision 30) — this periodic sweep is the
+                // safety net for automatic expiry; a manual delete already clears its own group
+                // immediately (GroupChatScreen).
                 val activeGroupIds = repo.groupDao.getActiveGroups().map { it.id }.toSet()
                 positionTracker.pruneOrphaned(activeGroupIds)
+                broadcastSosPreview.pruneOrphaned(activeGroupIds)
                 delay(30 * 60 * 1000L) // every 30 min — this is housekeeping, not latency-sensitive
             }
         }
@@ -322,9 +326,14 @@ class MeshService : Service() {
 
     // ---------------- public API for UI ----------------
 
-    suspend fun sendSos(groupId: String, text: String): SosEntity {
-        val sos = relay.createSos(groupId, text)
-        hopTracker.markSosOrigin(groupId, sos.id)
+    // isAlert defaults false (decision 35, docs/DECISIONS.md) — see SosEntity.isAlert's own doc.
+    // GroupChatScreen's normal Send action leaves this false (a quiet message); its dedicated SOS
+    // action, and SosComposeScreen's whole purpose, pass true.
+    suspend fun sendSos(groupId: String, text: String, isAlert: Boolean = false): SosEntity {
+        val sos = relay.createSos(groupId, text, isAlert)
+        // Feeding the SOS hop-gradient only makes sense for a genuine flagged emergency — an
+        // ordinary message still floods/syncs below exactly as before, just without this.
+        if (isAlert) hopTracker.markSosOrigin(groupId, sos.id)
         // PLAN-v2.md P1 §5.3 / docs/DECISIONS.md decision 20: without this, a freshly-authored
         // message only ever left the device via framesToPushOnConnect's one-shot push at the
         // START of a connection — now that P3 keeps links open far past that moment, an

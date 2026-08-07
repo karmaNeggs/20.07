@@ -19,7 +19,9 @@ import androidx.room.RoomDatabase
     // NicknameEntity.signature (Ed25519 sender identity).
     // v7: added SosEntity.hop (PLAN-v2.md P1 — decouples hop-from-origin from ttl, which a
     // degree-aware relay may now drop by more than 1 per hop; see docs/DECISIONS.md decision 16).
-    version = 7,
+    // v8: added SosEntity.isAlert (docs/DECISIONS.md decision 35) — splits the loud/broadcast alert
+    // treatment from ordinary quiet messages, which share this same table/entity unchanged.
+    version = 8,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

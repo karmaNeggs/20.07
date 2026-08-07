@@ -93,6 +93,12 @@ interface SosDao {
     @Query("SELECT id FROM sos_events")
     suspend fun allIds(): List<String>
 
+    // Same shape as EvidenceDao.idsForGroup — added for RelayEngine.catalogKeysForGroup (decision
+    // 34, docs/DECISIONS.md), which needs a single group's held ids, not every group's combined
+    // the way allIds() (RelayEngine.heldSosIds) is used for GATT's own catalog filter.
+    @Query("SELECT id FROM sos_events WHERE groupId = :groupId")
+    suspend fun idsForGroup(groupId: String): List<String>
+
     @Query("DELETE FROM sos_events WHERE groupId = :groupId")
     suspend fun deleteForGroup(groupId: String)
 

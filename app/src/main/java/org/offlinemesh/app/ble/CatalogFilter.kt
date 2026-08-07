@@ -88,9 +88,24 @@ class CatalogFilter private constructor(
          *  keeps a false positive a one-connection inconvenience instead of a standing, repeatable
          *  miss: a different seed derives different bit positions for the same item, so an unlucky
          *  collision this round is (with overwhelming probability) simply not a collision next
-         *  round, when a fresh filter gets built and sent again on the next reconnect. */
-        fun build(items: Collection<String>, seed: Long = SecureRandom().nextLong()): CatalogFilter {
-            val sizeBits = sizeBitsFor(items.size)
+         *  round, when a fresh filter gets built and sent again on the next reconnect.
+         *
+         *  [forcedSizeBits], when non-null, overrides [sizeBitsFor]'s own item-count-scaled sizing —
+         *  added for `BeaconRadio`'s Tier B catalogue filter (decision 34, `docs/DECISIONS.md`):
+         *  broadcasting a filter whose SIZE scales with item count would let any passive scanner
+         *  (member or not) infer roughly how much content a group holds, and watch that estimate
+         *  change over time — a real passive-observable signal nothing else on Tier B currently
+         *  exposes. A fixed size removes that signal entirely (every group's filter looks identical
+         *  regardless of how much it holds), at the cost of a worse false-positive rate for a large
+         *  catalog — see decision 34 for the full reasoning and why that tradeoff was accepted.
+         *  Caller's responsibility to pass an already byte-aligned value (unlike [sizeBitsFor],
+         *  this does not round up) since Tier B's own constant is chosen byte-aligned already. */
+        fun build(
+            items: Collection<String>,
+            seed: Long = SecureRandom().nextLong(),
+            forcedSizeBits: Int? = null,
+        ): CatalogFilter {
+            val sizeBits = forcedSizeBits ?: sizeBitsFor(items.size)
             val bits = BitSet(sizeBits)
             val filter = CatalogFilter(bits, seed, sizeBits)
             for (item in items) filter.add(item)

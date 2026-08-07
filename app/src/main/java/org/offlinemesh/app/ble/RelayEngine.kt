@@ -101,7 +101,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
 
     // ---------- creating local items ----------
 
-    suspend fun createSos(groupId: String, text: String): SosEntity {
+    // isAlert defaults false (decision 35, docs/DECISIONS.md) — the normal "Send" action in
+    // GroupChatScreen creates a quiet message; only a dedicated SOS action passes true. See
+    // SosEntity.isAlert's own doc for what that flag actually gates downstream.
+    suspend fun createSos(groupId: String, text: String, isAlert: Boolean = false): SosEntity {
         val id = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
         val senderId = repo.deviceId
@@ -110,7 +113,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // length, so this can never author a message the codec's own guard would then reject.
         val truncated = truncateToUtf8Bytes(text, MeshFrameCodec.MAX_SOS_MESSAGE_BYTES)
         val key = repo.getGroupKey(groupId)
-        val macInput = MeshFrameCodec.sosMacInput(id, groupId, senderId, truncated, timestamp)
+        val macInput = MeshFrameCodec.sosMacInput(id, groupId, senderId, truncated, timestamp, isAlert)
         val mac = key?.let { CryptoUtils.authTag(it, macInput) }
         // Additive on top of the group-key mac above, never a replacement — see SosEntity.
         // signature's doc. Null exactly when mac is (no group key => no sender identity either;
@@ -118,7 +121,8 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         val sos = SosEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
-            message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, mac = mac, signature = signature
+            message = truncated, timestamp = timestamp, ttl = DEFAULT_TTL, isAlert = isAlert,
+            mac = mac, signature = signature
         )
         sosDao.insert(sos)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
@@ -299,6 +303,24 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         indexes.mapNotNull { chunkDao.getChunk(evidenceId, it) }
 
     suspend fun nicknamesForGroup(groupId: String): List<NicknameEntity> = nicknameDao.getForGroup(groupId)
+
+    /** Per-group equivalent of [RelayResponder.currentCatalogKeys] (private, in that file) — that
+     *  one deliberately COMBINES every active group into one list, matching GATT's "one filter per
+     *  connection" design. This is scoped to a single group instead, for `BeaconRadio`'s Tier B
+     *  catalogue filter (decision 34, `docs/DECISIONS.md`), which is broadcast per-group (one
+     *  beacon per rotating group id) and must not fold another group's activity into it — that
+     *  would both misrepresent what a filter for THIS group actually covers and widen the passive-
+     *  observable signal decision 34 already accepted a narrower version of. Same exact key format
+     *  (`"sos:<id>"` / `"evid:<id>"` / `"nick:<groupId>:<senderId>:<updatedAt>"`) as
+     *  [RelayResponder.currentCatalogKeys] — kept in sync by doc only, since the two serve genuinely
+     *  different scoping and neither calls the other. */
+    suspend fun catalogKeysForGroup(groupId: String): List<String> {
+        val keys = mutableListOf<String>()
+        for (id in sosDao.idsForGroup(groupId)) keys += "sos:$id"
+        for (id in evidenceDao.idsForGroup(groupId)) keys += "evid:$id"
+        for (n in nicknamesForGroup(groupId)) keys += "nick:${n.groupId}:${n.senderId}:${n.updatedAt}"
+        return keys
+    }
 
     /**
      * Called periodically from MeshService. Not a permanent archive — deletes content past

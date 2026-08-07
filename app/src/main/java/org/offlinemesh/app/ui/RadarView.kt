@@ -51,13 +51,25 @@ import kotlin.math.sin
 /** One plottable point: distance/bearing already forward-relative (0° = straight ahead).
  *  [ageSeconds] defaults to 0 (a fresh, just-computed point, e.g. this device's own "you" marker
  *  has no independent age concept) — peer dots pass the real age of the position record they were
- *  placed from, so [RadarCanvas] can fade a dot that's gone stale (see [PositionTracker]'s own
- *  ~90s expiry) instead of it looking exactly as live as one just received. */
+ *  placed from, so [RadarCanvas] can fade a dot that's gone stale instead of it looking exactly as
+ *  live as one just received.
+ *
+ *  [maxAgeSeconds] is that same dot's OWN staleness budget — `PositionTracker
+ *  .effectiveMaxAgeSecondsFor(record.hop)`, not a flat constant (decision 33, `docs/DECISIONS.md`):
+ *  once `maxPositionRelayHops` grew large enough for genuinely long relay chains, a flat fade
+ *  window sized for a hop-0/1 reading would leave every dot beyond a few hops fully min-faded for
+ *  the ENTIRE rest of its actual eligibility window (which can now run to well over an hour at high
+ *  hop counts) — every "far and possibly old" dot would look identically ghostly, with no visual
+ *  difference between one that just barely relayed in and one about to expire. Scaling the fade
+ *  window to match [PositionTracker]'s own real per-hop staleness budget keeps that distinction
+ *  meaningful at any hop count. Defaults to the old flat 180s for any caller that hasn't been
+ *  updated to pass a real value. */
 data class RadarDot(
     val color: Color,
     val distanceMeters: Float,
     val screenAngleDegrees: Float,
     val ageSeconds: Float = 0f,
+    val maxAgeSeconds: Float = 180f,
 )
 
 /** Distance + forward-relative screen angle for one peer. */
@@ -173,13 +185,16 @@ fun placePeerOnRadar(
 // in for a tight cluster nearby but never zooms back out past this ceiling for one far outlier.
 private val ringScaleLadder = listOf(20, 40, 80, 200)
 
-// See the stale-dot fade in RadarCanvas's draw loop below. END must track PositionTracker's own base
-// staleness window (180s): the fade is the only thing distinguishing "here now" from "was here up to
-// three minutes ago", and a dot that stays fully opaque until the instant it vanishes is worse than
-// no dot — someone walks toward a position that may be 250m out of date at walking pace. MIN_ALPHA
-// is lower than it was for the same reason: a nearly-expired dot should read as a ghost.
+// See the stale-dot fade in RadarCanvas's draw loop below — the fade is the only thing
+// distinguishing "here now" from "was here a while ago", and a dot that stays fully opaque until
+// the instant it vanishes is worse than no dot — someone walks toward a position that may be out
+// of date at walking pace. START stays flat regardless of hop (even a fresh hop-0 dot should start
+// visibly "settling" after half a minute); the fade's END used to be flat too (180s, PositionTracker's
+// old base window) but is now per-dot (RadarDot.maxAgeSeconds, decision 33, docs/DECISIONS.md) —
+// see that field's own doc for why a flat END stopped making sense once relay hop counts grew large
+// enough for genuinely long chains. MIN_ALPHA is lower than it once was for the same "nearly-expired
+// dot should read as a ghost" reason.
 private const val STALE_FADE_START_SECONDS = 30f
-private const val STALE_FADE_END_SECONDS = 180f
 private const val STALE_FADE_MIN_ALPHA = 0.2f
 
 // A blinking dot's alpha never dips below this floor (live feedback 2026-08-06: blink cadence was
@@ -358,11 +373,12 @@ fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier 
                 val radius = 7f + 5f * phase
                 // A position this stale isn't necessarily wrong, but it's not "live" either — fade
                 // it down rather than let it read exactly as fresh as one just received. Full
-                // opacity through STALE_FADE_START_SECONDS, linearly down to STALE_FADE_MIN_ALPHA
-                // by STALE_FADE_END_SECONDS (PositionTracker's own ~90s expiry window; past that
-                // the record is gone from the mesh entirely, not just faded).
+                // opacity through STALE_FADE_START_SECONDS, linearly down to STALE_FADE_MIN_ALPHA by
+                // dot.maxAgeSeconds — that dot's OWN staleness budget (decision 33), not a flat
+                // window; past that the record is gone from the mesh entirely (PositionTracker.
+                // forGroup's own expiry), not just faded.
                 val staleProgress = ((dot.ageSeconds - STALE_FADE_START_SECONDS) /
-                    (STALE_FADE_END_SECONDS - STALE_FADE_START_SECONDS)).coerceIn(0f, 1f)
+                    (dot.maxAgeSeconds - STALE_FADE_START_SECONDS)).coerceIn(0f, 1f)
                 val staleFade = 1f - staleProgress * (1f - STALE_FADE_MIN_ALPHA)
 
                 // Halo tightened from +6f/0.25 alpha (live feedback 2026-08-06: dots wanted to read

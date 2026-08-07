@@ -62,6 +62,46 @@ class MeshFrameCodecTest {
     }
 
     @Test
+    fun `sos frame round-trips isAlert true`() {
+        // decision 35, docs/DECISIONS.md — splits the loud/broadcast alert treatment from ordinary
+        // quiet messages sharing this same entity/frame.
+        val sos = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "medical emergency", timestamp = 1_700_000_000_000L, ttl = 8,
+            isAlert = true, mac = ByteArray(16),
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertTrue(decoded.sos.isAlert)
+    }
+
+    @Test
+    fun `sos frame with default isAlert (false, an ordinary quiet message) round-trips`() {
+        val sos = SosEntity(
+            id = "sos-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            message = "meet at gate 3", timestamp = 1_700_000_000_000L, ttl = 8, mac = ByteArray(16),
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSos(sos))
+        check(decoded is MeshFrameCodec.Frame.Sos)
+        assertFalse(decoded.sos.isAlert)
+    }
+
+    @Test
+    fun `sos mac input is sensitive to isAlert, not just the message`() {
+        // The real property decision 35 needed: a relay must not be able to flip isAlert
+        // undetected, in either direction — silencing a real emergency or manufacturing a false
+        // alarm for content it never actually authored.
+        val key = randomKey()
+        val quiet = CryptoUtils.authTag(
+            key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", "help", 1000L, isAlert = false)
+        )
+        val alert = CryptoUtils.authTag(
+            key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", "help", 1000L, isAlert = true)
+        )
+        assertFalse("flipping isAlert with everything else unchanged must change the mac", quiet.contentEquals(alert))
+    }
+
+    @Test
     fun `sos frame round-trips a signature alongside the mac`() {
         val pair = SenderIdentity.generateKeyPair()
         val sos = SosEntity(
@@ -443,8 +483,10 @@ class MeshFrameCodecTest {
         val head = "A".repeat(255)
         val original = head + "MEET AT THE NORTH GATE"
         val tampered = head + "MEET AT THE POLICE LINE"
-        val macOriginal = CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", original, 1000L))
-        val macTampered = CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", tampered, 1000L))
+        val macOriginal =
+            CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", original, 1000L, isAlert = false))
+        val macTampered =
+            CryptoUtils.authTag(key, MeshFrameCodec.sosMacInput("id1", "g1", "s1", tampered, 1000L, isAlert = false))
         assertFalse(
             "tail of a long SOS message must be authenticated",
             macOriginal.contentEquals(macTampered)

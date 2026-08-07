@@ -56,7 +56,25 @@ class RelayResponder(
     // default so this stays optional for anything else that constructs a RelayResponder.
     private val onSosReceived: suspend (SosEntity, groupName: String) -> Unit = { _, _ -> },
 ) {
-    private val maxPositionRelayHops = 4
+    // Raised from 4 to 120 (decision 33, docs/DECISIONS.md) — the original 4 had no documented
+    // justification anywhere in this codebase or its decision log; it just happened to comfortably
+    // cover this app's stated 3-8 person GROUP size (PLAN-v2.md §5.5). But a position/presence
+    // frame's relay depth isn't bounded by group membership — ANY phone, member or not, can carry a
+    // frame one hop further (the blind-relay architecture), so a long, unbroken CHAIN of relays can
+    // legitimately span far more devices than the group itself has members. 120 stays comfortably
+    // below the 1-byte hop field's real ceiling (255, MeshProtocol.UNKNOWN_HOP's own sentinel value)
+    // while giving real multi-kilometer reach at realistic per-hop BLE range, given an unbroken
+    // chain with no gaps. Reaching hundreds of kilometers would need thousands of hops, which simply
+    // doesn't fit an 8-bit field — that's a wire-format change (widening to 2 bytes), deliberately
+    // NOT made this pass given v0.7.0/0.7.1-dev APKs are already out on real devices. Shared (by doc
+    // only, not by reference — no ble-internal type to hang a single source of truth off, same
+    // pattern PositionTracker.PER_HOP_SLACK_SECONDS/HopTracker.PER_HOP_SLACK_MS already use) with
+    // BeaconRadio.MAX_POSITION_RELAY_HOPS, which must stay equal. Also reused unchanged for opaque
+    // (blind-carried) position AND presence custody below (takeOpaqueCustody/
+    // takeOpaquePresenceCustody) — this was already sharing one ceiling for both before this
+    // change, and there's no reason to fork it into two now.
+    @Suppress("MagicNumber") // see the doc above — 120 is a deliberately chosen ceiling, not a stray literal
+    private val maxPositionRelayHops = 120
 
     // Blind-relay custody for frames belonging to groups we hold no key for — see
     // OpaqueFrameRelay's class doc for why positions and presence both needed this while content
@@ -478,7 +496,8 @@ class RelayResponder(
 
     private suspend fun handleSos(frame: MeshFrameCodec.Frame.Sos, peerAddress: String) {
         val macInput = MeshFrameCodec.sosMacInput(
-            frame.sos.id, frame.sos.groupId, frame.sos.senderId, frame.sos.message, frame.sos.timestamp
+            frame.sos.id, frame.sos.groupId, frame.sos.senderId, frame.sos.message, frame.sos.timestamp,
+            frame.sos.isAlert,
         )
         // If this is a group we hold the key to, the SOS must authenticate or we neither show it
         // nor pass it on — that's what stops a phone without the key from injecting a fake
@@ -528,12 +547,18 @@ class RelayResponder(
         // this MAC are already authenticated by authOk above, so learning it here is no less
         // trustworthy than the routing decision this same value already drives.
         learnPeerIdentity(peerAddress, frame.sos.senderId)
-        hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, frame.sos.senderId)
-        // Only notify for groups we're actually in — a blind carrier ingests and relays SOS for
-        // groups it isn't a member of too, but has no business alerting on them.
-        if (isNew && isMember) {
-            val groupName = repo.groupDao.getGroup(frame.sos.groupId)?.name ?: frame.sos.groupId
-            onSosReceived(frame.sos, groupName)
+        // Both gated on isAlert (decision 35, docs/DECISIONS.md) — an ordinary quiet message still
+        // relays/syncs exactly like before (floodForwardSos below is unconditional), but has no
+        // business feeding the SOS hop-gradient or firing the alarm-style notification, both of
+        // which only make sense for a genuine flagged emergency.
+        if (frame.sos.isAlert) {
+            hopTracker.considerDirectHop(frame.sos.groupId, frame.sos.id, hopsFromOrigin, frame.sos.senderId)
+            // Only notify for groups we're actually in — a blind carrier ingests and relays SOS for
+            // groups it isn't a member of too, but has no business alerting on them.
+            if (isNew && isMember) {
+                val groupName = repo.groupDao.getGroup(frame.sos.groupId)?.name ?: frame.sos.groupId
+                onSosReceived(frame.sos, groupName)
+            }
         }
         // PLAN-v2.md P1 §5.3: immediate forward across every OTHER currently-open link, instead of
         // waiting for that link's own next catalogue-sync — see floodForwardSos's doc. Gated on
