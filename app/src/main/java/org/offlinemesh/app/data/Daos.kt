@@ -106,6 +106,25 @@ interface SosDao {
     suspend fun pruneOlderThan(cutoffMillis: Long)
 }
 
+/** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up) — kept deliberately minimal for this
+ *  slice's own scope (local creation + persistence + pruning only, no relay/GATT wiring yet, see
+ *  CourierEnvelopeEntity's own doc): no observeForGroup/getRelayable/idsForGroup equivalents until a
+ *  later P4 slice actually needs them for push/receive. */
+@Dao
+interface CourierEnvelopeDao {
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insert(envelope: CourierEnvelopeEntity): Long
+
+    @Query("SELECT * FROM courier_envelopes WHERE id = :id LIMIT 1")
+    suspend fun getById(id: String): CourierEnvelopeEntity?
+
+    @Query("DELETE FROM courier_envelopes WHERE groupId = :groupId")
+    suspend fun deleteForGroup(groupId: String)
+
+    @Query("DELETE FROM courier_envelopes WHERE createdAt < :cutoffMillis")
+    suspend fun pruneOlderThan(cutoffMillis: Long)
+}
+
 @Dao
 interface EvidenceDao {
     // Same pre-join filter as SosDao.observeForGroup — see that doc.

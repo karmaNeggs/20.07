@@ -10,6 +10,7 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.offlinemesh.app.data.AppDatabase
+import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.SosEntity
@@ -44,6 +45,7 @@ class RelayEngineTest {
             db.sosDao().deleteForGroup("group-1")
             db.evidenceDao().deleteForGroup("group-1")
             db.seenMessageDao().prune(Long.MAX_VALUE)
+            db.courierEnvelopeDao().deleteForGroup("group-1")
         }
     }
 
@@ -151,5 +153,67 @@ class RelayEngineTest {
     @Test
     fun `catalogKeysForGroup returns an empty list for a group with nothing held`() = runTest {
         assertTrue(relay.catalogKeysForGroup("group-1").isEmpty())
+    }
+
+    // ---------- couriers (P4 slice 2, docs/DECISIONS.md decision 41's own follow-up) ----------
+    // RelayEngine.createCourierEnvelope itself is NOT tested here — same reason createSos/
+    // createEvidence never are (see this class's own doc): it calls GroupRepository.getGroupKey,
+    // Android Keystore-backed, unavailable under Robolectric. These tests instead exercise the DAO/
+    // entity/prune layer directly with hand-built fixtures, the same way ingestSos's tests exercise
+    // RelayEngine's logic without ever calling the Keystore-dependent create path — the crypto this
+    // slice adds (sealCourierBody/openCourierBody/courierTag) is already covered in isolation by
+    // MeshFrameCodecTest/CryptoUtilsTest (decision 41), so what's actually new and worth proving
+    // here is the persistence layer: Room round-trips a ByteArray-bearing entity correctly, and the
+    // courier-specific 24h cutoff is genuinely independent of SOS/evidence's 48h one.
+
+    private fun courierFixture(id: String = "env-1", createdAt: Long = System.currentTimeMillis()) =
+        CourierEnvelopeEntity(
+            id = id, groupId = "group-1", senderId = "sender-1",
+            tag = ByteArray(16) { it.toByte() }, sealed = byteArrayOf(1, 2, 3, 4),
+            createdAt = createdAt, copiesRemaining = RelayEngine.COURIER_INITIAL_COPY_BUDGET,
+        )
+
+    @Test
+    fun `courier envelope round-trips through Room including its ByteArray fields`() = runTest {
+        val envelope = courierFixture()
+        AppDatabase.get(context).courierEnvelopeDao().insert(envelope)
+        val stored = AppDatabase.get(context).courierEnvelopeDao().getById("env-1")
+        assertEquals(envelope, stored)
+    }
+
+    @Test
+    fun `getById returns null for an envelope that was never inserted`() = runTest {
+        assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("nope"))
+    }
+
+    @Test
+    fun `pruneExpired removes a courier envelope past its own 24h cutoff, independent of the 48h SOS one`() = runTest {
+        val now = System.currentTimeMillis()
+        // Well past the courier-specific 24h TTL but comfortably inside SOS/evidence's 48h one —
+        // proves RelayEngine.pruneExpired applies COURIER_MAX_AGE_MILLIS, not the 48h `cutoff` it
+        // already computes for evidence/SOS, to this table.
+        val old = courierFixture("env-old", now - RelayEngine.COURIER_MAX_AGE_MILLIS - 60_000)
+        val fresh = courierFixture("env-fresh", now)
+        AppDatabase.get(context).courierEnvelopeDao().insert(old)
+        AppDatabase.get(context).courierEnvelopeDao().insert(fresh)
+
+        relay.pruneExpired()
+
+        assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("env-old"))
+        assertEquals(fresh, AppDatabase.get(context).courierEnvelopeDao().getById("env-fresh"))
+    }
+
+    @Test
+    fun `deleteForGroup removes only that group's courier envelopes`() = runTest {
+        val mine = courierFixture("env-mine")
+        val other = mine.copy(id = "env-other", groupId = "group-2")
+        AppDatabase.get(context).courierEnvelopeDao().insert(mine)
+        AppDatabase.get(context).courierEnvelopeDao().insert(other)
+
+        AppDatabase.get(context).courierEnvelopeDao().deleteForGroup("group-1")
+
+        assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("env-mine"))
+        assertEquals(other, AppDatabase.get(context).courierEnvelopeDao().getById("env-other"))
+        AppDatabase.get(context).courierEnvelopeDao().deleteForGroup("group-2")
     }
 }

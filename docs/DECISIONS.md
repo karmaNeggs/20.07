@@ -2380,3 +2380,80 @@ touched**: `CryptoUtils.kt` (`truncateLen` param on `rotatingAdvertisementId`/
 unreachable from any existing code path, so there is nothing to hardware-confirm yet; that starts
 once slice 3 wires an actual GATT exchange.
 
+## 42. P4 slice 2 — persisted courier envelope + local creation, no relay wiring
+
+Second slice of P4 (Couriers, `PLAN-v2.md` §4.2), following slice 1's crypto construction (decision
+41). Adds genuinely new persisted storage — this app's first, since `OpaqueFrameRelay`'s existing
+"carry a frame for a group we hold no key for" mechanism (used for position/presence) is deliberately
+in-memory-only with a 3-minute default max age, wrong shape for a 24h-TTL envelope that must survive
+a real multi-hour partition crossing (the whole point of a courier) or an app restart. This was the
+Plan agent's own conclusion from slice 1's design pass, confirmed here by checking `RelayResponder`'s
+`opaqueSos` (SOS's own blind-relay custody): it uses `OpaqueFrameRelay()` with the SAME 3-minute
+default, not a longer one — SOS's blind custody was never meant to survive a real partition either,
+just a few minutes of two strangers being in range together, unlike what a courier needs to do.
+
+**`CourierEnvelopeEntity` (`data/Entities.kt`) mirrors `SosEntity`'s shape**, including its
+ByteArray-safe `equals`/`hashCode` override (Room reconstructs entities from the cursor on every
+query, so two byte-for-byte-identical rows with different array instances must still compare equal —
+same reasoning `SosEntity`'s own override gives). `groupId`/`senderId` are nullable from day one,
+mirroring `EvidenceEntity.groupId`'s own decision-38 precedent — a blind carrier holding an envelope
+for a group it has no key for can resolve neither — even though this slice's own
+`RelayEngine.createCourierEnvelope` only ever populates both (a device always knows which of its own
+groups it's authoring for; the blind-carry case is a later slice). `sealed`/`tag` mirror
+`SosEntity.sealed`/`handle` field-for-field, including the "raw bytes only, never a pre-framed
+message" discipline decision 37's own real bug taught. `copiesRemaining` (§4.2's "Copy budget 4, cap
+8") is stored starting now but inert until a later slice's handover arithmetic actually reads/writes
+it — deliberately no default value on the entity field itself, matching `SosEntity.ttl`'s own
+precedent (`RelayEngine.DEFAULT_TTL` is passed explicitly at the `createSos` call site, never
+duplicated as a field default); `RelayEngine.COURIER_INITIAL_COPY_BUDGET` is the single source of
+truth for the starting value.
+
+**`AppDatabase` v10 → v11**, adding `CourierEnvelopeEntity` to the entity list and a new
+`CourierEnvelopeDao` (`data/Daos.kt`) kept deliberately minimal for this slice's own scope —
+`insert`/`getById`/`deleteForGroup`/`pruneOlderThan` only, no `observeForGroup`/`getRelayable`
+equivalent yet, since nothing reads courier envelopes for push/receive until a later slice actually
+needs it.
+
+**`RelayEngine.createCourierEnvelope(groupId, payload)` mirrors `createSos` exactly**: resolve the
+group's root key, derive the content epoch key, `sealCourierBody` (raw bytes, not a would-be
+frame-and-seal call), compute the tag via `courierTag` on the permanent root key (unchanged by
+decision 39, same split `groupHandle` already established), store the row. Deliberately does **not**
+bump `RelayEngine.epoch`, unlike `createSos`/`createEvidence`/`setNickname` — that signal means
+"something new is pushable to a peer," and nothing reads courier envelopes for pushing yet; bumping
+it now would be a false signal to `ConnectionAttemptTracker`'s "skip the cooldown, I have something
+new" logic, not an oversight.
+
+**Pruning wired into the existing periodic sweep** (`RelayEngine.pruneExpired`, called from
+`MeshService`), using its own `COURIER_MAX_AGE_MILLIS` (24h) cutoff — deliberately shorter than
+evidence/SOS's 48h `CONTENT_MAX_AGE_MILLIS`, matching §4.2's own "24 h" spec. A new test
+(`pruneExpired removes a courier envelope past its own 24h cutoff, independent of the 48h SOS one`)
+proves this cutoff is genuinely applied, not just documented — a courier row aged past 24h but still
+inside the 48h SOS window must be gone, a fresh one must survive.
+
+**Testing boundary, same as `createSos`/`createEvidence` always had, not a new gap this slice
+introduces**: `createCourierEnvelope` itself has no direct test — it calls `GroupRepository.
+getGroupKey`, Android Keystore-backed, unavailable under Robolectric (`RelayEngineTest`'s own class
+doc already states this exact constraint for `createSos`/`createEvidence`, confirmed still true here
+by grep before writing a single test). What's new and testable in this slice is the persistence
+layer, not the crypto (already covered in isolation by `MeshFrameCodecTest`/`CryptoUtilsTest`,
+decision 41) — new `RelayEngineTest` coverage exercises `CourierEnvelopeDao` directly with hand-built
+fixtures (Room round-trip including `ByteArray` fields, `getById` on a missing row, the 24h-cutoff
+prune test above, `deleteForGroup` scoping), the same way `ingestSos`'s own tests exercise
+`RelayEngine`'s logic without ever touching the Keystore-dependent create path.
+
+**Zero new production call sites reading courier data.** `createCourierEnvelope` exists to be
+exercised directly (by a test, or a later slice's caller) with a working, persisted, round-trippable
+row — nothing in this slice calls it from anywhere in the running app. GATT push/receive, the
+blind-carry path, and the bounded-pool acceptance policy are P4 slice 3; handover arithmetic is
+slice 4 — both broken out in `PLAN-v2.md`'s own P4 entry.
+
+416 tests (up from 412), detekt clean, both variants compile/test/assemble green, no
+`missing_rules.txt` (no new native/reflection-heavy dependency, so no proguard surprise expected or
+found). Version bumped to v0.7.9-dev, fresh debug APK built and `aapt`-confirmed
+(`versionCode='20' versionName='0.7.9-dev'`) before committing. **Production code touched**:
+`data/Entities.kt` (`CourierEnvelopeEntity`), `data/Daos.kt` (`CourierEnvelopeDao`),
+`data/AppDatabase.kt` (`version` 11, entity + DAO registered), `ble/RelayEngine.kt`
+(`COURIER_MAX_AGE_MILLIS`, `COURIER_INITIAL_COPY_BUDGET`, `createCourierEnvelope`, `pruneExpired`
+now also prunes courier envelopes). No app behavior change reachable from any existing UI/GATT path
+— same "nothing to hardware-confirm yet" status as slice 1, unchanged until slice 3.
+

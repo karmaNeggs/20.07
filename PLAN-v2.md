@@ -6,6 +6,26 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-08, decision 42 (`docs/DECISIONS.md`): P4's second slice, persisted courier envelope +
+  local creation, no relay wiring, DONE.** Genuinely new persisted storage — confirmed
+  `OpaqueFrameRelay` (SOS/position/presence's existing blind-relay mechanism) is the wrong shape by
+  checking `RelayResponder`'s `opaqueSos` directly: it uses the same 3-minute default max age as
+  position/presence, not a longer one, so SOS's own blind custody was never meant to survive a real
+  partition either — confirming couriers need real Room persistence, not a config tweak to the
+  existing in-memory class. `CourierEnvelopeEntity` (`AppDatabase` v10 → v11) mirrors `SosEntity`'s
+  shape field-for-field, including nullable `groupId`/`senderId` from day one (mirroring
+  `EvidenceEntity.groupId`'s decision-38 precedent for the blind-carry case, even though this slice
+  only ever populates both). `RelayEngine.createCourierEnvelope` mirrors `createSos` exactly,
+  deliberately does NOT bump the catalog epoch (nothing reads courier envelopes for pushing yet, so
+  that signal would be false). Pruning wired into the existing periodic sweep on its own 24h cutoff,
+  proven independent of evidence/SOS's 48h one by a dedicated test. `createCourierEnvelope` itself
+  has no direct test — same pre-existing Keystore/Robolectric constraint `createSos`/`createEvidence`
+  already live with, not a new gap; the persistence layer (the actually-new part) gets direct DAO-
+  level coverage instead. 416 tests (up from 412), detekt clean, both variants green, no
+  `missing_rules.txt`. Version bumped to v0.7.9-dev, fresh debug APK built and `aapt`-confirmed.
+  Zero new production call sites — nothing in the running app calls `createCourierEnvelope` yet.
+  Full detail in decision 42's own entry and Part 7's own P4 entry.
+
 - **2026-08-08, decision 41 (`docs/DECISIONS.md`): P4's first slice, courier tag + envelope
   seal/open, crypto construction only, DONE.** First step of P4 (Couriers, §4.2) — bitchat's
   group-addressed courier model, an opportunistic supplementary delivery path for partitions flood-
@@ -1092,7 +1112,7 @@ cooldown regime; diversity-based link selection; RSSI-gated scheduling.
 v1 baseline.*
 
 **P4 — Couriers (§4.2).** Group-addressed spray-and-wait for partition-crossing eventuality.
-**STATUS (2026-08-08): slice 1 of 4 done — see `docs/DECISIONS.md` decision 41.**
+**STATUS (2026-08-08): slices 1-2 of 4 done — see `docs/DECISIONS.md` decisions 41-42.**
 
 **Slice 1 (41) — courier tag + envelope seal/open, crypto construction only.** `MeshFrameCodec.
 courierTag`/`candidateCourierTags` (`HMAC(groupKey, UTC-day)`, 16 bytes) and `sealCourierBody`/
@@ -1102,24 +1122,35 @@ bump. 412 tests (up from 399). See decision 41's own entry for the full design a
 was chosen as the narrowest first slice (same seal/frame-boundary lesson decision 37's own real bug
 taught).
 
-**Slice 2 (not started) — persisted envelope + local creation, no relay wiring.** New
-`CourierEnvelopeEntity` (id, tag-at-creation, sealed bytes, `createdAt`, `copiesRemaining`) — no
-`groupId` in the clear, same discipline as `SosEntity`. `AppDatabase` v10 → v11. New `Frame.Courier`
-+ `FRAME_COURIER: Byte = 0x1C` + `encode`/`decode` branch → `MeshFrameCodec.VERSION` bump.
-`RelayEngine.createCourierEnvelope(groupId, payload): CourierEnvelopeEntity`, mirroring `createSos`
-exactly. Own 24h prune constant (distinct from `RelayEngine.CONTENT_MAX_AGE_MILLIS`'s 48h). No GATT
-push/receive yet — testable end-to-end at the Room-entity level only.
+**Slice 2 (42) — persisted envelope + local creation, no relay wiring.** New `CourierEnvelopeEntity`
+(`AppDatabase` v10 → v11) mirrors `SosEntity`'s shape — `groupId`/`senderId` nullable from day one
+(mirroring `EvidenceEntity.groupId`'s decision-38 precedent for a future blind-carry row), `tag`/
+`sealed` mirror `handle`/`sealed`, `copiesRemaining` stored (§4.2's "Copy budget 4") but inert until
+slice 4. New minimal `CourierEnvelopeDao` (insert/getById/deleteForGroup/pruneOlderThan only).
+`RelayEngine.createCourierEnvelope(groupId, payload): CourierEnvelopeEntity` mirrors `createSos`
+exactly, deliberately does NOT bump the catalog epoch (nothing pushes courier envelopes yet). Own
+24h `COURIER_MAX_AGE_MILLIS` prune constant (distinct from `CONTENT_MAX_AGE_MILLIS`'s 48h), wired
+into the existing `pruneExpired` periodic sweep, proven independent by a dedicated test. **Still no
+`Frame.Courier`/`FRAME_COURIER` wire type or `VERSION` bump** — deferred to slice 3 below, where a
+wire type is actually needed for a GATT exchange; this slice stayed Room-only, even narrower than
+originally sketched, on the same "prove one layer before the next" discipline slice 1 established.
+`createCourierEnvelope` itself has no direct test (same pre-existing Keystore/Robolectric constraint
+`createSos`/`createEvidence` already live with) — the persistence layer gets direct DAO-level
+coverage instead. 416 tests (up from 412). No GATT push/receive yet — testable end-to-end at the
+Room-entity level only.
 
-**Slice 3 (not started) — GATT wiring: push/receive, member path, bounded pool with tiers.**
-`GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag`, mirroring `resolveGroupKeyByHandle`/
-`matchHandle` with `candidateCourierTags`. `RelayResponder.handleCourier`/`ingestOpenedCourier`
-(member path, mirrors `handleSos`) plus a genuinely new bounded-pool acceptance policy — this app has
-no reputation/trust tiering, so bitchat's "20 of 40 slots reserved for trusted depositors" becomes
-"reserve N slots for envelopes tagged under a group we hold a key for, remainder for blind carry."
-This is new logic, not a reuse of `OpaqueFrameRelay`'s unbounded-LRU-with-age-eviction shape (that
-class is deliberately short-lived, 3-minute `MAX_AGE_MILLIS`, wrong fit for a 24h-TTL envelope that
-must survive a genuine multi-hour partition). Sim/hardware gates below become meaningful starting
-here — the first slice where an envelope actually crosses a GATT connection.
+**Slice 3 (not started) — GATT wiring: push/receive, member path, bounded pool with tiers.** New
+`Frame.Courier` + `FRAME_COURIER: Byte = 0x1C` + `encode`/`decode` branch → `MeshFrameCodec.VERSION`
+bump (deferred here from slice 2). `GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag`,
+mirroring `resolveGroupKeyByHandle`/`matchHandle` with `candidateCourierTags`. `RelayResponder.
+handleCourier`/`ingestOpenedCourier` (member path, mirrors `handleSos`) plus a genuinely new
+bounded-pool acceptance policy — this app has no reputation/trust tiering, so bitchat's "20 of 40
+slots reserved for trusted depositors" becomes "reserve N slots for envelopes tagged under a group we
+hold a key for, remainder for blind carry." This is new logic, not a reuse of `OpaqueFrameRelay`'s
+unbounded-LRU-with-age-eviction shape (confirmed wrong fit in slice 2's own research: `opaqueSos`
+itself uses the same 3-minute default `MAX_AGE_MILLIS` position/presence do, so even SOS's own blind
+custody was never built to survive a real partition). Sim/hardware gates below become meaningful
+starting here — the first slice where an envelope actually crosses a GATT connection.
 
 **Slice 4 (not started) — handover mechanics: copy-budget split + rate limiting.** Per-envelope
 `copiesRemaining` persisted on `CourierEnvelopeEntity` (unlike `OpaqueFrameRelay`'s in-memory design

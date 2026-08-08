@@ -100,6 +100,56 @@ data class SosEntity(
         31 * (31 * scalars().hashCode() + (sealed?.contentHashCode() ?: 0)) + (handle?.contentHashCode() ?: 0)
 }
 
+/** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up, PLAN-v2.md §4.2) — a courier envelope:
+ *  group-addressed, opportunistic store-and-carry delivery for a partition flood-relay + this app's
+ *  own 48h content retention can't bridge in time. Genuinely new persisted storage in this codebase,
+ *  not a reuse of [org.offlinemesh.app.ble.OpaqueFrameRelay]'s shape — that class is in-memory only
+ *  with a 3-minute default max age (position/presence's own blind-relay custody, and SOS's, all use
+ *  it as-is), which can't survive a real multi-hour partition crossing or an app restart the way a
+ *  24h-TTL envelope must (see [org.offlinemesh.app.ble.RelayEngine.COURIER_MAX_AGE_MILLIS]).
+ *
+ *  [groupId]/[senderId] are nullable from the start, mirroring [EvidenceEntity.groupId]'s own
+ *  precedent (decision 38) — a courier carrying an envelope for a group it holds no key for can
+ *  resolve neither. This slice's own [org.offlinemesh.app.ble.RelayEngine.createCourierEnvelope]
+ *  only ever constructs a row with both populated (we're always a member of a group we're
+ *  authoring for); the blind-carry case (both null) is wired in a later P4 slice. */
+@Entity(tableName = "courier_envelopes")
+data class CourierEnvelopeEntity(
+    @PrimaryKey val id: String,
+    val groupId: String? = null,
+    val senderId: String? = null,
+    // Recognition tag (MeshFrameCodec.courierTag), computed once at creation and forwarded verbatim
+    // by any later carrier — same "computed once, stable for the row's whole relay life" discipline
+    // SosEntity.handle/EvidenceEntity.handle already establish (decision 38). Null only transiently
+    // during construction; every stored row has one.
+    val tag: ByteArray? = null,
+    // Raw AES-GCM sealed bytes (MeshFrameCodec.sealCourierBody) — mirrors SosEntity.sealed exactly,
+    // and for the identical reason (see sealCourierBody's own doc): whoever stores this must never
+    // be handed a pre-framed wire message, only ever raw ciphertext. Null only transiently during
+    // construction; every stored row has one.
+    val sealed: ByteArray? = null,
+    val createdAt: Long,
+    // PLAN-v2.md §4.2's own "Copy budget 4, cap 8" — inert until a later P4 slice's handover
+    // arithmetic reads/writes this. No default here (matching SosEntity.ttl's own precedent, which
+    // takes RelayEngine.DEFAULT_TTL explicitly at the call site rather than duplicating it as a
+    // field default) — RelayEngine.createCourierEnvelope passes RelayEngine.COURIER_INITIAL_COPY_BUDGET
+    // explicitly, the single source of truth for the starting value.
+    val copiesRemaining: Int,
+) {
+    private fun scalars() = listOf(id, groupId, senderId, createdAt, copiesRemaining)
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is CourierEnvelopeEntity) return false
+        return scalars() == other.scalars() &&
+            (tag?.contentEquals(other.tag) ?: (other.tag == null)) &&
+            (sealed?.contentEquals(other.sealed) ?: (other.sealed == null))
+    }
+
+    override fun hashCode(): Int =
+        31 * (31 * scalars().hashCode() + (tag?.contentHashCode() ?: 0)) + (sealed?.contentHashCode() ?: 0)
+}
+
 @Entity(tableName = "evidence")
 data class EvidenceEntity(
     @PrimaryKey val id: String,

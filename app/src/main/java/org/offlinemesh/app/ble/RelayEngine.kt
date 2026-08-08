@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
+import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -41,6 +42,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // past the seenDao short-circuit into Room on every reconnect, needless DB traffic for
         // something already known to be a duplicate.
         private const val SEEN_ID_MAX_AGE_MILLIS = CONTENT_MAX_AGE_MILLIS
+
+        // PLAN-v2.md §4.2's own "Cap 16 KiB, 24 h" — deliberately shorter than CONTENT_MAX_AGE_MILLIS's
+        // 48h: a courier envelope is a supplementary delivery path for a partition, not a second
+        // 48h-retained record of the same content (docs/DECISIONS.md decision 41's own P4 slice 1).
+        const val COURIER_MAX_AGE_MILLIS = 24L * 60 * 60 * 1000
+
+        // PLAN-v2.md §4.2's own "Copy budget 4" — inert until a later P4 slice's handover logic
+        // actually reads/writes CourierEnvelopeEntity.copiesRemaining; this slice only sets the
+        // initial value at creation.
+        const val COURIER_INITIAL_COPY_BUDGET = 4
 
         /** millis-to-epoch-seconds conversion, for [MeshFrameCodec.groupHandle]'s callers here
          *  (decision 38, `docs/DECISIONS.md`). */
@@ -93,6 +104,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     private val evidenceDao = db.evidenceDao()
     private val chunkDao = db.evidenceChunkDao()
     private val nicknameDao = db.nicknameDao()
+    private val courierEnvelopeDao = db.courierEnvelopeDao()
 
     // Bumped every time something is added to this device's relayable catalog (an authored item,
     // or a newly-ingested one from a peer) — the same set currentCatalogKeys() draws its keys
@@ -210,6 +222,37 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     }
 
     suspend fun myNickname(groupId: String): NicknameEntity? = nicknameDao.get(groupId, repo.deviceId)
+
+    /** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up, PLAN-v2.md §4.2) — creates and
+     *  persists a courier envelope for OUR OWN authored [payload], mirroring [createSos]'s shape
+     *  exactly (raw-body seal via [MeshFrameCodec.sealCourierBody], not a would-be frame-and-seal
+     *  call, for the identical reason that function's own doc gives). This is a supplementary
+     *  delivery path alongside whatever flood-relay already does for [groupId]'s content — it does
+     *  not replace [createSos]/[createEvidence], and this slice never calls it from anywhere; it
+     *  exists to be exercised directly (by a test, or a later slice's caller) with a working,
+     *  persisted, round-trippable row. GATT push/receive and the blind-carry path (null [groupId]/
+     *  [senderId] rows) are later P4 slices — see [org.offlinemesh.app.data.CourierEnvelopeEntity]'s
+     *  own doc. Deliberately does NOT bump [epoch] the way [createSos]/[createEvidence]/
+     *  [setNickname] do — that signal means "something new is pushable to a peer," and nothing
+     *  reads courier envelopes for pushing yet (a later slice's job); bumping it now would be a
+     *  false signal, not an oversight. */
+    suspend fun createCourierEnvelope(groupId: String, payload: ByteArray): CourierEnvelopeEntity {
+        val id = UUID.randomUUID().toString()
+        val createdAt = System.currentTimeMillis()
+        val senderId = repo.deviceId
+        val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
+        val signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, createdAt / MILLIS_PER_SECOND)
+        val sealed =
+            MeshFrameCodec.sealCourierBody(contentKey, id, senderId, payload, createdAt, signingPrivateKey)
+        val tag = MeshFrameCodec.courierTag(rootKey, createdAt / MILLIS_PER_SECOND)
+        val envelope = CourierEnvelopeEntity(
+            id = id, groupId = groupId, senderId = senderId, tag = tag, sealed = sealed,
+            createdAt = createdAt, copiesRemaining = COURIER_INITIAL_COPY_BUDGET,
+        )
+        courierEnvelopeDao.insert(envelope)
+        return envelope
+    }
 
     // ---------- ingesting items heard over the mesh ----------
 
@@ -370,6 +413,9 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         evidenceDao.pruneOlderThan(cutoff)
         sosDao.pruneOlderThan(cutoff)
         seenDao.prune(System.currentTimeMillis() - SEEN_ID_MAX_AGE_MILLIS)
+        // Own cutoff, not the 48h `cutoff` above — PLAN-v2.md §4.2's own "24 h" courier TTL (see
+        // COURIER_MAX_AGE_MILLIS's own doc for why it's deliberately shorter).
+        courierEnvelopeDao.pruneOlderThan(System.currentTimeMillis() - COURIER_MAX_AGE_MILLIS)
         // Deliberately not pruning nicknames on the same 48h "content" cadence: unlike SOS/evidence
         // (one-shot events from a live incident) a nickname is meant to persist for as long as
         // you're in the group, per the requirement it stay set until explicitly changed again — it's

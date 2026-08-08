@@ -13,7 +13,8 @@ import androidx.room.RoomDatabase
         EvidenceEntity::class,
         EvidenceChunkEntity::class,
         NicknameEntity::class,
-        PeerKeyEntity::class
+        PeerKeyEntity::class,
+        CourierEnvelopeEntity::class
     ],
     // v6: added PeerKeyEntity (pinned per-sender Ed25519 public keys) and SosEntity/EvidenceEntity/
     // NicknameEntity.signature (Ed25519 sender identity).
@@ -27,7 +28,10 @@ import androidx.room.RoomDatabase
     // group handle each frame was framed under (docs/DECISIONS.md decision 38, PLAN-v2.md §4.4's
     // "rotating group handle" item), replacing cleartext `groupId` on the wire.
     // EvidenceEntity.groupId also becomes nullable (see that field's own doc).
-    version = 10,
+    // v11: added CourierEnvelopeEntity (docs/DECISIONS.md decision 41's own P4 slice 2, PLAN-v2.md
+    // §4.2) — group-addressed courier storage, new in this schema, not an extension of an existing
+    // table (see that entity's own doc for why it can't reuse OpaqueFrameRelay's in-memory shape).
+    version = 11,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -38,6 +42,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun evidenceChunkDao(): EvidenceChunkDao
     abstract fun nicknameDao(): NicknameDao
     abstract fun peerKeyDao(): PeerKeyDao
+    abstract fun courierEnvelopeDao(): CourierEnvelopeDao
 
     companion object {
         @Volatile private var instance: AppDatabase? = null
