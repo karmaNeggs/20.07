@@ -2457,3 +2457,122 @@ found). Version bumped to v0.7.9-dev, fresh debug APK built and `aapt`-confirmed
 now also prunes courier envelopes). No app behavior change reachable from any existing UI/GATT path
 — same "nothing to hardware-confirm yet" status as slice 1, unchanged until slice 3.
 
+## 43. P4 slice 3 — GATT wiring: wire type, resolver, member/blind-carry paths, bounded pool with tiers
+
+Third slice of P4 (Couriers, `PLAN-v2.md` §4.2) — the first slice where a courier envelope actually
+crosses a GATT connection. Given the size (comparable to decision 38), a Plan agent mapped the
+design before any code was written, the same discipline slice 1 used.
+
+**Key structural finding that shaped the whole slice.** Courier envelopes are bounded by a copy
+budget (spec: "spray budget 4, cap 8, half-handover on meeting"), not a decrementing hop/TTL the way
+SOS/evidence are — `PLAN-v2.md`'s own comparison table lists "TTL flood" and "Spray-and-Wait (n-copy
+DTN)" as two separate techniques. `CourierEnvelopeEntity.copiesRemaining` (decision 42) stays inert
+until a later slice's handover arithmetic gives it real meaning — which means **this slice has no
+bounding mechanism at all for multi-hop blind-carry propagation** if a blind carrier were allowed to
+re-offer a held envelope onward. Every other persisted, relayed row in this codebase already has a
+real per-hop bound (evidence's ttl-decrement, `OpaqueFrameRelay`'s hop ceiling) before it's built.
+**Design consequence: a blind carrier accepts and stores an envelope, single-hop from a member, but
+never re-offers it to a further peer.** Multi-hop spray is exactly what `copiesRemaining`'s real
+semantics (a later slice) is for — building propagation before the budget exists would be an
+unbounded flood wearing a "bounded" name.
+
+**Wire type.** `FRAME_COURIER: Byte = 0x1C` (next unused after `FRAME_WIFI_DIRECT_ACCEPT`'s `0x1B`).
+`Frame.Courier(tag, id, createdAt, copiesRemaining, sealed)` — `id` stays cleartext for the same
+dedup reason `SosSealed.id` does. `createdAt` is cleartext too, a deliberate difference from
+`SosBody.timestamp` (kept inside the seal): a blind carrier storing this as a
+`CourierEnvelopeEntity` row needs an honest age for `RelayEngine.pruneExpired`'s 24h cutoff but can't
+open the seal to read a hidden one — same tradeoff `PositionSealed.hop`/`SosSealed.hop` already make
+for topology distance instead of timing. It also lets the member-path open derive the exact content-
+epoch key in one shot (`contentEpochKey(rootKey, createdAt/1000)`) instead of SOS's candidate-key
+search, the same single-exact-epoch treatment decision 39 gives evidence-meta/nickname/presence for
+the identical reason. `copiesRemaining` travels verbatim, forwarded unchanged — never read, split,
+or decremented this slice. `MeshFrameCodec.VERSION` 8 → 9: technically not load-bearing for safety
+the way v7's field-shape change was (a genuinely new frame type just hits `decode()`'s own
+`else -> null` on an old build, no misparse risk) — bumped anyway, matching this project's own
+standing discipline (see v8's own note) of treating every wire-affecting change as one discoverable
+signal.
+
+**`GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag`** mirror `resolveGroupKeyByHandle`/
+`matchHandle` exactly, calling `CryptoUtils` directly rather than `MeshFrameCodec`'s convenience
+wrapper (`matchHandle`'s own precedent — `data` never depends on `ble`). One real gotcha a naive
+copy-paste would introduce: `candidateAdvertisementIds`' own `truncateLen` defaults to
+`ROTATING_ID_LEN` (6, the beacon/GATT-handle length) — `matchCourierTag` must pass
+`CryptoUtils.COURIER_TAG_LEN` (16) explicitly or it would silently never match a real courier tag.
+Caught before shipping by a dedicated regression test, not just careful reading.
+
+**`RelayResponder.handleCourier`/`ingestOpenedCourier`/`takeCourierCustody`** mirror
+`handleSos`/`ingestOpenedSos`/`takeOpaqueSosCustody`'s resolve-then-branch shape, with three
+deliberate differences: (1) blind carry stores a real `CourierEnvelopeEntity` row via
+`RelayEngine.admitCourierEnvelope`, not `OpaqueFrameRelay` custody — decision 42 already found that
+mechanism's 3-minute default max age wrong for a 24h-TTL envelope; (2) no notification-equivalent to
+`onSosReceived` — `payload` is still an opaque `ByteArray` with no schema (decision 41), nothing to
+render even if a callback fired; (3) no immediate flood-forward on receipt — delivery flows
+exclusively through the catalog-filter deficit-push cycle, the same one-shot-per-connection
+treatment SOS/evidence-header/nickname *content* already get. A freshly received envelope might
+therefore wait for the next reconnect on an already-open link before reaching a third peer — the
+same class of gap decision 19 found and fixed for SOS, deliberately left open here since couriers
+exist specifically to survive multi-hour partitions, so "might wait for the next connection" costs
+little against that baseline.
+
+**Bounded pool with tiers: `CourierPool`, a new pure admission-policy object in `ble/`** (no
+DAO/Room access, directly unit-testable, matching `ConnectionAttemptTracker`/`OpaqueFrameRelay`/
+`HopTracker`'s own extraction discipline). `CAPACITY = 40`, `OWN_GROUP_RESERVED = 20` — taken
+verbatim from `PLAN-v2.md`'s own table entry, the same discipline every other courier constant this
+feature has shipped with (no rescaling). The reservation is a **hard floor** on blind-carry capacity
+(`capacity - ownReserved`, not `capacity - ownCount`) — what actually guarantees 20 own-group slots
+exist even when almost none are in use, matching bitchat's literal "reserved" semantics rather than
+soft prioritization. An own-group envelope can grow past 20 by borrowing unused blind-carry
+capacity, up to the full 40; **own-group is never hard-rejected**, only in the degenerate all-40-
+own-group case does an own-group insert evict a sibling (oldest by `createdAt`, never by
+`copiesRemaining` — that field stays the inert one decision 42 established, using it for eviction
+priority here would reach into a later slice's semantics early). Blind-carry never hard-rejects
+either — LRU-evicts its own oldest, mirroring `OpaqueFrameRelay`'s own `removeEldestEntry` behavior,
+just persisted instead of in-memory.
+
+**`RelayEngine.admitCourierEnvelope`** is the single gate both insertion paths (self-authored via
+`createCourierEnvelope`, received via `RelayResponder`) now go through, wrapped in `db.withTransaction`
+(this codebase's first use of Room's `withTransaction` — `room-ktx` was already a pinned dependency,
+just unused until now) to close a real check-then-act race: `MeshGattClient`/`MeshGattServer` can
+feed this concurrently from different peer connections, the same class of hazard
+`ConnectionAttemptTracker`'s own class doc names for different shared state. Bumps `epoch` on a
+genuinely new insert — the un-defer decision 42 flagged: `createCourierEnvelope` previously did NOT
+bump it because nothing read courier envelopes for pushing yet, and this slice is exactly the point
+that stops being true. `createCourierEnvelope` was updated to route through `admitCourierEnvelope`
+instead of a raw DAO insert, a mechanical consequence of that stale precondition, not a new decision.
+
+**Push-on-connect wiring fits entirely inside the existing `CatalogFilter` mechanism** — no new
+per-connection step, no new budget constant. `currentCatalogKeys()` gains `heldCourierIds()` (own-
+group AND blind, same "held, not relayable" reasoning `heldSosIds`/`heldEvidenceIds` already give —
+it's what stops a peer re-pushing us something we're already blind-carrying forever).
+`handleCatalogFilter` gains a fourth `partitionByFilter`/`pushUpTo` pair using
+`relayableCourierEnvelopes()` (own-group only), folded into the existing per-connection item budget.
+This is the concrete enforcement point for the single-hop-only rule above: a device only ever
+proactively offers an envelope it holds the key for; a blind-carry row is held and advertised
+(stopping redundant re-pushes) but never reaches a third peer through this path.
+
+442 tests (up from 416): new `MeshFrameCodecTest` coverage (encode/decode round trip, cleartext
+envelope readable without a key, `copiesRemaining` unsigned-byte coercion, full encode→decode→open
+round trip proving the wire and crypto layers compose), a new `GroupRepositoryCourierTagTest.kt`
+mirroring `GroupRepositoryHandleTest.kt` (including the dedicated `truncateLen` regression test
+above), a new `CourierPoolTest.kt` (plain JVM, exhaustive truth table over every admission branch
+including the reservation-is-a-hard-cap property), `RelayEngineTest` additions (`admitCourierEnvelope`
+bumps epoch on a new insert / not on a duplicate, pool eviction deletes the right row, `heldCourierIds`
+includes both tiers, `relayableCourierEnvelopes` excludes blind), and `RelayResponderTest` additions
+(an unresolvable courier envelope stores as blind carry without opening; a blind-carried envelope is
+never re-offered via `refreshFramesToPush` — the single most important behavior this slice enforces;
+an own-group envelope is both advertised in our own outgoing filter and actually pushed when a peer's
+filter lacks it; a peer's filter correctly suppresses one it already has). detekt clean (`LargeClass`
+suppress added to `RelayResponder`, `TooManyFunctions` added to `GroupRepository`/`CourierEnvelopeDao`
+— both flat growth from one more resolver/DAO-query-set, not code-organization pressure). Both
+variants compile/test/assemble green, no `missing_rules.txt`. Version bumped to v0.7.10-dev, fresh
+debug APK built and `aapt`-confirmed (`versionCode='21' versionName='0.7.10-dev'`) before committing.
+**Production code touched**: `ble/MeshFrameCodec.kt` (`FRAME_COURIER`, `Frame.Courier`,
+`encodeCourier`, decode branch, `VERSION` 9), `data/GroupRepository.kt`
+(`resolveGroupKeyByCourierTag`/`matchCourierTag`), `ble/CourierPool.kt` (new), `data/Daos.kt`
+(`CourierEnvelopeDao`'s pool/push queries), `ble/RelayEngine.kt` (`admitCourierEnvelope`,
+`heldCourierIds`, `relayableCourierEnvelopes`, `createCourierEnvelope` now routes through the pool),
+`ble/RelayResponder.kt` (`handleCourier`/`ingestOpenedCourier`/`takeCourierCustody`,
+`currentCatalogKeys`/`handleCatalogFilter`/`reframeStoredCourier`). **NOT hardware-confirmed** — the
+`VERSION` 9 wire addition and every path above are new and untested on real hardware; adds to the
+existing next-live-round backlog (37/38/40 already queued).
+

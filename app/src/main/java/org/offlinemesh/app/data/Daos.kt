@@ -106,10 +106,11 @@ interface SosDao {
     suspend fun pruneOlderThan(cutoffMillis: Long)
 }
 
-/** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up) — kept deliberately minimal for this
- *  slice's own scope (local creation + persistence + pruning only, no relay/GATT wiring yet, see
- *  CourierEnvelopeEntity's own doc): no observeForGroup/getRelayable/idsForGroup equivalents until a
- *  later P4 slice actually needs them for push/receive. */
+/** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up) — insert/getById/deleteForGroup/
+ *  pruneOlderThan. P4 slice 3 (decision 43) adds the pool-admission/push queries below: counts and
+ *  oldest-id lookups for CourierPool's own-group-vs-blind-carry tiering, allIds/getOwnGroup for the
+ *  CatalogFilter advertise/push cycle (see RelayEngine.heldCourierIds/relayableCourierEnvelopes). */
+@Suppress("TooManyFunctions") // flat query list, not code-organization pressure — see the doc above
 @Dao
 interface CourierEnvelopeDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
@@ -123,6 +124,38 @@ interface CourierEnvelopeDao {
 
     @Query("DELETE FROM courier_envelopes WHERE createdAt < :cutoffMillis")
     suspend fun pruneOlderThan(cutoffMillis: Long)
+
+    @Query("DELETE FROM courier_envelopes WHERE id = :id")
+    suspend fun deleteById(id: String)
+
+    @Query("SELECT id FROM courier_envelopes")
+    suspend fun allIds(): List<String>
+
+    // "Own-group" = groupId IS NOT NULL — a row this device authored, or received and successfully
+    // resolved to a group it holds the key for (RelayResponder.ingestOpenedCourier). "Blind carry" =
+    // groupId IS NULL — accepted from a peer but unresolvable to any group we're a member of
+    // (RelayResponder.takeCourierCustody), the courier equivalent of EvidenceEntity's own nullable-
+    // groupId blind-relay row (decision 38), not OpaqueFrameRelay's in-memory shape (decision 42).
+
+    @Query("SELECT COUNT(*) FROM courier_envelopes WHERE groupId IS NOT NULL")
+    suspend fun countOwnGroup(): Int
+
+    @Query("SELECT COUNT(*) FROM courier_envelopes WHERE groupId IS NULL")
+    suspend fun countBlindCarry(): Int
+
+    @Query("SELECT id FROM courier_envelopes WHERE groupId IS NOT NULL ORDER BY createdAt ASC LIMIT 1")
+    suspend fun oldestOwnGroupId(): String?
+
+    @Query("SELECT id FROM courier_envelopes WHERE groupId IS NULL ORDER BY createdAt ASC LIMIT 1")
+    suspend fun oldestBlindCarryId(): String?
+
+    // Own-group only — a blind-carry row is held (and advertised as held via allIds(), so a peer's
+    // filter stops re-offering it to us) but never proactively PUSHED onward to a third peer, since
+    // nothing bounds that propagation yet (copiesRemaining stays inert until a later P4 slice —
+    // see RelayEngine.admitCourierEnvelope's own doc for why this is a hard scope line, not an
+    // oversight).
+    @Query("SELECT * FROM courier_envelopes WHERE groupId IS NOT NULL")
+    suspend fun getOwnGroup(): List<CourierEnvelopeEntity>
 }
 
 @Dao

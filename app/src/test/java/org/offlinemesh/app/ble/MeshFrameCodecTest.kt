@@ -418,6 +418,50 @@ class MeshFrameCodecTest {
         assertEquals(1, resolvedCount)
     }
 
+    // ---------- courier wire frame (P4 slice 3, decision 43): FRAME_COURIER encode/decode ----------
+    // Envelope only, mirroring FRAME_SOS's own split — decode() never opens sealed, it only parses
+    // the cleartext envelope (tag/id/createdAt/copiesRemaining) that a blind carrier needs to dedup,
+    // prune, and store without ever holding the group key.
+
+    @Test
+    fun `courier frame round-trips its cleartext envelope, readable without any key`() {
+        val tag = ByteArray(16) { it.toByte() }
+        val sealed = byteArrayOf(9, 9, 9, 9)
+        val encoded = MeshFrameCodec.encodeCourier(tag, "env-1", 1_700_000_000_000L, 4, sealed)
+        val decoded = MeshFrameCodec.decode(encoded)
+        check(decoded is MeshFrameCodec.Frame.Courier)
+        assertArrayEquals(tag, decoded.tag)
+        assertEquals("env-1", decoded.id)
+        assertEquals(1_700_000_000_000L, decoded.createdAt)
+        assertEquals(4, decoded.copiesRemaining)
+        assertArrayEquals(sealed, decoded.sealed)
+    }
+
+    @Test
+    fun `courier frame round-trip then open recovers the original body`() {
+        // End-to-end: encode the envelope, decode it back, open the sealed bytes it carried — proves
+        // the wire layer and the crypto layer (decision 41) compose correctly, not just each in
+        // isolation.
+        val rootKey = randomKey()
+        val (sealed, contentKey) = sealCourierFixture(rootKey, "env-1", "sender-1", byteArrayOf(7), 1_700_000_000_000L)
+        val tag = MeshFrameCodec.courierTag(rootKey, 1_700_000_000L)
+        val encoded = MeshFrameCodec.encodeCourier(tag, "env-1", 1_700_000_000_000L, 4, sealed)
+        val decoded = MeshFrameCodec.decode(encoded)
+        check(decoded is MeshFrameCodec.Frame.Courier)
+        val body = MeshFrameCodec.openCourierBody(decoded.sealed, contentKey)
+        checkNotNull(body)
+        assertEquals("sender-1", body.senderId)
+        assertArrayEquals(byteArrayOf(7), body.payload)
+    }
+
+    @Test
+    fun `courier frame copiesRemaining coerces into an unsigned byte`() {
+        val encoded = MeshFrameCodec.encodeCourier(ByteArray(16), "env-1", 0L, 999, byteArrayOf(1))
+        val decoded = MeshFrameCodec.decode(encoded)
+        check(decoded is MeshFrameCodec.Frame.Courier)
+        assertEquals(255, decoded.copiesRemaining)
+    }
+
     @Test
     fun `evidence meta frame round-trips including the sha256 digest`() {
         val meta = EvidenceEntity(

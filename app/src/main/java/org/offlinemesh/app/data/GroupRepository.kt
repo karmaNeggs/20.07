@@ -5,6 +5,7 @@ import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
 import java.util.UUID
 
+@Suppress("TooManyFunctions") // one resolver per relayed frame type sharing a group-scoped key store
 class GroupRepository(context: Context) {
     private val db = AppDatabase.get(context)
     // Lazy, not eager: building this touches the Android Keystore (via GroupKeyStore's
@@ -93,6 +94,19 @@ class GroupRepository(context: Context) {
         return matchHandle(handle, groups, epochSeconds)
     }
 
+    /** P4 slice 3 (`docs/DECISIONS.md` decision 43, `PLAN-v2.md` §4.2) — resolves a courier
+     *  envelope's opaque [tag] to a real group, mirroring [resolveGroupKeyByHandle] exactly. Calls
+     *  [CryptoUtils] directly, not `MeshFrameCodec.candidateCourierTags`'s convenience wrapper —
+     *  matching [matchHandle]'s own precedent of not introducing a `data` -> `ble` dependency this
+     *  class has never had. */
+    suspend fun resolveGroupKeyByCourierTag(
+        tag: ByteArray,
+        epochSeconds: Long = System.currentTimeMillis() / MILLIS_PER_SECOND,
+    ): Pair<String, ByteArray>? {
+        val groups = groupDao.getActiveGroups().mapNotNull { g -> getGroupKey(g.id)?.let { g.id to it } }
+        return matchCourierTag(tag, groups, epochSeconds)
+    }
+
     companion object {
         /** millis-to-epoch-seconds conversion, for [resolveGroupKeyByHandle]'s default param. */
         private const val MILLIS_PER_SECOND = 1000L
@@ -113,6 +127,26 @@ class GroupRepository(context: Context) {
                     key, epochSeconds, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS
                 )
                 if (candidates.any { it.contentEquals(handle) }) return groupId to key
+            }
+            return null
+        }
+
+        /** Pure matching core of [resolveGroupKeyByCourierTag], mirroring [matchHandle] exactly —
+         *  same no-DAO/no-Keystore, directly-unit-testable shape. Passes
+         *  [CryptoUtils.COURIER_TAG_LEN] explicitly (16) — the one real gotcha copying [matchHandle]
+         *  verbatim would introduce: [CryptoUtils.candidateAdvertisementIds]' own `truncateLen`
+         *  defaults to [CryptoUtils.ROTATING_ID_LEN] (6, the beacon/GATT-handle length), which would
+         *  never match a real 16-byte courier tag if silently dropped here. */
+        internal fun matchCourierTag(
+            tag: ByteArray,
+            groups: List<Pair<String, ByteArray>>,
+            epochSeconds: Long,
+        ): Pair<String, ByteArray>? {
+            for ((groupId, key) in groups) {
+                val candidates = CryptoUtils.candidateAdvertisementIds(
+                    key, epochSeconds, CryptoUtils.COURIER_TAG_WINDOW_SECONDS, CryptoUtils.COURIER_TAG_LEN,
+                )
+                if (candidates.any { it.contentEquals(tag) }) return groupId to key
             }
             return null
         }

@@ -4,6 +4,7 @@ import android.util.Log
 import kotlinx.coroutines.delay
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
+import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
@@ -22,7 +23,7 @@ import java.util.concurrent.ConcurrentHashMap
  * independent of BluetoothGatt/BluetoothGattServer entirely so both roles share one
  * implementation instead of two copies that could quietly drift apart.
  */
-@Suppress("LongParameterList", "TooManyFunctions")
+@Suppress("LongParameterList", "TooManyFunctions", "LargeClass")
 // LongParameterList: one collaborator per constructor param, same shape MeshService already wires
 // every other class in this file with (BeaconRadio/MeshGattClient/MeshGattServer all take a
 // comparable number) — not a candidate for a params-object without adding an abstraction this
@@ -269,6 +270,10 @@ class RelayResponder(
         for (g in repo.groupDao.getActiveGroups()) {
             for (n in relay.nicknamesForGroup(g.id)) keys += "nick:${n.groupId}:${n.senderId}:${n.updatedAt}"
         }
+        // Own-group AND blind-carry both included (P4 slice 3, decision 43) — same "held, not
+        // relayable" reasoning as sos/evid above, and it's what stops a peer from re-pushing us an
+        // envelope we're already blind-carrying forever (see RelayEngine.heldCourierIds' own doc).
+        for (id in relay.heldCourierIds()) keys += "cour:$id"
         return keys
     }
 
@@ -664,6 +669,88 @@ class RelayResponder(
         }
     }
 
+    // ---------- couriers (P4 slice 3, docs/DECISIONS.md decision 43) ----------
+    // Shaped like handleSos/ingestOpenedSos/takeOpaqueSosCustody above (resolve-then-branch, verify
+    // a pinned signature, dedup via RelayEngine's own admission gate), with three deliberate
+    // differences: (1) the blind-carry path stores a real CourierEnvelopeEntity row via
+    // RelayEngine.admitCourierEnvelope, not an OpaqueFrameRelay custody offer (decision 42 already
+    // ruled that mechanism's 3-minute default max age wrong for a 24h-TTL envelope); (2) there is no
+    // notification-equivalent to onSosReceived — payload is an opaque ByteArray with no schema yet
+    // (decision 41), nothing to render even if a callback fired; (3) no immediate flood-forward on
+    // receipt (no floodForwardSos equivalent) — delivery flows exclusively through the catalog-
+    // filter deficit-push cycle (currentCatalogKeys/handleCatalogFilter below), the same one-shot-
+    // per-connection treatment SOS/evidence-header/nickname *content* already get. A freshly
+    // received courier envelope might therefore wait for the next reconnect on an already-open link
+    // before reaching a third peer — the same class of gap decision 19 found and fixed for SOS,
+    // deliberately left open here since couriers exist specifically to survive multi-hour
+    // partitions, so "might wait for the next connection" costs little against that baseline.
+
+    private suspend fun handleCourier(frame: MeshFrameCodec.Frame.Courier, peerAddress: String) {
+        val resolved = repo.resolveGroupKeyByCourierTag(frame.tag)
+        if (resolved == null) {
+            takeCourierCustody(frame)
+            return
+        }
+        val (groupId, rootKey) = resolved
+        // Single exact epoch key, not a candidate search — unlike SOS/position, createdAt is
+        // cleartext on this frame (see Frame.Courier's own doc), so the right epoch is already known.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.createdAt / MILLIS_PER_SECOND)
+        val body = MeshFrameCodec.openCourierBody(frame.sealed, contentKey) ?: run {
+            Log.w("RelayResponder", "courier envelope failed to open for a group we hold the key to — dropping")
+            return
+        }
+        ingestOpenedCourier(groupId, frame, body, peerAddress)
+    }
+
+    /** The member path for a courier envelope we could actually open. Split from [handleCourier] to
+     *  keep both functions' return counts within detekt's limit — same reason [ingestOpenedSos] is
+     *  split from [handleSos]. */
+    private suspend fun ingestOpenedCourier(
+        groupId: String,
+        frame: MeshFrameCodec.Frame.Courier,
+        body: MeshFrameCodec.CourierBody,
+        peerAddress: String,
+    ) {
+        if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) {
+            Log.w(
+                "RelayResponder",
+                "courier envelope signature failed verification for a pinned sender — dropping " +
+                    "(possible impersonation)"
+            )
+            return
+        }
+        val envelope = CourierEnvelopeEntity(
+            id = frame.id, groupId = groupId, senderId = body.senderId, tag = frame.tag,
+            sealed = frame.sealed, createdAt = frame.createdAt, copiesRemaining = frame.copiesRemaining,
+        )
+        if (relay.admitCourierEnvelope(envelope)) {
+            learnPeerIdentity(peerAddress, body.senderId)
+            DiagnosticsLog.event(
+                "recv",
+                "NEW courier envelope from ${body.senderId.take(SENDER_ID_LOG_CHARS)}"
+            )
+        }
+    }
+
+    /** Blind-carry custody for a courier envelope tagged for a group we hold no key for — a
+     *  persisted [CourierEnvelopeEntity] row (`groupId`/`senderId` null), NOT [OpaqueFrameRelay]
+     *  custody, per decision 42's own finding that even SOS's blind custody ([takeOpaqueSosCustody]
+     *  above) uses [OpaqueFrameRelay]'s default 3-minute max age — the wrong shape for something
+     *  meant to survive a real multi-hour partition or an app restart. Single-hop only: this stores
+     *  what arrived, but [RelayEngine.relayableCourierEnvelopes] only ever reads own-group rows, so
+     *  this row is never proactively re-offered to a further peer — see that function's own doc for
+     *  why (nothing bounds further propagation without [CourierEnvelopeEntity.copiesRemaining]
+     *  actually meaning something yet, a later P4 slice's job). */
+    private suspend fun takeCourierCustody(frame: MeshFrameCodec.Frame.Courier) {
+        val envelope = CourierEnvelopeEntity(
+            id = frame.id, groupId = null, senderId = null, tag = frame.tag,
+            sealed = frame.sealed, createdAt = frame.createdAt, copiesRemaining = frame.copiesRemaining,
+        )
+        if (relay.admitCourierEnvelope(envelope)) {
+            DiagnosticsLog.event("relay", "carrying courier envelope (not a member)")
+        }
+    }
+
     /** Call right after [RelayEngine.createSos] succeeds for a message THIS device originated —
      *  see `MeshService.sendSos`. Without this, a freshly-authored message only ever left the
      *  device via `framesToPushOnConnect`'s one-shot push at the START of a connection; now that
@@ -1046,7 +1133,11 @@ class RelayResponder(
         val (nicknamesToPush, nickSkipped) = partitionByFilter(nicknames, peerFilter) {
             "nick:${it.groupId}:${it.senderId}:${it.updatedAt}"
         }
-        val filterSkipped = sosSkipped + evidSkipped + nickSkipped
+        // Own-group only (RelayEngine.relayableCourierEnvelopes) — a blind-carry row is advertised
+        // as held (currentCatalogKeys) but never reaches this push path. See that function's own doc.
+        val (courierToPush, courierSkipped) =
+            partitionByFilter(relay.relayableCourierEnvelopes(), peerFilter) { "cour:${it.id}" }
+        val filterSkipped = sosSkipped + evidSkipped + nickSkipped + courierSkipped
 
         // Per-connection cap on how many of these we actually push this connection — mirrors
         // consumeBudget's role for manifest chunk pushes (see maxChunksPerSession's doc), applied
@@ -1055,7 +1146,7 @@ class RelayResponder(
         // connection carrying an unusually large deficit can't monopolize the whole session
         // pushing it — anything left over is simply offered again next reconnect, same as a
         // filter-skipped item (see CatalogFilter's own class doc on why that's safe).
-        val wantToPush = sosToPush.size + evidToPush.size + nicknamesToPush.size
+        val wantToPush = sosToPush.size + evidToPush.size + nicknamesToPush.size + courierToPush.size
         val allowedToPush = consumeCatalogItemBudget(peerAddress, wantToPush)
         // Decision 37 (docs/DECISIONS.md): forwards each SOS's ORIGINAL sealed bytes verbatim, same
         // "never re-encrypt a relayed item" reasoning as floodForwardSos above. sealed is null only
@@ -1063,6 +1154,7 @@ class RelayResponder(
         var pushed = pushUpTo(sosToPush, allowedToPush, ::reframeStoredSos, respond)
         pushed += pushUpTo(evidToPush, allowedToPush - pushed, MeshFrameCodec::encodeEvidMeta, respond)
         pushed += pushUpTo(nicknamesToPush, allowedToPush - pushed, MeshFrameCodec::encodeNickname, respond)
+        pushed += pushUpTo(courierToPush, allowedToPush - pushed, ::reframeStoredCourier, respond)
         val budgetSkipped = wantToPush - pushed
 
         // The single most useful line for diagnosing "messaging isn't arriving" from a live
@@ -1106,10 +1198,20 @@ class RelayResponder(
     private fun reframeStoredSos(sos: SosEntity): ByteArray =
         MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, sos.ttl, sos.hop, sos.sealed!!)
 
+    /** Re-frames a stored, already-sealed courier envelope for push — same "forward the original
+     *  ciphertext verbatim" role [reframeStoredSos] plays for SOS. `tag`/`sealed` are null only
+     *  transiently during construction, never for a stored row (see [CourierEnvelopeEntity.tag]/
+     *  `sealed`'s own docs), so `!!` here documents an invariant rather than papering over a real
+     *  null case. */
+    private fun reframeStoredCourier(envelope: CourierEnvelopeEntity): ByteArray =
+        MeshFrameCodec.encodeCourier(
+            envelope.tag!!, envelope.id, envelope.createdAt, envelope.copiesRemaining, envelope.sealed!!
+        )
+
     /** Pushes [items] one at a time via [encode]/[respond] until either [items] is exhausted or
      *  [remainingBudget] items have been pushed — the shared shape behind each of
-     *  [handleCatalogFilter]'s three item categories, each drawing down the same per-connection
-     *  budget in sequence. Returns how many were actually pushed. */
+     *  [handleCatalogFilter]'s item categories, each drawing down the same per-connection budget in
+     *  sequence. Returns how many were actually pushed. */
     private suspend fun <T> pushUpTo(
         items: List<T>,
         remainingBudget: Int,
@@ -1186,6 +1288,7 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.WifiDirectCap -> handleWifiDirectCap(peerAddress)
                 is MeshFrameCodec.Frame.WifiDirectHandoff -> handleWifiDirectHandoff(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.WifiDirectAccept -> handleWifiDirectAccept(frame, peerAddress)
+                is MeshFrameCodec.Frame.Courier -> handleCourier(frame, peerAddress)
             }
         } catch (e: Exception) {
             Log.w("RelayResponder", "frame handling failed: ${e.message}")

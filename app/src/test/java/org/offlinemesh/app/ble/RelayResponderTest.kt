@@ -3,6 +3,7 @@ package org.offlinemesh.app.ble
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -10,6 +11,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.AppDatabase
+import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
@@ -394,5 +396,99 @@ class RelayResponderTest {
 
         val toAnotherPeer = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue(toAnotherPeer.any { it is MeshFrameCodec.Frame.SosSealed })
+    }
+
+    // ---------- couriers (P4 slice 3, docs/DECISIONS.md decision 43) ----------
+    // repo holds zero active groups in this file (see the class doc above — testGroupKey never goes
+    // through repo.groupDao), so any Frame.Courier fed through handleIncoming here is automatically
+    // unresolvable — the same "matchCourierTag's loop never runs, no Keystore touched" property
+    // decision 38's own equivalent test relies on for the handle-based blind-relay path.
+
+    @Test
+    fun `an unresolvable courier envelope is stored as blind carry, not opened`() = runTest {
+        val tag = ByteArray(16) { it.toByte() }
+        val frame = MeshFrameCodec.encodeCourier(tag, "env-1", System.currentTimeMillis(), 4, byteArrayOf(9, 9, 9))
+
+        responder.handleIncoming(frame, "peer1") { }
+
+        val stored = AppDatabase.get(context).courierEnvelopeDao().getById("env-1")
+        checkNotNull(stored)
+        assertEquals(null, stored.groupId)
+        assertEquals(null, stored.senderId)
+        assertArrayEquals(tag, stored.tag)
+        assertArrayEquals(byteArrayOf(9, 9, 9), stored.sealed)
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `a blind-carried courier envelope is never proactively re-offered to a further peer`() = runTest {
+        // The single most important behavior this slice enforces (see Frame.Courier's/
+        // RelayEngine.relayableCourierEnvelopes' own docs on why): nothing bounds multi-hop blind
+        // propagation yet (copiesRemaining stays inert until a later P4 slice), so a blind carrier
+        // must hold what arrived without pushing it onward — unlike SOS/position/presence/nickname's
+        // opaque custody, which DOES re-offer (see the "a carried frame is..." tests above).
+        val tag = ByteArray(16) { it.toByte() }
+        val frame = MeshFrameCodec.encodeCourier(tag, "env-blind", System.currentTimeMillis(), 4, byteArrayOf(1))
+        responder.handleIncoming(frame, "peer1") { }
+
+        val carried = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
+        assertTrue(carried.none { it is MeshFrameCodec.Frame.Courier })
+
+        val toPush = relay.relayableCourierEnvelopes()
+        assertTrue("relayableCourierEnvelopes must exclude blind-carry rows", toPush.none { it.id == "env-blind" })
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `an own-group courier envelope is advertised as held and pushed when the peer's filter lacks it`() = runTest {
+        // Seeded directly via the DAO (own-group, groupId non-null) rather than through
+        // RelayEngine.createCourierEnvelope — same technique this file's own sosFixture/
+        // evidenceFixture use to avoid GroupRepository.getGroupKey's Keystore dependency, per the
+        // class doc above.
+        val envelope = CourierEnvelopeEntity(
+            id = "env-own", groupId = "group-1", senderId = "sender-1",
+            tag = ByteArray(16) { it.toByte() }, sealed = byteArrayOf(1, 2, 3),
+            createdAt = System.currentTimeMillis(), copiesRemaining = RelayEngine.COURIER_INITIAL_COPY_BUDGET,
+        )
+        relay.admitCourierEnvelope(envelope)
+
+        // Advertised as held: our own outgoing catalog filter must claim it.
+        val onConnectFrames = responder.framesToPushOnConnect()
+        val ourFilter = onConnectFrames.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.CatalogFilter>().single()
+        val decodedFilter = CatalogFilter.fromBits(ourFilter.bits, ourFilter.seed, ourFilter.sizeBits)
+        assertTrue(decodedFilter.mightContain("cour:env-own"))
+
+        // And actually pushed when a peer's filter says they don't have it.
+        val peerFilter = CatalogFilter.build(emptyList())
+        val peerFilterFrame =
+            MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+        val responded = mutableListOf<ByteArray>()
+        responder.handleIncoming(peerFilterFrame, "peer1") { responded.add(it) }
+        val pushedCourier = responded.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Courier>().singleOrNull()
+        assertEquals("env-own", pushedCourier?.id)
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `does not re-push a courier envelope the peer's filter already says they have`() = runTest {
+        val envelope = CourierEnvelopeEntity(
+            id = "env-known", groupId = "group-1", senderId = "sender-1",
+            tag = ByteArray(16) { it.toByte() }, sealed = byteArrayOf(1),
+            createdAt = System.currentTimeMillis(), copiesRemaining = RelayEngine.COURIER_INITIAL_COPY_BUDGET,
+        )
+        relay.admitCourierEnvelope(envelope)
+
+        val peerFilter = CatalogFilter.build(listOf("cour:env-known"))
+        val peerFilterFrame =
+            MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+        val responded = mutableListOf<ByteArray>()
+        responder.handleIncoming(peerFilterFrame, "peer1") { responded.add(it) }
+
+        val pushedCourierIds = responded.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Courier>().map { it.id }
+        assertTrue(pushedCourierIds.isEmpty())
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
     }
 }

@@ -43,6 +43,10 @@ object MeshFrameCodec {
     const val FRAME_WIFI_DIRECT_HANDOFF: Byte = 0x1A  // "here's a chunk deficit worth accelerating"
     const val FRAME_WIFI_DIRECT_ACCEPT: Byte = 0x1B   // "yes, forming the link"
 
+    // P4 slice 3 (docs/DECISIONS.md decision 43, PLAN-v2.md §4.2) — a courier envelope, spray-and-
+    // wait store-and-carry delivery for a partition flood-relay alone can't bridge in time.
+    const val FRAME_COURIER: Byte = 0x1C
+
     /** Display names are a small courtesy label, not an identity — kept short so it stays a
      *  one-line, cheap-to-relay addition rather than a second chat field. */
     const val MAX_USERNAME_CHARS = 20
@@ -109,7 +113,13 @@ object MeshFrameCodec {
     // encode/decode functions instead of inside them (Tier B reuses [encodePosition]/
     // [encodeCatalogFilter] verbatim for its own, far tighter budget — see MeshProtocol's
     // BROADCAST_TIER_BUDGET_BYTES — and must never see a bucket-padded frame).
-    const val VERSION: Int = 8
+    // v9: new FRAME_COURIER (docs/DECISIONS.md decision 43, PLAN-v2.md §4.2's courier/spray-and-wait
+    // item) — a genuinely new frame type, not a reused byte, so an old build's decode() would
+    // already hit its own `else -> null` branch and drop it safely without a version bump. Bumped
+    // anyway, matching this project's own standing discipline (see v8's note above) of treating
+    // every wire-affecting change as one discoverable signal rather than distinguishing "needed for
+    // safety" from "needed for discoverability."
+    const val VERSION: Int = 9
 
     private const val PAD_BUCKET_1 = 256
     private const val PAD_BUCKET_2 = 512
@@ -309,6 +319,35 @@ object MeshFrameCodec {
             val receiverNonce: ByteArray,
             val readyAtEpochMs: Long,
             val mac: ByteArray,
+        ) : Frame()
+
+        /** P4 slice 3 (`docs/DECISIONS.md` decision 43, `PLAN-v2.md` §4.2) — a courier envelope on
+         *  the wire. [tag] replaces what would otherwise be a cleartext `groupId`, same role
+         *  [SosSealed.handle]/[PositionSealed.handle] play — see [courierTag]'s own doc. [id] stays
+         *  cleartext (not just inside the seal) for the identical reason [SosSealed.id] does: both a
+         *  member's own dedup and a blind carrier's ciphertext-independent dedup key off it.
+         *
+         *  [createdAt] is cleartext here, unlike [SosBody.timestamp] (which lives only inside the
+         *  seal) — a deliberate difference, not an oversight. A blind carrier storing this as a
+         *  [org.offlinemesh.app.data.CourierEnvelopeEntity] row needs an honest age for
+         *  [org.offlinemesh.app.ble.RelayEngine.pruneExpired]'s 24h cutoff, but can't open the seal
+         *  to read a timestamp kept inside it — exposing creation time in the clear reveals nothing
+         *  about who or where, the same tradeoff [PositionSealed.hop]/[SosSealed.hop] already make
+         *  for topology distance instead of timing. It also lets the member-path open derive the
+         *  exact content-epoch key in one shot (`contentEpochKey(rootKey, createdAt/1000)`) rather
+         *  than SOS's [CryptoUtils.candidateContentEpochKeys] search — the same single-exact-epoch
+         *  treatment decision 39 already gives evidence-meta/nickname/presence precisely because
+         *  their own timestamp is likewise cleartext.
+         *
+         *  [copiesRemaining] travels verbatim, forwarded unchanged by this slice — see
+         *  [org.offlinemesh.app.ble.RelayEngine.admitCourierEnvelope]'s own doc for why the actual
+         *  copy-budget-halving arithmetic is a later P4 slice's job, not this one's. */
+        data class Courier(
+            val tag: ByteArray,
+            val id: String,
+            val createdAt: Long,
+            val copiesRemaining: Int,
+            val sealed: ByteArray,
         ) : Frame()
     }
 
@@ -730,6 +769,19 @@ object MeshFrameCodec {
         return frame(FRAME_MANIFEST) { d -> d.writeStr(evidenceId); d.writeInt(totalChunks); d.write(bitset) }
     }
 
+    /** Frames an already-stored/sealed courier envelope for the wire — one function suffices here
+     *  (unlike SOS's `sealSos` vs. `sealSosBody`+`reframeSosForRelay` split) since a courier envelope
+     *  is never sealed-and-sent in one call the way a freshly-authored SOS is: `RelayEngine.
+     *  createCourierEnvelope` already stores everything a push needs on `CourierEnvelopeEntity`, and
+     *  this just reads that row and frames it — the same "reframe a stored row" role
+     *  `reframeStoredSos` plays for SOS, not `sealSos`'s role. See [Frame.Courier]'s own doc for why
+     *  [createdAt] and [copiesRemaining] are cleartext here. */
+    fun encodeCourier(tag: ByteArray, id: String, createdAt: Long, copiesRemaining: Int, sealed: ByteArray): ByteArray =
+        frame(FRAME_COURIER) { d ->
+            d.writeBlob(tag); d.writeStr(id); d.writeLong(createdAt)
+            d.writeByte(copiesRemaining.coerceIn(0, MAX_UNSIGNED_BYTE)); d.writeStr16Bytes(sealed)
+        }
+
     /** Opens a sealed position body. Null if the key is wrong / not our group / tampered (GCM tag). */
     fun openPosition(sealed: ByteArray, key: ByteArray): PositionBody? {
         val inner = CryptoUtils.decrypt(key, sealed) ?: return null
@@ -980,6 +1032,14 @@ object MeshFrameCodec {
                     val readyAtEpochMs = buf.long
                     val mac = buf.readBlob() ?: return null
                     Frame.WifiDirectAccept(evidenceId, groupId, senderNonce, receiverNonce, readyAtEpochMs, mac)
+                }
+                FRAME_COURIER -> {
+                    val tag = buf.readBlob() ?: return null
+                    val id = buf.readStr()
+                    val createdAt = buf.long
+                    val copiesRemaining = buf.get().toInt() and 0xFF
+                    val sealed = buf.readStr16Bytes()
+                    Frame.Courier(tag, id, createdAt, copiesRemaining, sealed)
                 }
                 else -> null
             }

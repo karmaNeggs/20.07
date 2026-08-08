@@ -2,6 +2,7 @@ package org.offlinemesh.app.ble
 
 import android.content.Context
 import android.util.Log
+import androidx.room.withTransaction
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.CourierEnvelopeEntity
@@ -228,14 +229,11 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
      *  exactly (raw-body seal via [MeshFrameCodec.sealCourierBody], not a would-be frame-and-seal
      *  call, for the identical reason that function's own doc gives). This is a supplementary
      *  delivery path alongside whatever flood-relay already does for [groupId]'s content — it does
-     *  not replace [createSos]/[createEvidence], and this slice never calls it from anywhere; it
-     *  exists to be exercised directly (by a test, or a later slice's caller) with a working,
-     *  persisted, round-trippable row. GATT push/receive and the blind-carry path (null [groupId]/
-     *  [senderId] rows) are later P4 slices — see [org.offlinemesh.app.data.CourierEnvelopeEntity]'s
-     *  own doc. Deliberately does NOT bump [epoch] the way [createSos]/[createEvidence]/
-     *  [setNickname] do — that signal means "something new is pushable to a peer," and nothing
-     *  reads courier envelopes for pushing yet (a later slice's job); bumping it now would be a
-     *  false signal, not an oversight. */
+     *  not replace [createSos]/[createEvidence]. As of P4 slice 3 (decision 43), this now routes
+     *  through [admitCourierEnvelope] (previously called `courierEnvelopeDao.insert` directly and
+     *  deliberately did NOT bump [epoch] — see that decision's own note on why continuing not to
+     *  would now be a stale precondition, not a design choice: slice 3 is exactly the point
+     *  something starts reading courier envelopes for pushing). */
     suspend fun createCourierEnvelope(groupId: String, payload: ByteArray): CourierEnvelopeEntity {
         val id = UUID.randomUUID().toString()
         val createdAt = System.currentTimeMillis()
@@ -250,9 +248,53 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
             id = id, groupId = groupId, senderId = senderId, tag = tag, sealed = sealed,
             createdAt = createdAt, copiesRemaining = COURIER_INITIAL_COPY_BUDGET,
         )
-        courierEnvelopeDao.insert(envelope)
+        admitCourierEnvelope(envelope)
         return envelope
     }
+
+    /** P4 slice 3 (docs/DECISIONS.md decision 43, PLAN-v2.md §4.2's "bounded pool with tiers") — the
+     *  single gate every courier envelope insert goes through, whether self-authored
+     *  ([createCourierEnvelope]) or received over GATT ([org.offlinemesh.app.ble.RelayResponder]'s
+     *  `ingestOpenedCourier`/`takeCourierCustody`). Applies [CourierPool.decide]'s admission policy
+     *  (evicting the oldest same-tier row first if the relevant capacity is already full — own-group
+     *  envelopes are never hard-rejected, only ever evict a sibling in the degenerate all-40-own-group
+     *  case; see [CourierPool]'s own doc) inside a single Room transaction, closing a real check-
+     *  then-act race: [org.offlinemesh.app.ble.MeshGattClient]/[org.offlinemesh.app.ble.MeshGattServer]
+     *  can feed this concurrently from different peer connections, the same class of hazard
+     *  [ConnectionAttemptTracker]'s own class doc names explicitly for a different piece of shared
+     *  state. Bumps [epoch] on a genuinely new insert (the Room-insert-returned-a-real-rowid sense of
+     *  "new," same as every other `create*`/`ingest*` here) — the first courier code path to do so;
+     *  see [createCourierEnvelope]'s own note on why that's now correct, not an oversight. */
+    suspend fun admitCourierEnvelope(envelope: CourierEnvelopeEntity): Boolean = db.withTransaction {
+        val isOwnGroup = envelope.groupId != null
+        val ownCount = courierEnvelopeDao.countOwnGroup()
+        val blindCount = courierEnvelopeDao.countBlindCarry()
+        when (CourierPool.decide(ownCount, blindCount, isOwnGroup)) {
+            CourierPool.Admission.ACCEPT -> {}
+            CourierPool.Admission.EVICT_OLDEST_BLIND ->
+                courierEnvelopeDao.oldestBlindCarryId()?.let { courierEnvelopeDao.deleteById(it) }
+            CourierPool.Admission.EVICT_OLDEST_OWN ->
+                courierEnvelopeDao.oldestOwnGroupId()?.let { courierEnvelopeDao.deleteById(it) }
+        }
+        val rowId = courierEnvelopeDao.insert(envelope)
+        val isNew = rowId != -1L
+        if (isNew) epoch.incrementAndGet()
+        isNew
+    }
+
+    /** What we ADVERTISE holding (own-group AND blind-carry both included) — same "held, not
+     *  relayable" reasoning [heldSosIds]/[heldEvidenceIds] already give: this only changes what a
+     *  peer's [org.offlinemesh.app.ble.CatalogFilter] sees us claiming, stopping them from re-
+     *  offering us something we already carry (blind or not) — see [relayableCourierEnvelopes] for
+     *  what's actually eligible to be PUSHED, a strictly narrower set. */
+    suspend fun heldCourierIds(): List<String> = courierEnvelopeDao.allIds()
+
+    /** Own-group rows only — see [org.offlinemesh.app.data.CourierEnvelopeDao.getOwnGroup]'s own doc
+     *  for why a blind-carry row is held and advertised ([heldCourierIds]) but never proactively
+     *  pushed onward: nothing bounds that further propagation yet, since [CourierEnvelopeEntity.
+     *  copiesRemaining] stays inert (forwarded verbatim, never split) until a later P4 slice's
+     *  handover arithmetic gives it real meaning. */
+    suspend fun relayableCourierEnvelopes(): List<CourierEnvelopeEntity> = courierEnvelopeDao.getOwnGroup()
 
     // ---------- ingesting items heard over the mesh ----------
 

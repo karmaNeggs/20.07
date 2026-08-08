@@ -6,6 +6,28 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-08, decision 43 (`docs/DECISIONS.md`): P4's third slice, GATT wiring — wire type,
+  resolver, member/blind-carry paths, bounded pool with tiers, DONE.** The first slice where a
+  courier envelope actually crosses a GATT connection. A Plan agent designed it first (comparable
+  scope to decision 38). Key finding that shaped the whole slice: `copiesRemaining` stays inert
+  until a later slice's handover arithmetic, so a blind carrier stores an envelope but never
+  re-offers it onward — multi-hop propagation without a real bound would be an unbounded flood
+  wearing a "bounded" name. `FRAME_COURIER: Byte = 0x1C`, `MeshFrameCodec.VERSION` 8 → 9.
+  `GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag` mirror the handle resolver exactly
+  (with a dedicated regression test for the one real gotcha: `COURIER_TAG_LEN` must be passed
+  explicitly, not left at `candidateAdvertisementIds`' 6-byte default). New `CourierPool` object
+  (`ble/`) — pure, unit-tested admission policy for the "20-of-40 reserved" bounded pool, taken
+  verbatim from `PLAN-v2.md`'s own spec table, own-group slots a hard floor (never soft-prioritized),
+  neither tier ever hard-rejects (evicts its own oldest sibling instead). `RelayEngine.
+  admitCourierEnvelope` is the single gate both insertion paths now share, wrapped in this
+  codebase's first `db.withTransaction` use to close a real concurrent-connection race. Push-on-
+  connect wiring fits entirely inside the existing `CatalogFilter` mechanism — no new per-connection
+  step, no new budget constant; own-group envelopes get proactively pushed, blind-carry rows are
+  held/advertised but never proactively re-offered to a third peer. 442 tests (up from 416), detekt
+  clean, both variants green, no `missing_rules.txt`. Version bumped to v0.7.10-dev, fresh debug APK
+  built and `aapt`-confirmed. **NOT hardware-confirmed** — adds to the existing next-live-round
+  backlog (37/38/40). Full detail in decision 43's own entry and Part 7's own P4 entry.
+
 - **2026-08-08, decision 42 (`docs/DECISIONS.md`): P4's second slice, persisted courier envelope +
   local creation, no relay wiring, DONE.** Genuinely new persisted storage — confirmed
   `OpaqueFrameRelay` (SOS/position/presence's existing blind-relay mechanism) is the wrong shape by
@@ -1112,7 +1134,7 @@ cooldown regime; diversity-based link selection; RSSI-gated scheduling.
 v1 baseline.*
 
 **P4 — Couriers (§4.2).** Group-addressed spray-and-wait for partition-crossing eventuality.
-**STATUS (2026-08-08): slices 1-2 of 4 done — see `docs/DECISIONS.md` decisions 41-42.**
+**STATUS (2026-08-08): slices 1-3 of 4 done — see `docs/DECISIONS.md` decisions 41-43.**
 
 **Slice 1 (41) — courier tag + envelope seal/open, crypto construction only.** `MeshFrameCodec.
 courierTag`/`candidateCourierTags` (`HMAC(groupKey, UTC-day)`, 16 bytes) and `sealCourierBody`/
@@ -1139,18 +1161,27 @@ originally sketched, on the same "prove one layer before the next" discipline sl
 coverage instead. 416 tests (up from 412). No GATT push/receive yet — testable end-to-end at the
 Room-entity level only.
 
-**Slice 3 (not started) — GATT wiring: push/receive, member path, bounded pool with tiers.** New
-`Frame.Courier` + `FRAME_COURIER: Byte = 0x1C` + `encode`/`decode` branch → `MeshFrameCodec.VERSION`
-bump (deferred here from slice 2). `GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag`,
-mirroring `resolveGroupKeyByHandle`/`matchHandle` with `candidateCourierTags`. `RelayResponder.
-handleCourier`/`ingestOpenedCourier` (member path, mirrors `handleSos`) plus a genuinely new
-bounded-pool acceptance policy — this app has no reputation/trust tiering, so bitchat's "20 of 40
-slots reserved for trusted depositors" becomes "reserve N slots for envelopes tagged under a group we
-hold a key for, remainder for blind carry." This is new logic, not a reuse of `OpaqueFrameRelay`'s
-unbounded-LRU-with-age-eviction shape (confirmed wrong fit in slice 2's own research: `opaqueSos`
-itself uses the same 3-minute default `MAX_AGE_MILLIS` position/presence do, so even SOS's own blind
-custody was never built to survive a real partition). Sim/hardware gates below become meaningful
-starting here — the first slice where an envelope actually crosses a GATT connection.
+**Slice 3 (43) — GATT wiring: push/receive, member path, bounded pool with tiers.** New
+`Frame.Courier` + `FRAME_COURIER: Byte = 0x1C` + `encode`/`decode` branch, `MeshFrameCodec.VERSION`
+8 → 9 (deferred here from slice 2, as planned). `GroupRepository.resolveGroupKeyByCourierTag`/
+`matchCourierTag`, mirroring `resolveGroupKeyByHandle`/`matchHandle` — with a dedicated regression
+test for the one real gotcha (`COURIER_TAG_LEN` must be passed explicitly, not left at
+`candidateAdvertisementIds`' 6-byte default). `RelayResponder.handleCourier`/`ingestOpenedCourier`/
+`takeCourierCustody` mirror `handleSos`'s resolve-then-branch shape, with blind carry storing a real
+`CourierEnvelopeEntity` row (never `OpaqueFrameRelay` — confirmed wrong fit: `opaqueSos` itself uses
+the same 3-minute default `MAX_AGE_MILLIS` position/presence do) that is **never re-offered to a
+further peer** — the key structural finding this slice surfaced: `copiesRemaining` stays inert until
+slice 4, so nothing bounds multi-hop blind propagation yet; single-hop-only is the correct scope
+line, not an oversight. New `CourierPool` object (`ble/`) implements the bounded-pool-with-tiers
+policy — 40 total, 20 hard-reserved for own-group (never soft-prioritized), neither tier ever hard-
+rejects. `RelayEngine.admitCourierEnvelope` is the single admission gate (both self-authored and
+received envelopes), using this codebase's first `db.withTransaction` to close a real concurrent-
+connection race. Push/receive folds entirely into the existing `CatalogFilter` deficit-sync — no new
+per-connection step or budget constant; own-group envelopes get proactively pushed, blind-carry rows
+are held/advertised (stopping redundant re-pushes) but never proactively offered onward. 442 tests
+(up from 416). Sim/hardware gates below become meaningful starting here — the first slice where an
+envelope actually crosses a GATT connection. **NOT hardware-confirmed** — adds to the existing
+next-live-round backlog (37/38/40).
 
 **Slice 4 (not started) — handover mechanics: copy-budget split + rate limiting.** Per-envelope
 `copiesRemaining` persisted on `CourierEnvelopeEntity` (unlike `OpaqueFrameRelay`'s in-memory design

@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -45,7 +46,9 @@ class RelayEngineTest {
             db.sosDao().deleteForGroup("group-1")
             db.evidenceDao().deleteForGroup("group-1")
             db.seenMessageDao().prune(Long.MAX_VALUE)
-            db.courierEnvelopeDao().deleteForGroup("group-1")
+            // pruneOlderThan(MAX_VALUE), not deleteForGroup — P4 slice 3's own pool/eviction tests
+            // insert blind-carry rows too (groupId == null), which deleteForGroup can't reach.
+            db.courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
         }
     }
 
@@ -215,5 +218,91 @@ class RelayEngineTest {
         assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("env-mine"))
         assertEquals(other, AppDatabase.get(context).courierEnvelopeDao().getById("env-other"))
         AppDatabase.get(context).courierEnvelopeDao().deleteForGroup("group-2")
+    }
+
+    // ---------- admitCourierEnvelope / heldCourierIds / relayableCourierEnvelopes (P4 slice 3) ----------
+    // CourierPool.decide's own admission-policy truth table is covered in isolation by
+    // CourierPoolTest (plain JVM, no Room) — these tests instead prove the DAO wiring around it:
+    // eviction actually deletes the right row, epoch bumps on a genuine insert, and the held-vs-
+    // relayable split (own-group only for push) is correctly enforced end to end.
+
+    private fun blindCourierFixture(id: String, createdAt: Long = System.currentTimeMillis()) =
+        CourierEnvelopeEntity(
+            id = id, groupId = null, senderId = null,
+            tag = ByteArray(16) { it.toByte() }, sealed = byteArrayOf(1, 2, 3, 4),
+            createdAt = createdAt, copiesRemaining = RelayEngine.COURIER_INITIAL_COPY_BUDGET,
+        )
+
+    @Test
+    fun `admitCourierEnvelope bumps the catalog epoch on a genuinely new insert`() = runTest {
+        // The un-defer decision 42 flagged: createCourierEnvelope previously did NOT bump epoch
+        // because nothing read courier envelopes for pushing yet — slice 3 is exactly the point
+        // that stops being true, so admitCourierEnvelope must bump it now.
+        val before = relay.catalogEpoch
+        relay.admitCourierEnvelope(courierFixture("env-new"))
+        assertTrue(relay.catalogEpoch > before)
+    }
+
+    @Test
+    fun `admitCourierEnvelope does not bump the catalog epoch on a duplicate id`() = runTest {
+        relay.admitCourierEnvelope(courierFixture("env-dup"))
+        val afterFirst = relay.catalogEpoch
+        val isNew = relay.admitCourierEnvelope(courierFixture("env-dup"))
+        assertFalse(isNew)
+        assertEquals(afterFirst, relay.catalogEpoch)
+    }
+
+    @Test
+    fun `admitCourierEnvelope evicts the oldest blind-carry row once the pool is full`() = runTest {
+        // Fill blind-carry to its reserved sub-capacity (CAPACITY - OWN_GROUP_RESERVED = 20) with
+        // rows of increasing age, oldest first, then admit one more — the oldest must be gone.
+        val blindCapacity = CourierPool.CAPACITY - CourierPool.OWN_GROUP_RESERVED
+        val base = System.currentTimeMillis() - 1_000_000L
+        for (i in 0 until blindCapacity) {
+            relay.admitCourierEnvelope(blindCourierFixture("blind-$i", base + i))
+        }
+        assertNotNull(AppDatabase.get(context).courierEnvelopeDao().getById("blind-0"))
+
+        relay.admitCourierEnvelope(blindCourierFixture("blind-new", base + blindCapacity))
+
+        assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("blind-0"))
+        assertNotNull(AppDatabase.get(context).courierEnvelopeDao().getById("blind-new"))
+        // Cleanup — these rows are all blind (groupId == null), outside setUp's deleteForGroup reach.
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `admitCourierEnvelope never rejects an own-group insert even when blind-carry is full`() = runTest {
+        val blindCapacity = CourierPool.CAPACITY - CourierPool.OWN_GROUP_RESERVED
+        for (i in 0 until blindCapacity) {
+            relay.admitCourierEnvelope(blindCourierFixture("blind-$i"))
+        }
+        val accepted = relay.admitCourierEnvelope(courierFixture("env-mine-2"))
+        assertTrue("an own-group insert must never be hard-rejected", accepted)
+        assertNotNull(AppDatabase.get(context).courierEnvelopeDao().getById("env-mine-2"))
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `heldCourierIds includes both own-group and blind-carry rows`() = runTest {
+        relay.admitCourierEnvelope(courierFixture("env-own"))
+        relay.admitCourierEnvelope(blindCourierFixture("env-blind"))
+        val held = relay.heldCourierIds()
+        assertTrue(held.contains("env-own"))
+        assertTrue(held.contains("env-blind"))
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `relayableCourierEnvelopes excludes blind-carry rows`() = runTest {
+        relay.admitCourierEnvelope(courierFixture("env-own-2"))
+        relay.admitCourierEnvelope(blindCourierFixture("env-blind-2"))
+        val relayable = relay.relayableCourierEnvelopes().map { it.id }
+        assertTrue(relayable.contains("env-own-2"))
+        assertFalse(
+            "a blind-carried envelope must never be proactively pushed to a third peer",
+            relayable.contains("env-blind-2"),
+        )
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
     }
 }
