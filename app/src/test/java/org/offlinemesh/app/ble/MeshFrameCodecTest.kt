@@ -277,6 +277,147 @@ class MeshFrameCodecTest {
         assertNull(MeshFrameCodec.openSos(decoded.sealed, rootKey))
     }
 
+    // ---------- couriers (P4 slice 1, decision 40): crypto construction only ----------
+    // No Frame.Courier type and no FRAME_COURIER wire byte exist yet — see MeshFrameCodec's own
+    // "couriers" section doc for why this slice is deliberately isolated to sealCourierBody/
+    // openCourierBody/courierTag alone. Tests below mirror the SOS section above one-for-one
+    // (opaque-without-key, tamper detection, deterministic nonce, signature/impersonation,
+    // no-signing-key, oversized payload) since sealCourierBody is a direct structural analogue of
+    // sealSosBody, split from a would-be "sealCourier" the same way and for the same reason.
+
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosFixture's identical suppress
+    private fun sealCourierFixture(
+        rootKey: ByteArray, id: String, senderId: String, payload: ByteArray, createdAt: Long,
+        signingPrivateKey: ByteArray? = null,
+    ): Pair<ByteArray, ByteArray> {
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, createdAt / 1000)
+        val sealed = MeshFrameCodec.sealCourierBody(contentKey, id, senderId, payload, createdAt, signingPrivateKey)
+        return sealed to contentKey
+    }
+
+    @Test
+    fun `courier body is opaque without the group key and opens correctly with it`() {
+        val key = randomKey()
+        val payload = "rendezvous at the old bridge, 6pm".toByteArray()
+        val (sealed, contentKey) = sealCourierFixture(key, "env-1", "sender-1", payload, 1_700_000_000_000L)
+        assertNull(MeshFrameCodec.openCourierBody(sealed, randomKey()))
+        val body = MeshFrameCodec.openCourierBody(sealed, contentKey)
+        checkNotNull(body)
+        assertEquals("sender-1", body.senderId)
+        assertArrayEquals(payload, body.payload)
+        assertEquals(1_700_000_000_000L, body.createdAt)
+    }
+
+    @Test
+    fun `tampering with any byte of a sealed courier envelope makes it fail to open`() {
+        val key = randomKey()
+        val (sealed, contentKey) = sealCourierFixture(
+            key, "env-1", "sender-1", byteArrayOf(1, 2, 3), 1_700_000_000_000L,
+        )
+        val tampered = sealed.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
+        assertNull(MeshFrameCodec.openCourierBody(tampered, contentKey))
+    }
+
+    @Test
+    fun `sealing the same courier envelope id twice produces identical ciphertext`() {
+        // Same deterministic-nonce reasoning as SOS's equivalent test — an envelope id is sealed
+        // once, ever; a courier that ends up holding two independently-relayed copies of the same
+        // envelope must be able to dedup by comparing sealed bytes directly (later slice's concern),
+        // which only holds if re-sealing identical content is byte-for-byte reproducible.
+        val key = randomKey()
+        val (a, _) = sealCourierFixture(key, "env-1", "sender-1", byteArrayOf(9, 9, 9), 1_700_000_000_000L)
+        val (b, _) = sealCourierFixture(key, "env-1", "sender-1", byteArrayOf(9, 9, 9), 1_700_000_000_000L)
+        assertTrue(a.contentEquals(b))
+    }
+
+    @Test
+    fun `courier body carries a signature, verifiable once opened`() {
+        val key = randomKey()
+        val pair = SenderIdentity.generateKeyPair()
+        val (sealed, contentKey) = sealCourierFixture(
+            key, "env-1", "sender-1", byteArrayOf(1), 1_700_000_000_000L, signingPrivateKey = pair.privateKey,
+        )
+        val body = MeshFrameCodec.openCourierBody(sealed, contentKey)
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertTrue(SenderIdentity.verify(pair.publicKey, body.signature!!, body.signedBytes))
+    }
+
+    @Test
+    fun `courier signature detects impersonation even though the group-key seal is still valid`() {
+        val key = randomKey()
+        val impostor = SenderIdentity.generateKeyPair()
+        val realSender = SenderIdentity.generateKeyPair()
+        val (sealed, contentKey) = sealCourierFixture(
+            key, "env-1", "real-sender-id", byteArrayOf(1), 1_700_000_000_000L,
+            signingPrivateKey = impostor.privateKey,
+        )
+        val body = MeshFrameCodec.openCourierBody(sealed, contentKey)
+        checkNotNull(body)
+        checkNotNull(body.signature)
+        assertFalse(SenderIdentity.verify(realSender.publicKey, body.signature!!, body.signedBytes))
+        assertTrue(SenderIdentity.verify(impostor.publicKey, body.signature!!, body.signedBytes))
+    }
+
+    @Test
+    fun `courier body with no signing key round-trips a null signature`() {
+        val key = randomKey()
+        val (sealed, contentKey) = sealCourierFixture(key, "env-1", "sender-1", byteArrayOf(1), 1_700_000_000_000L)
+        val body = MeshFrameCodec.openCourierBody(sealed, contentKey)
+        checkNotNull(body)
+        assertNull(body.signature)
+    }
+
+    @Test
+    fun `sealCourierBody rejects a payload exceeding MAX_COURIER_PAYLOAD_BYTES`() {
+        val oversized = ByteArray(MeshFrameCodec.MAX_COURIER_PAYLOAD_BYTES + 1)
+        org.junit.Assert.assertThrows(IllegalArgumentException::class.java) {
+            MeshFrameCodec.sealCourierBody(randomKey(), "env-1", "sender-1", oversized, 1_700_000_000_000L)
+        }
+    }
+
+    @Test
+    fun `sealCourierBody still accepts a payload at exactly MAX_COURIER_PAYLOAD_BYTES`() {
+        val key = randomKey()
+        val exact = ByteArray(MeshFrameCodec.MAX_COURIER_PAYLOAD_BYTES) { it.toByte() }
+        val (sealed, contentKey) = sealCourierFixture(key, "env-1", "sender-1", exact, 1_700_000_000_000L)
+        val body = MeshFrameCodec.openCourierBody(sealed, contentKey)
+        checkNotNull(body)
+        assertArrayEquals(exact, body.payload)
+    }
+
+    @Test
+    fun `courier body opens under its content epoch key but not under the raw root key`() {
+        // Mirrors "sos body opens under its content epoch key but not under the raw root key" below
+        // — proves this slice followed decision 39's key discipline from day one, not bolted on later.
+        val rootKey = randomKey()
+        val (sealed, contentKey) = sealCourierFixture(rootKey, "env-1", "sender-1", byteArrayOf(1), 1_700_000_000_000L)
+        assertNotNull(MeshFrameCodec.openCourierBody(sealed, contentKey))
+        assertNull(MeshFrameCodec.openCourierBody(sealed, rootKey))
+    }
+
+    @Test
+    fun `courier tag resolves against the right group among several candidates and no other`() {
+        // The crypto-only equivalent of GroupRepositoryHandleTest's coverage (decision 38) — proving
+        // the primitive is resolvable by candidate-tag matching before any DAO-backed
+        // resolveGroupKeyByCourierTag exists (deferred to a later P4 slice).
+        val groups = (1..5).map { it.toString() to randomKey() }
+        val (targetGroupId, targetKey) = groups[2]
+        val createdAt = 1_700_000_000L
+        val tag = MeshFrameCodec.courierTag(targetKey, createdAt)
+
+        val resolved = groups.firstOrNull { (_, key) ->
+            MeshFrameCodec.candidateCourierTags(key, createdAt).any { it.contentEquals(tag) }
+        }
+        assertEquals(targetGroupId, resolved?.first)
+
+        val resolvedCount = groups.count { (_, key) ->
+            MeshFrameCodec.candidateCourierTags(key, createdAt).any { it.contentEquals(tag) }
+        }
+        assertEquals(1, resolvedCount)
+    }
+
     @Test
     fun `evidence meta frame round-trips including the sha256 digest`() {
         val meta = EvidenceEntity(

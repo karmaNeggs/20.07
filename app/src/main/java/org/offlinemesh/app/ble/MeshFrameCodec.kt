@@ -769,6 +769,104 @@ object MeshFrameCodec {
         }
     }
 
+    // ---------- couriers (P4 slice 1, decision 40 continued — PLAN-v2.md §4.2) ----------
+    // Crypto construction only in this slice: no Frame subtype, no FRAME_COURIER wire byte, no
+    // storage, no relay wiring. Deliberately isolated the same way decision 39's contentEpochKey
+    // was directly unit-testable with zero Robolectric/Room/BLE surface — and split into a body-
+    // only seal (mirroring sealSosBody, not sealSos) from day one specifically because decision 37's
+    // own real bug (RelayEngine.createSos once stored sealSos's FULLY-FRAMED output where raw
+    // ciphertext was expected, double-framing every self-authored SOS) happened exactly at this
+    // seal/frame boundary — building couriers' storage-vs-send split correctly from the start avoids
+    // reintroducing that same trap once a Frame.Courier/FRAME_COURIER wire type lands in a later
+    // slice.
+
+    /** Envelope recognition tag for a courier (`PLAN-v2.md` §4.2) — `HMAC(groupKey, UTC-day)`, 16
+     *  bytes. Same construction as [groupHandle], a different window and length (see
+     *  [CryptoUtils.COURIER_TAG_WINDOW_SECONDS]/[CryptoUtils.COURIER_TAG_LEN]'s own docs): a courier
+     *  tag deliberately rolls over daily — the spec's own choice, so an envelope's recognizability
+     *  window is bounded independent of its 24h TTL — where [groupHandle] deliberately stays stable
+     *  for a GATT frame's whole relay life instead. Any member can recognise and open an envelope
+     *  carrying this tag; a non-member courier that only sees the tag learns neither the group, the
+     *  sender, nor the content — the same blind-carry property [groupHandle] already gives GATT
+     *  frames, extended to a per-day rather than per-relay-life granularity. */
+    fun courierTag(key: ByteArray, epochSeconds: Long): ByteArray =
+        CryptoUtils.rotatingAdvertisementId(
+            key, epochSeconds, CryptoUtils.COURIER_TAG_WINDOW_SECONDS, CryptoUtils.COURIER_TAG_LEN,
+        )
+
+    /** Candidate tags for the current UTC day plus its immediate neighbours, mirroring
+     *  [candidateAdvertisementIds]' own ±1-window tolerance — an envelope created near a day
+     *  boundary, or held by a courier for hours before being offered to a member, must still resolve
+     *  on either side of that boundary. */
+    fun candidateCourierTags(key: ByteArray, nowSeconds: Long): List<ByteArray> =
+        CryptoUtils.candidateAdvertisementIds(
+            key, nowSeconds, CryptoUtils.COURIER_TAG_WINDOW_SECONDS, CryptoUtils.COURIER_TAG_LEN,
+        )
+
+    /** Spec's own "Cap 16 KiB" (`PLAN-v2.md` §4.2) on a courier envelope's carried payload. */
+    const val MAX_COURIER_PAYLOAD_BYTES = 16 * 1024
+
+    /** Deterministic per-envelope nonce, same reasoning as [sosNonce]: a courier envelope's [id] is
+     *  sealed exactly once, ever — content is immutable once created — so hashing the id alone is
+     *  sufficient (nonce reuse is only unsafe across DIFFERENT plaintexts under one key; re-sealing
+     *  the same id reproduces the same nonce AND the same plaintext, a GCM no-op). */
+    private fun courierNonce(id: String): ByteArray = CryptoUtils.sha256(id.toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
+
+    /** Mirrors [SosBody]'s own shape and doc — see that class for why [signedBytes] is captured
+     *  verbatim rather than re-derived. [payload] is opaque to this codec: what a courier actually
+     *  carries is a later slice's decision, this only proves arbitrary bytes seal/open correctly
+     *  under the group's content epoch key. */
+    data class CourierBody(
+        val senderId: String,
+        val payload: ByteArray,
+        val createdAt: Long,
+        val signature: ByteArray?,
+        val signedBytes: ByteArray,
+    )
+
+    /** Produces JUST the raw AES-GCM sealed bytes — no envelope — mirroring [sealSosBody]'s exact
+     *  split from a would-be `sealCourier` that also frames a wire message: a future slice's storage
+     *  entity must be handed raw ciphertext, never a pre-framed message, for the identical reason
+     *  [sealSosBody]'s own doc gives. [key] is the caller's already-derived
+     *  `CryptoUtils.contentEpochKey(rootKey, createdAt / 1000)` — this function never derives one
+     *  itself, same as every other seal function in this file. */
+    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    fun sealCourierBody(
+        key: ByteArray,
+        id: String,
+        senderId: String,
+        payload: ByteArray,
+        createdAt: Long,
+        signingPrivateKey: ByteArray? = null,
+    ): ByteArray {
+        require(payload.size <= MAX_COURIER_PAYLOAD_BYTES) {
+            "courier payload exceeds $MAX_COURIER_PAYLOAD_BYTES bytes"
+        }
+        val inner = build { d -> d.writeStr(senderId); d.writeStr16Bytes(payload); d.writeLong(createdAt) }
+        val signature = signingPrivateKey?.let { SenderIdentity.sign(it, inner) }
+        val innerWithSignature = build { d -> d.write(inner); d.writeBlob(signature) }
+        return CryptoUtils.encryptWithNonce(key, innerWithSignature, courierNonce(id))
+    }
+
+    /** Inverse of [sealCourierBody]. Null on a wrong key / tampered bytes / truncated buffer, or a
+     *  payload past [MAX_COURIER_PAYLOAD_BYTES] — same "failed decrypt/oversized IS the auth
+     *  failure" contract [openSos] establishes. */
+    fun openCourierBody(sealed: ByteArray, key: ByteArray): CourierBody? {
+        val inner = CryptoUtils.decrypt(key, sealed) ?: return null
+        return try {
+            val buf = ByteBuffer.wrap(inner)
+            val senderId = buf.readStr()
+            val payload = buf.readStr16Bytes()
+            if (payload.size > MAX_COURIER_PAYLOAD_BYTES) return null
+            val createdAt = buf.long
+            val signedBytes = inner.copyOfRange(0, buf.position()) // see CourierBody.signedBytes' doc
+            val signature = buf.readBlob()
+            CourierBody(senderId, payload, createdAt, signature, signedBytes)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // ---------- decode (keyless: no crypto here, only envelope parsing) ----------
 
     fun decode(bytes: ByteArray): Frame? {

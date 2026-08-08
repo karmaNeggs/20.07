@@ -62,21 +62,47 @@ object CryptoUtils {
     // app's group counts, and reusing the same length keeps one construction serving both purposes.
     private const val ROTATING_ID_LEN = 6
 
-    /** Rotating pseudonymous id for this group, changes every [windowSeconds]. Used both for the
-     *  beacon's own discovery payload (default [ID_WINDOW_SECONDS]) and, since decision 38, for the
+    // decision 40 (P4 slice 1, docs/DECISIONS.md): a courier envelope's own recognition tag
+    // (PLAN-v2.md §4.2) needs a THIRD partition of this same construction, under the same group
+    // key — HMAC(groupKey, UTC-day), 16 bytes per the spec's own wording, not this file's usual
+    // 6-byte beacon/GATT-handle length. epochSeconds is already Unix time (UTC), so
+    // epochSeconds / COURIER_TAG_WINDOW_SECONDS IS the UTC day number with no separate timezone
+    // handling needed.
+    //
+    // Domain-separated from BOTH existing partitions by construction, extending decision 38's own
+    // proof one more partition: for realistic dates (2020-01-01 to 2100-01-01 UTC), the beacon
+    // window (epoch/60) ranges [26297280, 68374080], the GATT-handle window (epoch/259200) ranges
+    // [6087, 15827], and this window (epoch/86400) ranges [18262, 47482] — three pairwise disjoint
+    // integer ranges, so rotatingAdvertisementId's HMAC input (window.toString()) can never collide
+    // across any two of the three purposes sharing one groupKey, independent of truncation length.
+    const val COURIER_TAG_WINDOW_SECONDS = 86_400L
+
+    /** 16 bytes per `PLAN-v2.md` §4.2's own wording — wider than [ROTATING_ID_LEN] because a
+     *  courier tag isn't squeezed into a beacon's 31-byte advertising payload the way the rotating
+     *  beacon id is; see [ROTATING_ID_LEN]'s own doc for why THAT one is short. */
+    const val COURIER_TAG_LEN = 16
+
+    /** Rotating pseudonymous id for this group, changes every [windowSeconds]. Used for the
+     *  beacon's own discovery payload (default [ID_WINDOW_SECONDS]), since decision 38 for the
      *  GATT wire handle that replaces cleartext `groupId` on every relayed frame (callers pass
-     *  [GATT_GROUP_HANDLE_WINDOW_SECONDS] via [org.offlinemesh.app.ble.MeshFrameCodec.groupHandle]) —
-     *  see that constant's own doc for why GATT needs a much wider window than the beacon does. */
+     *  [GATT_GROUP_HANDLE_WINDOW_SECONDS] via [org.offlinemesh.app.ble.MeshFrameCodec.groupHandle]),
+     *  and since decision 40 for a courier envelope's recognition tag (callers pass
+     *  [COURIER_TAG_WINDOW_SECONDS]/[COURIER_TAG_LEN] via
+     *  [org.offlinemesh.app.ble.MeshFrameCodec.courierTag]) — see each constant's own doc for why
+     *  its purpose needs a different window/length than the others. [truncateLen] defaults to
+     *  [ROTATING_ID_LEN] so both existing call sites (which pass none) stay byte-for-byte
+     *  unchanged, same precedent [windowSeconds] itself set in decision 38. */
     fun rotatingAdvertisementId(
         groupKey: ByteArray,
         epochSeconds: Long = System.currentTimeMillis() / 1000,
         windowSeconds: Long = ID_WINDOW_SECONDS,
+        truncateLen: Int = ROTATING_ID_LEN,
     ): ByteArray {
         val window = epochSeconds / windowSeconds
         val mac = Mac.getInstance("HmacSHA256")
         mac.init(SecretKeySpec(groupKey, "HmacSHA256"))
         val windowBytes = window.toString().toByteArray()
-        return mac.doFinal(windowBytes).copyOfRange(0, ROTATING_ID_LEN)
+        return mac.doFinal(windowBytes).copyOfRange(0, truncateLen)
     }
 
     /** Candidate ids for current + adjacent windows, to tolerate clock drift between phones (and,
@@ -86,12 +112,13 @@ object CryptoUtils {
         groupKey: ByteArray,
         nowSeconds: Long = System.currentTimeMillis() / 1000,
         windowSeconds: Long = ID_WINDOW_SECONDS,
+        truncateLen: Int = ROTATING_ID_LEN,
     ): List<ByteArray> {
         val window = nowSeconds / windowSeconds
         return listOf(window - 1, window, window + 1).map { w ->
             val mac = Mac.getInstance("HmacSHA256")
             mac.init(SecretKeySpec(groupKey, "HmacSHA256"))
-            mac.doFinal(w.toString().toByteArray()).copyOfRange(0, ROTATING_ID_LEN)
+            mac.doFinal(w.toString().toByteArray()).copyOfRange(0, truncateLen)
         }
     }
 

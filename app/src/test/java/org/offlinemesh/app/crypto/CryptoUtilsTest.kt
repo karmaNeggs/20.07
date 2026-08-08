@@ -276,4 +276,74 @@ class CryptoUtilsTest {
         val candidatesAtReceiveTime = CryptoUtils.candidateContentEpochKeys(key, receivedMuchLater)
         assertTrue(candidatesAtReceiveTime.any { it.contentEquals(keyAtCreation) })
     }
+
+    // ---------- courier tag truncateLen + COURIER_TAG_WINDOW_SECONDS (P4 slice 1, decision 40) ----------
+    // Crypto construction only in this slice — see MeshFrameCodec.courierTag's own doc. Tests here
+    // exercise CryptoUtils' generalized rotatingAdvertisementId/candidateAdvertisementIds directly,
+    // the same way "a custom windowSeconds changes the rotation cadence" above exercises windowSeconds
+    // in isolation before MeshFrameCodec.groupHandle's own wrapper existed to call it.
+
+    @Test
+    fun `a custom truncateLen changes the output length while windowSeconds stays the same`() {
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        val default = CryptoUtils.rotatingAdvertisementId(key, epoch)
+        val wide = CryptoUtils.rotatingAdvertisementId(key, epoch, truncateLen = CryptoUtils.COURIER_TAG_LEN)
+        assertEquals(6, default.size)
+        assertEquals(16, wide.size)
+        // The wide id's first 6 bytes must still match the default's — truncation is a prefix of the
+        // same HMAC output, not a differently-derived value.
+        assertArrayEquals(default, wide.copyOf(6))
+    }
+
+    @Test
+    fun `courier tag window never collides with the beacon or GATT handle windows for the same key and epoch`() {
+        // Extends "the GATT window and the beacon's own window never collide" (above) to a third
+        // partition, at a FIXED truncateLen (16, courier's own length) for all three — proving
+        // separation comes from the window math (window.toString() differing) rather than
+        // incidentally from the three constructions producing different output lengths.
+        val key = randomKey()
+        val epoch = 1_700_000_000L
+        val len = CryptoUtils.COURIER_TAG_LEN
+        val beaconId = CryptoUtils.rotatingAdvertisementId(key, epoch, truncateLen = len)
+        val gattHandle = CryptoUtils.rotatingAdvertisementId(
+            key, epoch, CryptoUtils.GATT_GROUP_HANDLE_WINDOW_SECONDS, len,
+        )
+        val courierTag = CryptoUtils.rotatingAdvertisementId(
+            key, epoch, CryptoUtils.COURIER_TAG_WINDOW_SECONDS, len,
+        )
+        assertFalse(beaconId.contentEquals(gattHandle))
+        assertFalse(beaconId.contentEquals(courierTag))
+        assertFalse(gattHandle.contentEquals(courierTag))
+    }
+
+    @Test
+    fun `courier tag is stable within the same UTC day and rotates at the day boundary`() {
+        val key = randomKey()
+        val midday = 1_700_000_000L // an arbitrary instant well inside some UTC day
+        val sameDayLater = midday + 3600 // 1h later, same day
+        val nextDayWindow = CryptoUtils.COURIER_TAG_WINDOW_SECONDS
+        assertArrayEquals(
+            CryptoUtils.rotatingAdvertisementId(key, midday, nextDayWindow, 16),
+            CryptoUtils.rotatingAdvertisementId(key, sameDayLater, nextDayWindow, 16),
+        )
+        val nextDay = midday + nextDayWindow
+        assertFalse(
+            CryptoUtils.rotatingAdvertisementId(key, midday, nextDayWindow, 16).contentEquals(
+                CryptoUtils.rotatingAdvertisementId(key, nextDay, nextDayWindow, 16)
+            )
+        )
+    }
+
+    @Test
+    fun `candidate courier tags tolerate up to one day of skew, either direction`() {
+        val key = randomKey()
+        val createdAt = 1_700_000_000L
+        val window = CryptoUtils.COURIER_TAG_WINDOW_SECONDS
+        val tagAtCreation = CryptoUtils.rotatingAdvertisementId(key, createdAt, window, 16)
+        val candidatesJustBefore = CryptoUtils.candidateAdvertisementIds(key, createdAt - window, window, 16)
+        val candidatesJustAfter = CryptoUtils.candidateAdvertisementIds(key, createdAt + window, window, 16)
+        assertTrue(candidatesJustBefore.any { it.contentEquals(tagAtCreation) })
+        assertTrue(candidatesJustAfter.any { it.contentEquals(tagAtCreation) })
+    }
 }

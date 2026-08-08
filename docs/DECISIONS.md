@@ -2303,3 +2303,80 @@ content-sealing epoch key, frame padding) shipped across decisions 37-40. Per th
 sequencing directive (`PLAN-v2.md`), next is P4 (Couriers); the sustained field-test milestone still
 waits until only P5 (Media) and P7 (bitchat bridge) remain outstanding.
 
+## 41. P4 slice 1 — courier tag + envelope seal/open, crypto construction only
+
+First slice of P4 (Couriers, `PLAN-v2.md` §4.2), which adopts bitchat's courier model
+(group-addressed instead of recipient-addressed) as a supplementary, opportunistic delivery path
+for the case where flood-relay plus this app's own 48h content retention isn't enough to bridge a
+partition before content expires — SOS/position/etc. keep working exactly as they do today; couriers
+add a second, independent mechanism on top.
+
+**Scope, deliberately narrow.** A Plan agent mapped the existing patterns this should reuse before
+any code was written (mirroring how decision 38 used parallel research agents for a comparably-sized
+change) and recommended crypto-only as slice 1, over bundling in storage or GATT wiring, for a
+concrete reason grounded in this project's own history: decision 37's real bug (`RelayEngine.createSos`
+once stored `sealSos`'s fully-framed output where raw ciphertext was expected, double-framing every
+self-authored SOS) happened exactly at the seal/frame boundary, before that boundary had been proven
+correct in isolation. Couriers add a genuinely new hard problem on top of that same split — copy-budget/
+handover state (deferred to a later slice) — so proving the tag and the seal/open round-trip work
+before any storage-shape or handover-arithmetic decisions get bolted on keeps the same discipline.
+
+**The tag: `HMAC(groupKey, UTC-day)`, 16 bytes (`PLAN-v2.md` §4.2's own wording).** `CryptoUtils.
+rotatingAdvertisementId`/`candidateAdvertisementIds` already serve two purposes off one construction
+under different `windowSeconds` (60s beacon, decision 38's 72h GATT handle) — this adds a THIRD
+partition, `COURIER_TAG_WINDOW_SECONDS = 86400L` (a UTC day; Unix epoch seconds are already UTC, so
+`epochSeconds / 86400` **is** the day number, no timezone handling needed). The existing functions'
+truncation length (`ROTATING_ID_LEN = 6`, private) wasn't a parameter — generalized in place the same
+way decision 38 generalized `windowSeconds`, adding `truncateLen: Int = ROTATING_ID_LEN` (every
+existing call site passes none, byte-for-byte unchanged) plus `COURIER_TAG_LEN = 16`. Domain
+separation extends decision 38's own empirical proof one more partition: for 2020-01-01 to 2100-01-01
+UTC, the beacon window (`epoch/60`) ranges [26297280, 68374080], the GATT-handle window
+(`epoch/259200`) ranges [6087, 15827], and the courier window (`epoch/86400`) ranges [18262, 47482] —
+three pairwise disjoint integer ranges, so the underlying HMAC input can never collide across any two
+purposes sharing one group key, independent of truncation length. `MeshFrameCodec.courierTag`/
+`candidateCourierTags` wrap the generalized functions the same way `groupHandle` already does for its
+own window. New `CryptoUtilsTest` coverage proves separation at a FIXED `truncateLen=16` across all
+three windows (not incidentally from differing output lengths), plus day-boundary rotation and
+±1-day skew tolerance mirroring the GATT handle's own ±1-window test.
+
+**The seal: `sealCourierBody`/`openCourierBody`, mirroring `sealSosBody`/`openSos` field-for-field.**
+Raw sealed bytes only — no envelope, no `Frame.Courier`, no `FRAME_COURIER` wire byte — split from a
+would-be `sealCourier` that also frames a wire message the exact way `sealSosBody` is split from
+`sealSos`, and for the identical reason (a future storage entity must be handed raw ciphertext, never
+a pre-framed message). Content key is the caller's already-derived `CryptoUtils.contentEpochKey
+(rootKey, createdAt/1000)` — **no new key derivation needed at all**, since the existing 24h
+content-epoch window (decision 39) already matches the courier tag's UTC-day window exactly; this
+slice's only genuinely new primitive is the tag itself. Deterministic per-envelope nonce
+(`courierNonce`, hash of the envelope id) mirrors `sosNonce`'s reasoning: an envelope id is sealed
+exactly once, so re-sealing identical content must reproduce identical ciphertext. `payload:
+ByteArray` is opaque to this codec — what a courier actually carries is a later slice's decision; this
+only proves arbitrary bytes seal/open correctly. Spec's own "Cap 16 KiB" enforced as
+`MAX_COURIER_PAYLOAD_BYTES`, checked at seal time (`require`, unlike SOS's message cap which is only
+checked on open — a deliberate stricter choice here since this is new code, not a retrofit of an
+established asymmetry) and again at open time (defense against a malicious group member hand-crafting
+oversized ciphertext directly, bypassing this codec's own seal function).
+
+**Zero production call sites.** No `Frame.Courier`, no `FRAME_COURIER` byte, no `decode()` branch, no
+`VERSION` bump, no `CourierEnvelopeEntity`, no `AppDatabase` migration (stays v10), no `RelayEngine`/
+`RelayResponder` wiring, no copy-budget, no handover, no rate-limiting, no bounded pool/tiers — all
+named as slices 2-4 in `PLAN-v2.md`'s own P4 entry. `docs/DECISIONS.md`'s and `PLAN-v2.md`'s usual
+"Production code touched" list is genuinely just the two crypto files below; nothing else in the app
+changed behavior this slice.
+
+13 new tests: 4 in `CryptoUtilsTest` (custom `truncateLen`, three-way window collision proof, UTC-day
+stability/rotation, ±1-day candidate skew tolerance) and 9 in `MeshFrameCodecTest` (opaque-without-key/
+opens-with-key, tamper detection, deterministic same-id ciphertext, signature + impersonation
+detection, no-signing-key null round-trip, oversized-payload rejection at both the exact cap and one
+byte over, opens-under-content-key-not-root-key, and a crypto-only candidate-tag resolution test
+against several groups — the equivalent of `GroupRepositoryHandleTest`'s coverage before any
+DAO-backed resolver exists). 412 tests (up from 399), detekt clean (one new `@Suppress
+("LongParameterList")` test helper mirroring `sealSosFixture`'s own), both variants compile/test/
+assemble green, no `missing_rules.txt`. Version bumped to v0.7.8-dev, fresh debug APK built and
+`aapt`-confirmed (`versionCode='19' versionName='0.7.8-dev'`) before committing. **Production code
+touched**: `CryptoUtils.kt` (`truncateLen` param on `rotatingAdvertisementId`/
+`candidateAdvertisementIds`, `COURIER_TAG_WINDOW_SECONDS`, `COURIER_TAG_LEN`), `MeshFrameCodec.kt`
+(`courierTag`, `candidateCourierTags`, `MAX_COURIER_PAYLOAD_BYTES`, `CourierBody`,
+`sealCourierBody`, `openCourierBody`). No app behavior change — this slice is purely additive,
+unreachable from any existing code path, so there is nothing to hardware-confirm yet; that starts
+once slice 3 wires an actual GATT exchange.
+

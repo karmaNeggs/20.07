@@ -13,8 +13,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.7.7-dev"
+        versionCode = 19
+        versionName = "0.7.8-dev"
     }
 
     buildTypes {

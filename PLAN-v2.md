@@ -1,9 +1,33 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-08.** This is the single status block to trust;
-anything else in this document (including inline "STATUS" notes inside Part 7 below) is detail
-underneath this, not a competing source. If a phase's own section below ever seems to disagree with
-this block, this block is current and that section is what's stale.
+**RESUME HERE — current status as of 2026-08-08 (session continued past the P6 checkpoint below).**
+This is the single status block to trust; anything else in this document (including inline "STATUS"
+notes inside Part 7 below) is detail underneath this, not a competing source. If a phase's own
+section below ever seems to disagree with this block, this block is current and that section is
+what's stale.
+
+- **2026-08-08, decision 41 (`docs/DECISIONS.md`): P4's first slice, courier tag + envelope
+  seal/open, crypto construction only, DONE.** First step of P4 (Couriers, §4.2) — bitchat's
+  group-addressed courier model, an opportunistic supplementary delivery path for partitions flood-
+  relay + 48h content retention alone can't bridge in time. A Plan agent mapped existing patterns
+  first (mirroring decision 38's own parallel-research approach) and recommended crypto-only as
+  slice 1 — SOS's own decision-37 bug (a fully-framed message stored where raw ciphertext was
+  expected) happened exactly at the seal/frame boundary this slice proves correct in isolation,
+  before storage-shape or handover-arithmetic decisions (deferred to slices 2-4) get bolted on.
+  `CryptoUtils.rotatingAdvertisementId`/`candidateAdvertisementIds` gained a `truncateLen` param
+  (generalized in place, same precedent decision 38 set for `windowSeconds` — every existing call
+  site passes none, unchanged) plus `COURIER_TAG_WINDOW_SECONDS` (86400s, a UTC day) and
+  `COURIER_TAG_LEN` (16, per §4.2's own wording) — a THIRD domain-separated partition of the same
+  construction, proven pairwise-disjoint from the beacon's 60s and the GATT handle's 72h windows for
+  2020-2100. `MeshFrameCodec.courierTag`/`candidateCourierTags` wrap it; `sealCourierBody`/
+  `openCourierBody` mirror `sealSosBody`/`openSos` field-for-field, sealing under the SAME
+  `contentEpochKey` SOS/position already use (24h window already matches the courier tag's UTC-day
+  window exactly — no new key derivation needed). Zero production call sites: no `Frame.Courier`, no
+  `FRAME_COURIER` byte, no storage, no GATT wiring, no `VERSION` bump — purely additive, unreachable
+  from any existing code path. 412 tests (up from 399), detekt clean, both variants green. Version
+  bumped to v0.7.8-dev, fresh debug APK built and `aapt`-confirmed. Nothing to hardware-confirm yet
+  (no behavior change) — that starts once slice 3 wires an actual GATT exchange. Full detail in
+  decision 41's own entry; slices 2-4's breakdown is in Part 7's own P4 entry below.
 
 - **2026-08-08, decision 40 (`docs/DECISIONS.md`): P6's fourth and final slice, frame padding to
   size buckets, DONE — P6 is now code-complete.** Closed the one remaining P6 item from the
@@ -1068,6 +1092,45 @@ cooldown regime; diversity-based link selection; RSSI-gated scheduling.
 v1 baseline.*
 
 **P4 — Couriers (§4.2).** Group-addressed spray-and-wait for partition-crossing eventuality.
+**STATUS (2026-08-08): slice 1 of 4 done — see `docs/DECISIONS.md` decision 41.**
+
+**Slice 1 (41) — courier tag + envelope seal/open, crypto construction only.** `MeshFrameCodec.
+courierTag`/`candidateCourierTags` (`HMAC(groupKey, UTC-day)`, 16 bytes) and `sealCourierBody`/
+`openCourierBody` (mirroring `sealSosBody`/`openSos`, sealed under the existing `contentEpochKey` —
+no new key derivation needed). Zero production call sites, no wire type, no storage, no `VERSION`
+bump. 412 tests (up from 399). See decision 41's own entry for the full design and why crypto-only
+was chosen as the narrowest first slice (same seal/frame-boundary lesson decision 37's own real bug
+taught).
+
+**Slice 2 (not started) — persisted envelope + local creation, no relay wiring.** New
+`CourierEnvelopeEntity` (id, tag-at-creation, sealed bytes, `createdAt`, `copiesRemaining`) — no
+`groupId` in the clear, same discipline as `SosEntity`. `AppDatabase` v10 → v11. New `Frame.Courier`
++ `FRAME_COURIER: Byte = 0x1C` + `encode`/`decode` branch → `MeshFrameCodec.VERSION` bump.
+`RelayEngine.createCourierEnvelope(groupId, payload): CourierEnvelopeEntity`, mirroring `createSos`
+exactly. Own 24h prune constant (distinct from `RelayEngine.CONTENT_MAX_AGE_MILLIS`'s 48h). No GATT
+push/receive yet — testable end-to-end at the Room-entity level only.
+
+**Slice 3 (not started) — GATT wiring: push/receive, member path, bounded pool with tiers.**
+`GroupRepository.resolveGroupKeyByCourierTag`/`matchCourierTag`, mirroring `resolveGroupKeyByHandle`/
+`matchHandle` with `candidateCourierTags`. `RelayResponder.handleCourier`/`ingestOpenedCourier`
+(member path, mirrors `handleSos`) plus a genuinely new bounded-pool acceptance policy — this app has
+no reputation/trust tiering, so bitchat's "20 of 40 slots reserved for trusted depositors" becomes
+"reserve N slots for envelopes tagged under a group we hold a key for, remainder for blind carry."
+This is new logic, not a reuse of `OpaqueFrameRelay`'s unbounded-LRU-with-age-eviction shape (that
+class is deliberately short-lived, 3-minute `MAX_AGE_MILLIS`, wrong fit for a 24h-TTL envelope that
+must survive a genuine multi-hour partition). Sim/hardware gates below become meaningful starting
+here — the first slice where an envelope actually crosses a GATT connection.
+
+**Slice 4 (not started) — handover mechanics: copy-budget split + rate limiting.** Per-envelope
+`copiesRemaining` persisted on `CourierEnvelopeEntity` (unlike `OpaqueFrameRelay`'s in-memory design
+— a 24h TTL must survive an app restart). Per-(envelope, peer) last-handover-timestamp for the
+10-minute rate limit, in-memory, bounded LRU mirroring `ConnectionAttemptTracker`'s pattern. Handover
+arithmetic: on meeting a courier that doesn't yet hold envelope E with local `copiesRemaining = N`,
+give `floor(N/2)`, keep `ceil(N/2)`, subject to the spec's cap 8 total-ever-in-existence from any
+single injection — worth a dedicated unit test on the split arithmetic alone, decoupled from any GATT
+plumbing, given how easy an off-by-one here is to get wrong silently. Deliberately last, once slices
+2-3 already give couriers a working (if handover-less, pure flood-relay) delivery path to fall back on.
+
 *Sim gate: message delivered across a partition healed 20 min later; copy budget stays bounded.*
 *Hardware gate: 3 phones, one carried out of range and back — message arrives.*
 
