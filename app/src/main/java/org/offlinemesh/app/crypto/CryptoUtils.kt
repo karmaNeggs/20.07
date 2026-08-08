@@ -180,6 +180,12 @@ object CryptoUtils {
         return encryptWithNonce(key, plaintext, iv)
     }
 
+    /** Draws from the same process-shared [SecureRandom] as [encrypt] — see
+     *  [org.offlinemesh.app.ble.MeshFrameCodec.padGattFrame], which calls this per GATT write to
+     *  fill padding bytes so a padded frame isn't visually distinguishable (all-zero tail) from the
+     *  AEAD-sealed/HMAC-tagged content it follows. */
+    fun randomBytes(n: Int): ByteArray = ByteArray(n).also { secureRandom.nextBytes(it) }
+
     /** Same construction as [encrypt] but takes an explicit 12-byte nonce instead of drawing one
      *  from [SecureRandom] — see [org.offlinemesh.app.ble.MeshFrameCodec.encodePosition] for why
      *  position frames need this instead of the random-IV path. */

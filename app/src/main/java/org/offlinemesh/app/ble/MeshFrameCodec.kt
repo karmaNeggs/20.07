@@ -96,7 +96,91 @@ object MeshFrameCodec {
     // an opaque rotating `handle` (see groupHandle's doc, docs/DECISIONS.md decision 38) — a
     // passive observer could previously correlate mesh traffic to a specific group just by reading
     // this field, with no key needed at all.
-    const val VERSION: Int = 7
+    // v8: no inner field change (every Frame subclass and decode() branch below is byte-identical
+    // to v7). Bumped because MeshGattClient/MeshGattServer now wrap every outgoing frame in a
+    // [padGattFrame]/[unpadGattFrame] envelope (2-byte real-length prefix + random padding up to
+    // the next size bucket) before it ever reaches this codec's own encode/decode — a build without
+    // that wrapper reads the new envelope's length-prefix bytes as if they were a raw frame's own
+    // type/version bytes and silently drops it (garbage type, or a version mismatch on the rare byte
+    // that happens to collide with a real FRAME_* constant). Bumped anyway, same as every prior wire
+    // change here, as the one discoverable "this build's wire format changed" signal — even though
+    // the mismatch here is caught by the transport wrapper failing to parse, not by this VERSION
+    // check itself. See [padGattFrame]'s own doc for why padding lives outside this codec's
+    // encode/decode functions instead of inside them (Tier B reuses [encodePosition]/
+    // [encodeCatalogFilter] verbatim for its own, far tighter budget — see MeshProtocol's
+    // BROADCAST_TIER_BUDGET_BYTES — and must never see a bucket-padded frame).
+    const val VERSION: Int = 8
+
+    private const val PAD_BUCKET_1 = 256
+    private const val PAD_BUCKET_2 = 512
+    private const val PAD_BUCKET_3 = 1024
+    private const val PAD_BUCKET_4 = 2048
+
+    /** Bucket sizes for [padGattFrame], matching bitchat's own Noise-packet padding scheme (see
+     *  `PLAN-v2.md` §4.4) — adopted here for every GATT frame type, not just encrypted ones. */
+    val PAD_BUCKETS = intArrayOf(PAD_BUCKET_1, PAD_BUCKET_2, PAD_BUCKET_3, PAD_BUCKET_4)
+
+    /** How many bytes [padGattFrame]/[unpadGattFrame]'s length prefix uses. */
+    private const val LENGTH_PREFIX_BYTES = 2
+
+    /** Largest value a [LENGTH_PREFIX_BYTES]-byte unsigned length prefix can represent. */
+    private const val MAX_UNSIGNED_SHORT = 0xFFFF
+
+    /** Bit width of one byte — used to split/reassemble [LENGTH_PREFIX_BYTES]'s two bytes. */
+    private const val BITS_PER_BYTE = 8
+
+    /** Masks a [Byte] promoted to [Int] back down to its unsigned 8-bit value. */
+    private const val BYTE_MASK = 0xFF
+
+    /** Prefix + pad an already-encoded GATT frame to the next [PAD_BUCKETS] size, so a passive
+     *  observer sizing GATT writes can't fingerprint frame type/content length (e.g. distinguish a
+     *  short SOS from a long one, or a nickname push from a presence heartbeat) from wire length
+     *  alone. Deliberately NOT built into [encode]/[decode]/the per-type `encodePosition`/
+     *  `encodeCatalogFilter` functions themselves: those two are also called directly by
+     *  `BeaconRadio` to embed the identical bytes into a Tier B beacon payload, whose
+     *  `MeshProtocol.BROADCAST_TIER_BUDGET_BYTES` (251) budget could never absorb a 256+ byte
+     *  bucket floor. Called only from `MeshGattClient`/`MeshGattServer`'s write/notify choke points,
+     *  which Tier B's connectionless advertising path never touches.
+     *
+     *  Wire shape: `[realLen: UShort BE][frame: realLen bytes][padding: random bytes]`. The
+     *  length prefix (not a sentinel/terminator inside the padding) is what lets [unpadGattFrame]
+     *  recover the exact frame boundary regardless of frame contents — needed because
+     *  `FRAME_EVID_CHUNK`'s own decode branch reads its chunk payload via `buf.remaining()` (no
+     *  internal length field of its own) and would otherwise swallow trailing padding as chunk data.
+     *  Padding bytes are drawn from [CryptoUtils.randomBytes], not zero-filled, so the padded region
+     *  isn't visually distinguishable from the ciphertext/MAC bytes that usually precede it.
+     *
+     *  A frame already at or above the largest bucket (e.g. a near-[MAX_SOS_MESSAGE_BYTES] SOS) is
+     *  sent with the length prefix but no padding — same pre-existing single-write-per-frame/no-MTU-
+     *  fragmentation gap either way, not something padding introduces or fixes. */
+    fun padGattFrame(frame: ByteArray): ByteArray {
+        require(frame.size <= MAX_UNSIGNED_SHORT) {
+            "frame too large for a UShort length prefix: ${frame.size}"
+        }
+        val unpaddedTotal = LENGTH_PREFIX_BYTES + frame.size
+        val bucket = PAD_BUCKETS.firstOrNull { it >= unpaddedTotal } ?: unpaddedTotal
+        val padLen = bucket - unpaddedTotal
+        val out = ByteArray(bucket)
+        out[0] = (frame.size ushr BITS_PER_BYTE).toByte()
+        out[1] = frame.size.toByte()
+        System.arraycopy(frame, 0, out, LENGTH_PREFIX_BYTES, frame.size)
+        if (padLen > 0) {
+            System.arraycopy(CryptoUtils.randomBytes(padLen), 0, out, unpaddedTotal, padLen)
+        }
+        return out
+    }
+
+    /** Inverse of [padGattFrame]. Returns null on anything malformed/truncated (too short for even
+     *  the length prefix, or a claimed length longer than what actually arrived) rather than
+     *  throwing — same "drop rather than misparse" posture as [decode]'s own VERSION check, since
+     *  this runs on bytes from an unauthenticated peer before any frame-level auth check applies. */
+    fun unpadGattFrame(bytes: ByteArray): ByteArray? {
+        if (bytes.size < LENGTH_PREFIX_BYTES) return null
+        val realLen = ((bytes[0].toInt() and BYTE_MASK) shl BITS_PER_BYTE) or (bytes[1].toInt() and BYTE_MASK)
+        if (LENGTH_PREFIX_BYTES + realLen > bytes.size) return null
+        return bytes.copyOfRange(LENGTH_PREFIX_BYTES, LENGTH_PREFIX_BYTES + realLen)
+    }
+
     private val UTF8 = StandardCharsets.UTF_8
 
     sealed class Frame {

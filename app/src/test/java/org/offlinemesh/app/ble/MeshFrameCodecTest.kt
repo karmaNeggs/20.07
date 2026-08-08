@@ -684,6 +684,94 @@ class MeshFrameCodecTest {
         assertEquals(17, decoded.totalChunks)
     }
 
+    // ---------- padGattFrame / unpadGattFrame (P6 item 4, PLAN-v2.md §4.4) ----------
+    // These wrap the GATT transport, not decode()/encode() themselves — see padGattFrame's own doc
+    // for why (Tier B reuses encodePosition/encodeCatalogFilter directly for a far tighter budget
+    // and must never see a bucket-padded frame). Tests here exercise the wrapper in isolation,
+    // independent of any particular frame type's own field layout.
+
+    @Test
+    fun `padGattFrame rounds up to the smallest bucket that fits`() {
+        // 2-byte length prefix + payload must fit under the bucket, not just the payload alone.
+        assertEquals(256, MeshFrameCodec.padGattFrame(ByteArray(1)).size)
+        assertEquals(256, MeshFrameCodec.padGattFrame(ByteArray(254)).size) // 2 + 254 == 256, exact fit
+        assertEquals(512, MeshFrameCodec.padGattFrame(ByteArray(255)).size) // 2 + 255 == 257, rolls over
+        assertEquals(512, MeshFrameCodec.padGattFrame(ByteArray(510)).size)
+        assertEquals(1024, MeshFrameCodec.padGattFrame(ByteArray(511)).size)
+        assertEquals(1024, MeshFrameCodec.padGattFrame(ByteArray(1022)).size) // 2 + 1022 == 1024, exact fit
+        assertEquals(2048, MeshFrameCodec.padGattFrame(ByteArray(1023)).size) // 2 + 1023 == 1025, rolls over
+    }
+
+    @Test
+    fun `padGattFrame sends a frame past the largest bucket unpadded, prefix only`() {
+        val big = ByteArray(3000) { it.toByte() }
+        val padded = MeshFrameCodec.padGattFrame(big)
+        assertEquals(2 + big.size, padded.size)
+        assertArrayEquals(big, MeshFrameCodec.unpadGattFrame(padded))
+    }
+
+    @Test
+    fun `unpadGattFrame recovers the exact original bytes across every bucket`() {
+        for (size in intArrayOf(0, 1, 254, 255, 400, 510, 511, 1022, 1023, 2046, 2047)) {
+            val original = ByteArray(size) { (it % 256).toByte() }
+            val padded = MeshFrameCodec.padGattFrame(original)
+            assertArrayEquals("size=$size", original, MeshFrameCodec.unpadGattFrame(padded))
+        }
+    }
+
+    @Test
+    fun `padGattFrame draws padding from randomBytes, not zero-fill`() {
+        // A frame short enough to leave real padding bytes: 1-byte payload -> 256-byte bucket ->
+        // 253 bytes of padding. All-zero padding would make a bucket-padded EVID_CHUNK/SOS trivially
+        // distinguishable from real ciphertext by content, defeating the point of bucketing sizes.
+        val padded = MeshFrameCodec.padGattFrame(ByteArray(1))
+        val tail = padded.copyOfRange(3, padded.size)
+        assertTrue(tail.any { it != 0.toByte() })
+    }
+
+    @Test
+    fun `unpadGattFrame rejects truncated input`() {
+        assertNull(MeshFrameCodec.unpadGattFrame(ByteArray(0)))
+        assertNull(MeshFrameCodec.unpadGattFrame(ByteArray(1)))
+        // Claims a 10-byte frame but only 5 bytes actually follow the length prefix.
+        val malformed = byteArrayOf(0, 10, 1, 2, 3, 4, 5)
+        assertNull(MeshFrameCodec.unpadGattFrame(malformed))
+    }
+
+    @Test
+    fun `unpadGattFrame accepts exactly the claimed length with zero padding remaining`() {
+        val frame = byteArrayOf(0, 3, 9, 9, 9)
+        assertArrayEquals(byteArrayOf(9, 9, 9), MeshFrameCodec.unpadGattFrame(frame))
+    }
+
+    @Test
+    fun `padGattFrame then unpadGattFrame then decode round-trips a real frame end to end`() {
+        val bitset = MeshProtocol.encodeBitset(setOf(0, 2), 5)
+        val real = rawManifestFrame("evid-1", 5, bitset)
+        val onWire = MeshFrameCodec.padGattFrame(real)
+        assertTrue("padding should change the wire size for a small frame", onWire.size > real.size)
+        val recovered = MeshFrameCodec.unpadGattFrame(onWire)
+        assertArrayEquals(real, recovered)
+        val decoded = MeshFrameCodec.decode(recovered!!)
+        check(decoded is MeshFrameCodec.Frame.Manifest)
+        assertEquals(5, decoded.totalChunks)
+    }
+
+    @Test
+    fun `padGattFrame padding does not leak into decode for FRAME_EVID_CHUNK, which reads via remaining()`() {
+        // The one frame type with no internal length field of its own — decode() takes
+        // buf.remaining() as the chunk payload verbatim. Padding MUST be stripped before decode()
+        // ever sees these bytes, or this frame type would silently absorb trailing pad bytes as
+        // chunk data. This exercises that specifically, not just round-tripping arbitrary bytes.
+        val chunk = MeshFrameCodec.encodeChunk(EvidenceChunkEntity("evid-1", 2, byteArrayOf(1, 2, 3, 4, 5)))
+        val onWire = MeshFrameCodec.padGattFrame(chunk)
+        assertTrue(onWire.size > chunk.size)
+        val recovered = MeshFrameCodec.unpadGattFrame(onWire)
+        val decoded = MeshFrameCodec.decode(recovered!!)
+        check(decoded is MeshFrameCodec.Frame.EvidChunk)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), decoded.chunk.data)
+    }
+
     // ---------- MAX_SOS_MESSAGE_BYTES is enforced by openSos, not decode ----------
     // Unlike the old cleartext scheme, decode() never looks inside the sealed blob — it only parses
     // the envelope — so a hostile over-length message can't be rejected until a member with the

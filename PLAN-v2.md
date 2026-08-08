@@ -1,10 +1,34 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-07 (session continued several times past the previous
-end-of-session checkpoint).** This is the single status block to trust; anything else in this
-document (including inline "STATUS" notes inside Part 7 below) is detail underneath this, not a
-competing source. If a phase's own section below ever seems to disagree with this block, this block
-is current and that section is what's stale.
+**RESUME HERE — current status as of 2026-08-08.** This is the single status block to trust;
+anything else in this document (including inline "STATUS" notes inside Part 7 below) is detail
+underneath this, not a competing source. If a phase's own section below ever seems to disagree with
+this block, this block is current and that section is what's stale.
+
+- **2026-08-08, decision 40 (`docs/DECISIONS.md`): P6's fourth and final slice, frame padding to
+  size buckets, DONE — P6 is now code-complete.** Closed the one remaining P6 item from the
+  2026-08-07 checkpoint. The Explore research pass that had failed at the end of that session
+  (spend limit, before returning any findings) was relaunched fresh first, per that checkpoint's own
+  instruction — it confirmed this app has no MTU-aware fragmentation anywhere (every frame is one
+  ATT write, no chunking fallback) and produced the definitive per-frame-type GATT-vs-Tier-B table
+  the padding design needed. `MeshFrameCodec.padGattFrame`/`unpadGattFrame` wrap the GATT
+  **transport** (`MeshGattClient.write`/`MeshGattServer.notify` and their two receive-side
+  counterparts), not `encode`/`decode` themselves — `FRAME_POSITION`/`FRAME_CATALOG_FILTER` are
+  byte-identical whether sent over GATT or embedded in a Tier B beacon, and Tier B's 251-byte budget
+  could never absorb a 256-byte padding floor; placing padding at the transport choke point excludes
+  Tier B automatically (it never calls those four functions) without needing a per-frame-type
+  allowlist. `MeshFrameCodec.VERSION` 7 → 8 (outer wrapper, no inner field change — see decision 40's
+  own note on why the bump still happened). 399 tests (up from 390), detekt clean, both variants
+  compile/test/assemble green, no `missing_rules.txt`. Version bumped to v0.7.7-dev, fresh debug APK
+  built and `aapt`-confirmed. **NOT hardware-confirmed** — stacks on decisions 37/38's own
+  unconfirmed `VERSION` bumps, next live round needs all of 37/38/40 together (39 is independently
+  unconfirmed via a different mechanism and can ride the same round). Full detail in decision 40's
+  own entry and Part 7's own P6 entry.
+
+  **P6 is fully shipped (decisions 37-40): SOS body encryption, rotating group handle,
+  content-sealing epoch key, frame padding — all code-complete, none hardware-confirmed yet.** Per
+  the project's explicit sequencing directive, next is **P4 (Couriers)**; the sustained field-test
+  milestone still waits until only P5 (Media) and P7 (bitchat bridge) remain outstanding.
 
 - **2026-08-07, decision 39 (`docs/DECISIONS.md`): P6's third slice, content-sealing epoch key,
   DONE — and a correction to this document's own §4.4.** §4.4 originally claimed the epoch key
@@ -25,8 +49,8 @@ is current and that section is what's stale.
   v0.7.6-dev, fresh debug APK built and `aapt`-confirmed before committing. **No wire version bump**
   this time (byte layouts unchanged, only which key opens them) — **NOT hardware-confirmed**, same
   caveat as 37-38 via a different mechanism (silent open/verify failure, not decode rejection). Full
-  detail in Part 7's own P6 entry. **Remaining P6 scope, not started**: frame padding to size
-  buckets.
+  detail in Part 7's own P6 entry. (Frame padding, then the last P6 item, shipped the next session —
+  see decision 40 above.)
 
 - **2026-08-07, decision 38 (`docs/DECISIONS.md`): P6's second slice, rotating group handle, DONE.**
   Closes `PLAN-v2.md` §4.4's cleartext-`groupId` traffic-analysis gap — every relayed frame type
@@ -1055,7 +1079,8 @@ Wi-Fi Direct removed.
 
 **P6 — Crypto (§4.4).** Epoch key ratchet, rotating group handle replacing cleartext `groupId`,
 padding for all frame types, SOS body encryption.
-**STATUS (2026-08-07): first three slices done — see `docs/DECISIONS.md` decisions 37-39.**
+**STATUS (2026-08-08): all four slices done, P6 code-complete — see `docs/DECISIONS.md` decisions
+37-40.**
 
 **Slice 1 (37) — SOS body encryption.** `SosEntity.message`/`senderId`/`timestamp`/`isAlert` are now
 AES-GCM sealed under the group key (`MeshFrameCodec.sealSosBody`/`sealSos`/`openSos`), replacing the
@@ -1095,14 +1120,29 @@ the two derivations, and bounding one independently-leaked epoch key to ~24h ins
 whole life. `MeshFrameCodec.VERSION` unchanged (byte layouts didn't move, only which key opens them).
 390 tests (up from 381).
 
-All three slices: detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
-incl. `lintVitalRelease`, R8-minified) green. **NOT hardware-confirmed** — decision 38's `VERSION` 7
-wire break means no pre-checkpoint test APK can talk to this build until reflashed (decision 37's own
-`VERSION` 6 was never hardware-confirmed either — all three need the same next live round; decision
-39 adds a silent open/verify-failure mode on top, since it isn't a version break).
-**Remaining P6 scope, not yet started**: frame padding to size buckets for all frame types.
+**Slice 4 (40) — frame padding to size buckets, P6's last item.** `MeshFrameCodec.padGattFrame`/
+`unpadGattFrame` wrap every GATT frame in `[realLen: UShort][frame][random padding to the nearest of
+256/512/1024/2048 bytes]` so wire length alone can't fingerprint frame type/content length. Lives at
+the GATT transport choke point (`MeshGattClient.write`/`MeshGattServer.notify` and their receive-side
+counterparts), not inside `encode`/`decode` — `FRAME_POSITION`/`FRAME_CATALOG_FILTER` are reused
+verbatim by `BeaconRadio` for Tier B, whose 251-byte budget could never absorb a 256-byte floor, and
+Tier B never touches those four transport functions, so this placement excludes it automatically. A
+frame at/past the largest bucket ships unpadded (length-prefixed only) — same pre-existing no-MTU-
+fragmentation gap either way, not something this slice introduces or fixes (confirmed via a fresh
+Explore research pass: every GATT frame is one ATT write, no chunking fallback exists for anything
+but evidence, which has its own separate indexed-chunk mechanism SOS never reuses).
+`MeshFrameCodec.VERSION` 7 -> 8 (outer wrapper only, no `Frame`/`decode()` field changed). 399 tests
+(up from 390).
+
+All four slices: detekt clean, both variants compile/test/assemble (`assembleDebug`/`assembleRelease`,
+incl. `lintVitalRelease`, R8-minified) green. **NOT hardware-confirmed** — decisions 38/40's `VERSION`
+7/8 wire breaks mean no pre-checkpoint test APK can talk to this build until reflashed (decision 37's
+own `VERSION` 6 was never hardware-confirmed either — 37/38/40 all need the same next live round;
+decision 39 adds a silent open/verify-failure mode on top, since it isn't a version break, and can
+ride the same round).
 *Sim gate: handle rotation does not break dedup or forwarding across an epoch boundary.*
-*Hardware gate: security review pass; wire capture shows no cleartext group identifier.*
+*Hardware gate: security review pass; wire capture shows no cleartext group identifier, and GATT
+frame sizes cluster on the four padding buckets rather than varying with content.*
 
 **P7 — bitchat bridge (§3 Level 1). Confirmed in scope**, opt-in and off by default.
 *Sim gate: n/a.*

@@ -2213,3 +2213,93 @@ broadcast-preview mac). **NOT hardware-confirmed** — same as decisions 37-38, 
 live round: old-build/new-build phones should fail to interoperate on sealed content (silently, not
 via decode rejection); two new-build phones should round-trip correctly.
 
+## 40. Frame padding to size buckets — closes `PLAN-v2.md` §4.4's last open item, P6 code-complete
+
+P6's fourth and final slice. §4.4 calls for adopting bitchat's own Noise-packet padding scheme
+(256/512/1024/2048-byte buckets) for *every* GATT frame type, not just encrypted ones — a passive
+observer sizing raw GATT writes could otherwise fingerprint frame type and rough content length from
+wire length alone (a 70-byte write is a presence heartbeat; a 900-byte write is a long SOS; a filter
+push over ~180 bytes is a busy catalogue), independent of anything already sealed/authenticated inside
+the frame.
+
+**Where padding lives, and why not inside `MeshFrameCodec.encode`/`decode`.** Two frame types —
+`FRAME_POSITION` and `FRAME_CATALOG_FILTER` — are byte-identical whether sent over GATT or embedded
+verbatim into a Tier B beacon (`BeaconRadio.refreshBroadcastTierPositionIfDue`/
+`catalogFilterFrameForBroadcastTier` call `MeshFrameCodec.encodePosition`/`encodeCatalogFilter`
+directly, confirmed by grep). Tier B's whole beacon payload is capped at
+`MeshProtocol.BROADCAST_TIER_BUDGET_BYTES` (251) — a 256-byte padding floor baked into those two
+functions would blow that budget on every single Tier B beacon. Padding therefore does not live in
+the codec's own encode/decode functions at all. Instead it wraps the GATT **transport**, at the one
+choke point every outgoing/incoming byte already funnels through regardless of frame type:
+`MeshGattClient.write()`/`MeshGattServer.notify()` on the way out, `onCharacteristicChanged`/
+`onCharacteristicWriteRequest` on the way in. `BeaconRadio`'s connectionless advertising path never
+calls any of those four functions, so this placement excludes Tier B for free — no per-frame-type
+allowlist/denylist needed, "for all frame types" (§4.4's own wording) falls out automatically for
+every GATT frame while Tier B stays untouched.
+
+**Wire shape**: `MeshFrameCodec.padGattFrame`/`unpadGattFrame`, a thin envelope wrapped *around* an
+already-fully-encoded frame — `[realLen: UShort BE][frame bytes][random padding]`. The explicit
+length prefix (not a sentinel scanned for inside the padding) is what makes this safe for every frame
+type uniformly: `FRAME_EVID_CHUNK` is the one type with no length field of its own — `decode()`'s own
+branch for it reads the chunk payload via `buf.remaining()` — so it would silently absorb trailing
+padding as chunk data if padding were left unstripped before reaching `decode()`. Stripping happens
+in `MeshGattClient`/`MeshGattServer` before `RelayResponder.handleIncoming` is ever called, so
+`decode()` itself needed zero changes for this. Padding bytes are drawn from a new
+`CryptoUtils.randomBytes` (reusing the process-shared `SecureRandom` instance already established for
+`encrypt`, not a fresh one per call) rather than zero-filled, so the padded tail isn't visually
+distinguishable from the ciphertext/MAC bytes that usually precede it — an all-zero tail would itself
+be a fingerprint.
+
+**A frame already at or past the largest bucket is sent length-prefixed but unpadded** (no bucket to
+round up to). This matters for `FRAME_SOS`: a near-`MAX_SOS_MESSAGE_BYTES` (2000) sealed SOS, once
+GCM-tagged and framed, lands close to or past the 2048 bucket already — the Explore research pass run
+before this slice confirmed this app has **no MTU-aware fragmentation anywhere** (every frame is
+handed to `writeCharacteristic`/`notifyCharacteristicChanged` as exactly one ATT write; the evidence
+chunker's indexed/manifest reassembly is never reused for SOS). A frame that large already risked
+failing outright against a real ~517-byte-MTU link before this slice; padding does not create that
+gap, and fixing it (real GATT fragmentation, or capping SOS length to something MTU-safe) is
+explicitly out of scope here — flagged as a follow-up, not silently absorbed into this change.
+
+**`MeshFrameCodec.VERSION` 7 → 8**, even though every `Frame` subclass and every `decode()` branch is
+byte-identical to v7 — the version bump is about the *outer* transport wrapper added in
+`MeshGattClient`/`MeshGattServer`, not an inner field change. Documented explicitly in the constant's
+own comment, since a future reader diffing v7→v8 inside `decode()` would otherwise find nothing and
+reasonably wonder why the bump happened. Real compatibility consequence: a build without this
+wrapper reads the new envelope's 2-byte length prefix as if it were a raw frame's own leading
+type/version bytes — garbage type in the common case (drops silently, no matching `when` branch), or,
+rarely, a byte collision with a real `FRAME_*` constant that then fails the inner version check
+anyway. Same "reflash before cross-build testing" posture as decisions 35/37/38.
+
+**Cost, stated plainly, not silently absorbed**: this inflates every small, high-cadence GATT frame
+(presence ~70B, a short nickname push, a WFD capability announcement) up to a 256-byte floor — real
+extra airtime on links this app already treats as scarce (`MeshFrameCodec`'s own class doc names
+"Frugality" as a first-class design goal). This is the deliberate cost of the already-decided §4.4
+tradeoff (traffic-analysis resistance over minimal bytes-on-the-wire for *every* frame type,
+following bitchat's lead and going further than bitchat itself, which only pads Noise packets) rather
+than a fresh decision made in this slice — no new privacy-tradeoff conversation needed here, unlike
+decisions 29/34, since the bucket sizes and "adopt for all frame types" scope were already chosen in
+`PLAN-v2.md` before this session.
+
+9 new tests in `MeshFrameCodecTest` (bucket rounding at every boundary including exact-fit edges,
+oversized-frame-sent-unpadded, random- not zero-fill padding, truncated/malformed input rejected,
+full `padGattFrame`→`unpadGattFrame`→`decode` round trip, and one specifically targeting
+`FRAME_EVID_CHUNK`'s `buf.remaining()` read to prove padding never leaks into decoded chunk data).
+399 tests total (up from 390), detekt clean (four new named constants —
+`LENGTH_PREFIX_BYTES`/`MAX_UNSIGNED_SHORT`/`BITS_PER_BYTE`/`BYTE_MASK` — added rather than inlining
+magic numbers, since this is new code and the file's existing inline `0xFF` usages elsewhere are
+detekt-baseline-grandfathered, not exempt going forward), both variants compile/test/assemble
+(`assembleDebug`/`assembleRelease`, incl. `lintVitalRelease`, R8-minified) green, no
+`missing_rules.txt`. Version bumped to v0.7.7-dev, fresh debug APK built and `aapt`-confirmed
+(`versionCode='18' versionName='0.7.7-dev'`) before committing. **Production code touched**:
+`CryptoUtils.kt` (`randomBytes`), `MeshFrameCodec.kt` (`VERSION` 8, `PAD_BUCKETS`, `padGattFrame`,
+`unpadGattFrame`), `MeshGattClient.kt` (`write` pads, `onCharacteristicChanged` unpads),
+`MeshGattServer.kt` (`notify` pads, `onCharacteristicWriteRequest` unpads). **NOT hardware-confirmed**
+— stacks on top of decisions 37-38's own unconfirmed `VERSION` bumps (7 was never live-tested either),
+so the next live round needs all of 37/38/40 together; decision 39 is independently unconfirmed via a
+different mechanism (wrong-key silent-drop, not decode rejection) and can be tested in the same round.
+
+**P6 is now code-complete** — all four items (SOS body encryption, rotating group handle,
+content-sealing epoch key, frame padding) shipped across decisions 37-40. Per the project's explicit
+sequencing directive (`PLAN-v2.md`), next is P4 (Couriers); the sustained field-test milestone still
+waits until only P5 (Media) and P7 (bitchat bridge) remain outstanding.
+

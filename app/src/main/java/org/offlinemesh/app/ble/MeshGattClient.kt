@@ -250,7 +250,10 @@ class MeshGattClient(
     @SuppressLint("MissingPermission")
     private suspend fun write(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, data: ByteArray): Boolean =
         writeQueue.run(gatt.device.address) {
-            characteristic.value = data
+            // Bucket-padded here, not by the caller — every outgoing frame goes through this one
+            // function, so this is the choke point where padding applies uniformly to all frame
+            // types without each call site having to remember to pad. See padGattFrame's own doc.
+            characteristic.value = MeshFrameCodec.padGattFrame(data)
             try { gatt.writeCharacteristic(characteristic) } catch (e: Exception) { false }
         }
 
@@ -379,8 +382,9 @@ class MeshGattClient(
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             val address = gatt.device.address
+            val frame = MeshFrameCodec.unpadGattFrame(characteristic.value) ?: return
             serviceScope.launch {
-                responder.handleIncoming(characteristic.value, address) { respBytes -> write(gatt, characteristic, respBytes) }
+                responder.handleIncoming(frame, address) { respBytes -> write(gatt, characteristic, respBytes) }
             }
         }
     }

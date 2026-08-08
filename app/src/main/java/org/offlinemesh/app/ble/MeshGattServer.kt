@@ -121,13 +121,17 @@ class MeshGattServer(
     @SuppressLint("MissingPermission")
     private suspend fun notify(device: BluetoothDevice, characteristic: BluetoothGattCharacteristic, data: ByteArray): Boolean {
         val server = gattServer ?: return false
+        // Bucket-padded here, not by the caller — every outgoing frame goes through this one
+        // function, so this is the choke point where padding applies uniformly to all frame types
+        // without each call site having to remember to pad. See padGattFrame's own doc.
+        val padded = MeshFrameCodec.padGattFrame(data)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // value is a parameter here, not shared characteristic state — two concurrent notifies
             // to different peers can never cross-deliver each other's bytes, so per-address
             // serialization (writeQueue) is all that's needed, same as every other write in this app.
             writeQueue.run(device.address) {
                 try {
-                    server.notifyCharacteristicChanged(device, characteristic, false, data) ==
+                    server.notifyCharacteristicChanged(device, characteristic, false, padded) ==
                         BluetoothStatusCodes.SUCCESS
                 } catch (e: Exception) { false }
             }
@@ -138,7 +142,7 @@ class MeshGattServer(
             // the controller level, which is the exact race this exists to close.
             notifyLegacyMutex.withLock {
                 writeQueue.run(device.address) {
-                    characteristic.value = data
+                    characteristic.value = padded
                     try {
                         server.notifyCharacteristicChanged(device, characteristic, false)
                     } catch (e: Exception) { false }
@@ -213,8 +217,11 @@ class MeshGattServer(
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray
         ) {
             if (responseNeeded) gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null)
+            val frame = MeshFrameCodec.unpadGattFrame(value) ?: return
             serviceScope.launch {
-                responder.handleIncoming(value, device.address) { respBytes -> notify(device, characteristic, respBytes) }
+                responder.handleIncoming(frame, device.address) { respBytes ->
+                    notify(device, characteristic, respBytes)
+                }
             }
         }
 
