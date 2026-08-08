@@ -31,7 +31,10 @@ import androidx.room.RoomDatabase
     // v11: added CourierEnvelopeEntity (docs/DECISIONS.md decision 41's own P4 slice 2, PLAN-v2.md
     // §4.2) — group-addressed courier storage, new in this schema, not an extension of an existing
     // table (see that entity's own doc for why it can't reuse OpaqueFrameRelay's in-memory shape).
-    version = 11,
+    // v12: EvidenceEntity gains `thumbnail` (ByteArray, default empty) and `wantsFullRes` (Boolean,
+    // default false) — P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3's thumbnail-first
+    // item).
+    version = 12,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

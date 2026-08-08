@@ -493,6 +493,127 @@ class MeshFrameCodecTest {
         assertArrayEquals(meta.signature, decoded.signature)
     }
 
+    // ---------- thumbnail (P5 slice 1, decision 45): FRAME_EVID_META gains `thumbnail` ----------
+
+    @Test
+    fun `evidence meta frame round-trips a non-empty thumbnail`() {
+        val thumb = ByteArray(200) { it.toByte() }
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, handle = fakeHandle, thumbnail = thumb,
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
+        check(decoded is MeshFrameCodec.Frame.EvidMeta)
+        assertArrayEquals(thumb, decoded.thumbnail)
+    }
+
+    @Test
+    fun `evidence meta frame round-trips an absent thumbnail as an empty byte array`() {
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, handle = fakeHandle,
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
+        check(decoded is MeshFrameCodec.Frame.EvidMeta)
+        assertEquals(0, decoded.thumbnail.size)
+    }
+
+    @Test
+    fun `evidence meta frame round-trips a thumbnail at exactly MAX_THUMBNAIL_BYTES`() {
+        val thumb = ByteArray(MeshFrameCodec.MAX_THUMBNAIL_BYTES) { it.toByte() }
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, handle = fakeHandle, thumbnail = thumb,
+        )
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
+        check(decoded is MeshFrameCodec.Frame.EvidMeta)
+        assertArrayEquals(thumb, decoded.thumbnail)
+    }
+
+    @Test
+    fun `decode rejects an evidence meta frame with a thumbnail over MAX_THUMBNAIL_BYTES`() {
+        // Hand-crafted: encodeEvidMeta itself has no size guard (mirrors decode's own "encode()
+        // trusts its caller, decode() defends against a hostile wire byte" split elsewhere in this
+        // file), so this exercises decode()'s own defense directly, not via the entity path.
+        val oversized = ByteArray(MeshFrameCodec.MAX_THUMBNAIL_BYTES + 1)
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, handle = fakeHandle, thumbnail = oversized,
+        )
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta)))
+    }
+
+    @Test
+    fun `evidMacInput produces a different tag when only the thumbnail differs`() {
+        // Regression guard for exactly the class of bug decision 37 already found once (SOS's own
+        // writeStr16-vs-writeStr mac-input mismatch): proves thumbnail is actually covered by the
+        // mac, not just present on the wire — a relay could otherwise swap it for different content
+        // while sha256/mac (over the untouched full-res ciphertext) stayed valid.
+        val base = MeshFrameCodec.evidMacInput(
+            "evid-1", "group-1", "sender-1", 1_700_000_000_000L, fakeSha256, 42, "image/jpeg",
+            byteArrayOf(1, 2, 3),
+        )
+        val differentThumbnail = MeshFrameCodec.evidMacInput(
+            "evid-1", "group-1", "sender-1", 1_700_000_000_000L, fakeSha256, 42, "image/jpeg",
+            byteArrayOf(9, 9, 9),
+        )
+        assertFalse(base.contentEquals(differentThumbnail))
+    }
+
+    // ---------- sealThumbnail / openThumbnail (P5 slice 1's own follow-up, decision 45) ----------
+    // The cleartext-plus-MAC design shipped first, caught before landing as a real passive-exposure
+    // increase, and corrected to seal the thumbnail the same way SOS/position bodies already are.
+
+    @Test
+    fun `thumbnail is opaque without the content key and opens correctly with it`() {
+        val key = randomKey()
+        val thumb = ByteArray(100) { it.toByte() }
+        val sealed = MeshFrameCodec.sealThumbnail(key, "evid-1", thumb)
+        assertFalse("a sealed thumbnail must not equal the plaintext it carries", sealed.contentEquals(thumb))
+        assertNull(MeshFrameCodec.openThumbnail(sealed, randomKey()))
+        assertArrayEquals(thumb, MeshFrameCodec.openThumbnail(sealed, key))
+    }
+
+    @Test
+    fun `tampering with a sealed thumbnail makes it fail to open`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealThumbnail(key, "evid-1", ByteArray(50) { it.toByte() })
+        val tampered = sealed.copyOf()
+        tampered[tampered.size - 1] = (tampered[tampered.size - 1].toInt() xor 0x01).toByte()
+        assertNull(MeshFrameCodec.openThumbnail(tampered, key))
+    }
+
+    @Test
+    fun `sealing the same evidence id's thumbnail twice produces identical ciphertext`() {
+        // Same deterministic-nonce reasoning sealSosBody's own test gives — a thumbnail is sealed
+        // exactly once, ever, so re-sealing identical content must reproduce identical bytes; this
+        // is what lets encodeEvidMeta forward the stored sealed bytes verbatim across every hop.
+        val key = randomKey()
+        val a = MeshFrameCodec.sealThumbnail(key, "evid-1", byteArrayOf(1, 2, 3))
+        val b = MeshFrameCodec.sealThumbnail(key, "evid-1", byteArrayOf(1, 2, 3))
+        assertArrayEquals(a, b)
+    }
+
+    @Test
+    fun `sealing under a different evidence id changes the ciphertext even for identical plaintext`() {
+        val key = randomKey()
+        val a = MeshFrameCodec.sealThumbnail(key, "evid-1", byteArrayOf(1, 2, 3))
+        val b = MeshFrameCodec.sealThumbnail(key, "evid-2", byteArrayOf(1, 2, 3))
+        assertFalse(a.contentEquals(b))
+    }
+
+    @Test
+    fun `sealThumbnail and openThumbnail both no-op on an empty thumbnail`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealThumbnail(key, "evid-1", ByteArray(0))
+        assertEquals(0, sealed.size)
+        assertEquals(0, MeshFrameCodec.openThumbnail(sealed, key)?.size)
+    }
+
     @Test
     fun `evidence chunk frame round-trips arbitrary binary data`() {
         val data = ByteArray(400) { (it % 256).toByte() }

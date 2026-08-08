@@ -159,7 +159,11 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         return sos
     }
 
-    suspend fun createEvidence(groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?): EvidenceEntity {
+    @Suppress("LongParameterList") // wire-protocol scalars — see MeshFrameCodec.sealSos's identical suppress
+    suspend fun createEvidence(
+        groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?,
+        thumbnail: ByteArray = ByteArray(0),
+    ): EvidenceEntity {
         val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
         // timestamp computed here, BEFORE the encrypt call below (decision 39, docs/DECISIONS.md) —
         // needs to exist first so the content epoch key can derive from it; previously this field
@@ -171,7 +175,15 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val hash = CryptoUtils.sha256Hex(ciphertext)
         val chunks = chunkBytes(ciphertext, CHUNK_SIZE)
         val senderId = repo.deviceId
-        val macInput = MeshFrameCodec.evidMacInput(id, groupId, senderId, timestamp, hash, chunks.size, mimeType)
+        // Sealed under the SAME contentKey the full-res ciphertext already uses — see
+        // MeshFrameCodec.sealThumbnail's own doc for why this replaced this decision's original
+        // cleartext-plus-MAC design. The mac below covers the SEALED bytes, same "whatever the
+        // entity carries" contract evidMacInput always had, now just ciphertext instead of a
+        // raw JPEG.
+        val sealedThumbnail = MeshFrameCodec.sealThumbnail(contentKey, id, thumbnail)
+        val macInput = MeshFrameCodec.evidMacInput(
+            id, groupId, senderId, timestamp, hash, chunks.size, mimeType, sealedThumbnail,
+        )
         val mac = CryptoUtils.authTag(contentKey, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
         // Decision 38 (docs/DECISIONS.md): the opaque wire handle, computed once here and stored —
@@ -181,7 +193,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
             timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
             mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true,
-            mac = mac, signature = signature, handle = handle,
+            mac = mac, signature = signature, handle = handle, thumbnail = sealedThumbnail,
         )
         evidenceDao.insert(evidence)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
@@ -417,6 +429,54 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable().filter { it.ttl > 0 }
 
     suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable().filter { it.ttl > 0 }
+
+    /** P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3's "thumbnail-first, full-res
+     *  pull-on-demand") — the narrower set actually eligible to have its FULL chunk set solicited,
+     *  as opposed to [relayableEvidenceMeta] (header + thumbnail, still flooded to everyone
+     *  including blind relays, completely unchanged by this slice). Own-authored content
+     *  (`senderIsMe`) is always included — a device always wants its own content to actually
+     *  reach members. Everything else needs `wantsFullRes` (see [requestFullResolution]) — most
+     *  importantly, a blind-carried row (`groupId == null`) can NEVER have `wantsFullRes` set
+     *  (that function refuses it outright), so this set is implicitly member-only, closing the gap
+     *  `PLAN-v2.md` §9.2 item 8 names: a blind relay in a busy crowd no longer solicits or carries
+     *  full-resolution ciphertext for content it can't decrypt, only the small header+thumbnail.
+     *
+     *  [RelayResponder.framesToPushOnConnect] reads this (not [relayableEvidenceMeta]) to decide
+     *  which items to send OUR OWN manifest for — and sending our manifest is what actually
+     *  solicits chunks back (see [RelayResponder.handleManifest]'s doc), so narrowing this set is
+     *  the entire mechanism; nothing about [RelayResponder.handleManifest]'s own push-side logic
+     *  needed to change at all. */
+    suspend fun fullResRelayable(): List<EvidenceEntity> = evidenceDao.getFullResRelayable()
+
+    /** Marks [evidenceId] as wanted at full resolution — the user-facing "load full image" action.
+     *  Refuses outright (returns `false`, no DB change) for a blind-carried row (`groupId == null`)
+     *  — there is nothing to view without the group key, and allowing it would silently defeat
+     *  [fullResRelayable]'s own member-only guarantee. Bumps [epoch] on success, the same "worth
+     *  reconnecting early for" signal [RelayEngine.admitCourierEnvelope] already uses, so
+     *  `ConnectionAttemptTracker` can fast-path a reconnect to actually deliver the request. */
+    suspend fun requestFullResolution(evidenceId: String): Boolean {
+        val meta = evidenceDao.get(evidenceId) ?: return false
+        if (meta.groupId == null) return false
+        evidenceDao.setWantsFullRes(evidenceId)
+        epoch.incrementAndGet()
+        return true
+    }
+
+    /** Opens [evidence]'s sealed thumbnail for display — the UI-facing counterpart to
+     *  [MeshFrameCodec.sealThumbnail]/`RelayEngine.createEvidence`'s own seal call. Null for a
+     *  blind-carried row (`groupId == null` — no key to resolve, same refusal
+     *  [requestFullResolution] already makes), an empty/absent thumbnail, or a decrypt failure
+     *  (wrong/rotated key, tampered bytes). Never persisted decrypted — this app already keeps
+     *  reassembled full-res evidence as plaintext on disk once complete (see `outputFile`), but a
+     *  thumbnail is cheap enough to decrypt fresh on every render rather than adding a second
+     *  at-rest-plaintext surface for something this small. */
+    suspend fun decryptedThumbnail(evidence: EvidenceEntity): ByteArray? {
+        val groupId = evidence.groupId ?: return null
+        if (evidence.thumbnail.isEmpty()) return null
+        val rootKey = repo.getGroupKey(groupId) ?: return null
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, evidence.timestamp / MILLIS_PER_SECOND)
+        return MeshFrameCodec.openThumbnail(evidence.thumbnail, contentKey)
+    }
 
     // "What do we hold" (any ttl, including 0) is a different question from "what do we still
     // forward" (relayableSos/relayableEvidenceMeta above, ttl > 0 only) — used to build the

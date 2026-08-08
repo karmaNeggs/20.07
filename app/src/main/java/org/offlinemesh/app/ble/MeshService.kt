@@ -345,8 +345,23 @@ class MeshService : Service() {
         return sos
     }
 
-    suspend fun sendEvidence(groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?): EvidenceEntity =
-        relay.createEvidence(groupId, plaintext, mimeType, originalLocalPath)
+    suspend fun sendEvidence(
+        groupId: String, plaintext: ByteArray, mimeType: String, originalLocalPath: String?,
+        thumbnail: ByteArray = ByteArray(0),
+    ): EvidenceEntity = relay.createEvidence(groupId, plaintext, mimeType, originalLocalPath, thumbnail)
+
+    /** P5 slice 1 (docs/DECISIONS.md decision 45) — the "load full resolution" user action. Pushes
+     *  the request onto any already-open link immediately (see
+     *  [RelayResponder.pushFullResRequestNow]'s own doc) rather than waiting for the next
+     *  reconnect. No-ops silently for a blind-carried item (nothing to view without the group key)
+     *  — same refusal [RelayEngine.requestFullResolution] already makes. */
+    suspend fun requestFullResolution(evidenceId: String) {
+        if (relay.requestFullResolution(evidenceId)) responder.pushFullResRequestNow(evidenceId)
+    }
+
+    /** Decrypts [evidence]'s sealed thumbnail for display — see [RelayEngine.decryptedThumbnail]'s
+     *  own doc. Null for anything not renderable (blind-carried, absent, or a decrypt failure). */
+    suspend fun decryptedThumbnail(evidence: EvidenceEntity): ByteArray? = relay.decryptedThumbnail(evidence)
 
     fun hopToGroupPresence(groupId: String): Int = hopTracker.myHop(groupId, "PRESENCE")
 

@@ -1,3 +1,9 @@
+// Compose screens naturally decompose into many small, single-purpose composables (P5 slice 1,
+// docs/DECISIONS.md decision 45, added FeedThumbnail/FeedRowHeader/feedRowClickAction/fileBodyText
+// specifically to keep FeedRow itself within its own length/complexity limits) — a flat function
+// count threshold tuned for business-logic classes doesn't fit this file's shape.
+@file:Suppress("TooManyFunctions")
+
 package org.offlinemesh.app.ui
 
 import android.graphics.Bitmap
@@ -8,6 +14,7 @@ import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -28,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -131,7 +139,13 @@ fun GroupChatScreen(
             scope.launch {
                 val bitmap = loadBitmap(context, uri)
                 if (bitmap != null) {
-                    meshService.sendEvidence(groupId, EvidenceCapture.compress(bitmap), "image/jpeg", null)
+                    // P5 slice 1 (docs/DECISIONS.md decision 45): both derived from the SAME
+                    // already-downsampled bitmap — see EvidenceCapture.compressThumbnail's own doc
+                    // for why this never re-decodes the source a second time.
+                    meshService.sendEvidence(
+                        groupId, EvidenceCapture.compress(bitmap), "image/jpeg", null,
+                        EvidenceCapture.compressThumbnail(bitmap),
+                    )
                 }
             }
         }
@@ -179,7 +193,12 @@ fun GroupChatScreen(
             ) {
                 item { Spacer(Modifier.height(4.dp)) }
                 items(feed) { item ->
-                    FeedRow(item, groupColor, nicknameMap) { evidence -> viewEvidenceFile(context, evidence) }
+                    FeedRow(
+                        item, groupColor, nicknameMap,
+                        onViewFile = { evidence -> viewEvidenceFile(context, evidence) },
+                        onRequestFullRes = { id -> meshService?.let { scope.launch { it.requestFullResolution(id) } } },
+                        decryptThumbnail = { evidence -> meshService?.decryptedThumbnail(evidence) },
+                    )
                 }
                 item { Spacer(Modifier.height(4.dp)) }
             }
@@ -364,13 +383,23 @@ fun GroupChatScreen(
  *  design that (per direct feedback) took up too much vertical space for what this screen actually
  *  needs to show. Sender identity is carried by text color ([groupColor] for others, muted for
  *  "you") instead of a background tint, since there's no card left to tint. Keeps exactly the same
- *  information and the same tap-to-view behavior as before — this is a density/style change only. */
+ *  information and the same tap-to-view behavior as before — this is a density/style change only.
+ *
+ *  P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3): a [FeedItem.File] row now has THREE
+ *  states, not two — complete (tap to view, unchanged), not-yet-requested (tap to pull full
+ *  resolution, new), and pulling (already requested, receiving chunks, unchanged text but no
+ *  longer clickable while waiting). A blind-carried item (`groupId == null` — we're not a member,
+ *  can never decrypt it) shows only the thumbnail/label, never clickable — there's nothing this
+ *  device could ever pull. */
 @Composable
+@Suppress("LongParameterList") // Compose callback params, one per distinct row interaction
 private fun FeedRow(
     item: FeedItem,
     groupColor: Color,
     nicknameMap: Map<String, String>,
     onViewFile: (EvidenceEntity) -> Unit,
+    onRequestFullRes: (String) -> Unit,
+    decryptThumbnail: suspend (EvidenceEntity) -> ByteArray?,
 ) {
     fun label(senderId: String, isMe: Boolean): String =
         if (isMe) "you" else nicknameMap[senderId]?.takeIf { it.isNotBlank() } ?: senderId.take(8)
@@ -383,7 +412,7 @@ private fun FeedRow(
         is FeedItem.File -> Quint(
             label(item.evidence.senderId, item.evidence.senderIsMe),
             item.evidence.senderIsMe,
-            if (item.evidence.complete) "File received — tap to view" else "Receiving file: ${item.receivedChunks} / ${item.evidence.totalChunks} chunks",
+            fileBodyText(item.evidence, item.receivedChunks),
             item.evidence.timestamp, false
         )
     }
@@ -392,45 +421,106 @@ private fun FeedRow(
     val body = row.body
     val time = row.time
     val isAlert = row.isAlert
-    val viewable = item is FeedItem.File && item.evidence.complete
+    val onRowClick = feedRowClickAction(item, onViewFile, onRequestFullRes)
     val timeText = remember(time) { DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(time)) }
-    Column(
+    Row(
         Modifier
             .fillMaxWidth()
-            .let { m -> if (viewable) m.clickable { onViewFile((item as FeedItem.File).evidence) } else m }
-            .padding(vertical = 3.dp)
+            .let { m -> onRowClick?.let { m.clickable(onClick = it) } ?: m }
+            .padding(vertical = 3.dp),
+        verticalAlignment = Alignment.Top,
     ) {
-        Row(verticalAlignment = Alignment.Bottom) {
+        if (item is FeedItem.File && item.evidence.thumbnail.isNotEmpty()) {
+            FeedThumbnail(item.evidence, decryptThumbnail)
+            Spacer(Modifier.width(8.dp))
+        }
+        Column {
+            FeedRowHeader(timeText, sender, isMe, isAlert, groupColor)
             Text(
-                timeText,
+                body,
                 fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.labelSmall,
-                color = AppColors.OnSurfaceMuted
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (isAlert) AppColors.Danger else AppColors.OnSurface
             )
+        }
+    }
+}
+
+/** Complete -> view it. Not complete, own group, not yet requested -> tap requests it. Anything
+ *  else (already pulling, or blind-carried with no key to ever view it) -> not clickable. Split
+ *  out purely to keep [FeedRow] itself within detekt's length/complexity limits, same reason
+ *  [fileBodyText] is its own function. */
+private fun feedRowClickAction(
+    item: FeedItem, onViewFile: (EvidenceEntity) -> Unit, onRequestFullRes: (String) -> Unit,
+): (() -> Unit)? = when {
+    item !is FeedItem.File -> null
+    item.evidence.complete -> { { onViewFile(item.evidence) } }
+    item.evidence.groupId != null && !item.evidence.wantsFullRes -> { { onRequestFullRes(item.evidence.id) } }
+    else -> null
+}
+
+/** The time/sender/SOS-badge line — split out purely to keep [FeedRow] itself within detekt's
+ *  length/complexity limits. */
+@Composable
+private fun FeedRowHeader(timeText: String, sender: String, isMe: Boolean, isAlert: Boolean, groupColor: Color) {
+    Row(verticalAlignment = Alignment.Bottom) {
+        Text(
+            timeText,
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.labelSmall,
+            color = AppColors.OnSurfaceMuted
+        )
+        Spacer(Modifier.width(6.dp))
+        Text(
+            "$sender>",
+            fontFamily = FontFamily.Monospace,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (isMe) AppColors.OnSurfaceMuted else groupColor,
+            fontWeight = FontWeight.SemiBold
+        )
+        // Decision 35 (docs/DECISIONS.md): the one visual marker distinguishing a flagged
+        // emergency from an ordinary quiet message in the feed — AppColors.Danger is reserved for
+        // exactly this, nothing else in this app's palette uses it.
+        if (isAlert) {
             Spacer(Modifier.width(6.dp))
             Text(
-                "$sender>",
-                fontFamily = FontFamily.Monospace,
-                style = MaterialTheme.typography.labelSmall,
-                color = if (isMe) AppColors.OnSurfaceMuted else groupColor,
-                fontWeight = FontWeight.SemiBold
+                "SOS", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall,
+                color = AppColors.Danger, fontWeight = FontWeight.Bold
             )
-            // Decision 35 (docs/DECISIONS.md): the one visual marker distinguishing a flagged
-            // emergency from an ordinary quiet message in the feed — AppColors.Danger is reserved
-            // for exactly this, nothing else in this app's palette uses it.
-            if (isAlert) {
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    "SOS", fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall,
-                    color = AppColors.Danger, fontWeight = FontWeight.Bold
-                )
-            }
         }
-        Text(
-            body,
-            fontFamily = FontFamily.Monospace,
-            style = MaterialTheme.typography.bodyMedium,
-            color = if (isAlert) AppColors.Danger else AppColors.OnSurface
+    }
+}
+
+/** The [FeedItem.File] status line — split out purely to keep [FeedRow]'s own `when` readable now
+ *  that there are three real states instead of two (see [FeedRow]'s own doc). */
+private fun fileBodyText(evidence: EvidenceEntity, receivedChunks: Int): String = when {
+    evidence.complete -> "File received — tap to view"
+    evidence.groupId == null -> "Preview only — not a member of this group"
+    evidence.wantsFullRes -> "Receiving file: $receivedChunks / ${evidence.totalChunks} chunks"
+    else -> "Preview — tap to load full resolution"
+}
+
+/** Small fixed-size preview for a [FeedItem.File] row. [evidence.thumbnail] carries
+ *  [org.offlinemesh.app.ble.MeshFrameCodec.sealThumbnail]'s AES-GCM output, not a raw JPEG — see
+ *  that function's own doc for why (P5 slice 1's own follow-up correction). [decryptThumbnail]
+ *  opens it, so this composable needs a `LaunchedEffect` (a suspend, Keystore-touching call), not a
+ *  synchronous decode the way the entity's own bytes could be handled directly. Renders nothing
+ *  for a blind-carried item (the decrypt call itself refuses, same as
+ *  [org.offlinemesh.app.ble.RelayEngine.decryptedThumbnail]'s own doc) — there is no key to ever
+ *  show a preview with. */
+@Composable
+private fun FeedThumbnail(evidence: EvidenceEntity, decryptThumbnail: suspend (EvidenceEntity) -> ByteArray?) {
+    var decrypted by remember(evidence.id) { mutableStateOf<ByteArray?>(null) }
+    LaunchedEffect(evidence.id) { decrypted = decryptThumbnail(evidence) }
+    val plaintext = decrypted
+    val bitmap = remember(plaintext) {
+        plaintext?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size) }
+    }
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = "Photo preview",
+            modifier = Modifier.size(40.dp).clip(RoundedCornerShape(4.dp))
         )
     }
 }

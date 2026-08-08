@@ -6,6 +6,21 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **SESSION PAUSED here 2026-08-09 (user hit low tokens, asked to stop for the day, will resume
+  tomorrow).** Decision 45 (P5 slice 1, below) is fully shipped, tested, committed — see its own
+  entry for the full story, including a real mid-slice correction: the evidence thumbnail shipped
+  cleartext-plus-MAC first, was flagged to the user as new passive-exposure surface before
+  committing (any device that merely connects would see a genuine visual preview, not just
+  metadata), and the user chose to seal it under the content-epoch key instead — same AES-GCM
+  treatment SOS/position bodies already get. 482 tests, detekt clean, both variants green, no
+  `missing_rules.txt`. Version v0.7.12-dev, committed locally, **not pushed at the time of this
+  edit — user asked to push at end of session, done as part of this same commit.** Working tree
+  clean, nothing else mid-flight. **Start next session here: P5 slice 2 (§4.3 item 2, RaptorQ/
+  fountain coding — replaces `FRAME_MANIFEST`/have-bitset/per-peer deficit computation entirely) or
+  item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi Aware), neither designed yet.** This slice's own
+  pull-gating decision (`wantsFullRes`) stays valid underneath either — only the mechanism for
+  moving symbols/bytes once solicited changes.
+
 - **2026-08-09, decision 44 (`docs/DECISIONS.md`): P4's fourth and final slice, handover
   mechanics — copy-budget split + rate limiting, DONE. P4 is now fully code-complete.** New
   `CourierHandover.split(copiesRemaining)` — the classic Spray-and-Wait arithmetic §4.2 names
@@ -1236,6 +1251,23 @@ unchanged from slice 3, only what value the already-existing `copiesRemaining` f
 **P5 — Media (§4.3).** Thumbnail-first + pull-on-demand **first** (§9.2 item 8 — it is what makes
 48 h retention viable at 400), then fountain coding, then L2CAP CoC and Wi-Fi Aware as bulk pipes.
 Wi-Fi Direct removed.
+**STATUS (2026-08-09): slice 1 of 3 done — see `docs/DECISIONS.md` decision 45.**
+
+**Slice 1 (45) — thumbnail-first, full-res pull-on-demand.** `RelayEngine.fullResRelayable()`
+(own-authored, or explicitly `wantsFullRes`-requested) replaces `relayableEvidenceMeta()` as what
+`framesToPushOnConnect`'s manifest loop sends — sending a manifest is what solicits chunks, so
+narrowing this set is the whole mechanism; `handleManifest` itself is untouched. `Frame.EvidMeta`
+gains `thumbnail` — shipped cleartext-plus-MAC first, flagged to the user as new passive-exposure
+surface before committing, **sealed under the content-epoch key per the user's choice** (same
+AES-GCM treatment SOS/position already get; `MeshFrameCodec.sealThumbnail`/`openThumbnail`,
+`MAX_THUMBNAIL_BYTES=256` as the sealed ceiling, `GCM_OVERHEAD_BYTES=28` exposed so
+`EvidenceCapture.compressThumbnail`'s plaintext target derives from the same number).
+`MeshFrameCodec.VERSION` 9 → 10. Blind relays stop carrying full-res chunks entirely, by
+construction (`fullResRelayable`/`requestFullResolution` both exclude `groupId == null` rows) — the
+actual 6MB→~100KB win §9.2 item 8 describes. New async `RelayEngine.decryptedThumbnail` + UI
+`FeedThumbnail`/three-state `FeedRow`. 482 tests (up from 462). **NOT hardware-confirmed.** Full
+detail in decision 45's own entry, including the mid-slice sealing correction.
+
 *Sim gate: at D = 400, per-node media storage stays bounded with 20 items circulating.*
 *Hardware gate: 3 phones — a 300 KB photo delivered member-to-member without entering the flood.*
 

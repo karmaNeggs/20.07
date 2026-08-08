@@ -154,12 +154,13 @@ data class CourierEnvelopeEntity(
 data class EvidenceEntity(
     @PrimaryKey val id: String,
     // Decision 38 (docs/DECISIONS.md): nullable since the wire no longer carries groupId in the
-    // clear — a blind relay (holding no key for [handle]'s group) can still store and forward this
-    // row's chunks via the existing manifest/deficit mechanism (RelayResponder.handleManifest reads
-    // this row's own totalChunks, not the wire's), it just never learns WHICH group it belongs to.
-    // Null exactly means "blind-relay-held, group unresolved"; every row we're an actual member of
-    // has this populated (either by RelayEngine.createEvidence for our own, or by
-    // RelayResponder.handleEvidMeta once GroupRepository.resolveGroupKeyByHandle succeeds).
+    // clear. Null exactly means "blind-relay-held, group unresolved"; every row we're an actual
+    // member of has this populated (either by RelayEngine.createEvidence for our own, or by
+    // RelayResponder.handleEvidMeta once GroupRepository.resolveGroupKeyByHandle succeeds). As of
+    // P5 slice 1 (decision 45), a null-groupId row only ever holds THIS header (id/hash/size/
+    // mimeType/thumbnail) — RelayEngine.fullResRelayable's own doc explains why a blind relay no
+    // longer solicits or carries the full chunk set at all, the actual "6MB of ciphertext most
+    // carriers can never read" fix PLAN-v2.md §9.2 item 8 names.
     val groupId: String?,
     val senderId: String,
     val senderIsMe: Boolean,
@@ -184,9 +185,27 @@ data class EvidenceEntity(
     // the wire, no resolution needed) — it's what actually lets a blind relay keep forwarding this
     // header onward without ever learning [groupId].
     val handle: ByteArray? = null,
+    // P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3) — raw AES-GCM SEALED bytes
+    // (MeshFrameCodec.sealThumbnail), not a raw preview. Shipped cleartext-plus-MAC first, matching
+    // this entity's own existing mac/signature treatment; caught before landing as a real passive-
+    // exposure increase (any nearby connecting device would see a genuine visual hint, not just
+    // metadata) and sealed under the same content-epoch key SOS/position bodies already use — see
+    // MeshFrameCodec.Frame.EvidMeta.thumbnail's own doc for the full story. A blind relay still
+    // stores/forwards this opaque blob but can never render it. Capped at
+    // MeshFrameCodec.MAX_THUMBNAIL_BYTES (the sealed size), also covered by evidMacInput on top of
+    // the seal's own GCM tag. Empty (not null) when absent, matching the wire's own "always present,
+    // zero-length when there's nothing to show" shape — MeshFrameCodec.sealThumbnail/openThumbnail
+    // both no-op on empty rather than sealing/opening nothing.
+    val thumbnail: ByteArray = ByteArray(0),
+    // P5 slice 1 — set via RelayEngine.requestFullResolution once a MEMBER (never a blind relay,
+    // see that function's own doc) explicitly asks for the full-resolution chunks this header
+    // describes. Gates RelayEngine.fullResRelayable, which in turn gates whether this device ever
+    // sends its own manifest for this item — see that function's own doc for the full mechanism.
+    val wantsFullRes: Boolean = false,
 ) {
     private fun scalars() = listOf(
-        id, groupId, senderId, senderIsMe, timestamp, sha256, totalChunks, mimeType, ttl, originalLocalPath, complete
+        id, groupId, senderId, senderIsMe, timestamp, sha256, totalChunks, mimeType, ttl,
+        originalLocalPath, complete, wantsFullRes,
     )
 
     override fun equals(other: Any?): Boolean {
@@ -195,13 +214,15 @@ data class EvidenceEntity(
         return scalars() == other.scalars() &&
             (mac?.contentEquals(other.mac) ?: (other.mac == null)) &&
             (signature?.contentEquals(other.signature) ?: (other.signature == null)) &&
-            (handle?.contentEquals(other.handle) ?: (other.handle == null))
+            (handle?.contentEquals(other.handle) ?: (other.handle == null)) &&
+            thumbnail.contentEquals(other.thumbnail)
     }
 
     override fun hashCode(): Int {
         var result = 31 * scalars().hashCode() + (mac?.contentHashCode() ?: 0)
         result = 31 * result + (signature?.contentHashCode() ?: 0)
-        return 31 * result + (handle?.contentHashCode() ?: 0)
+        result = 31 * result + (handle?.contentHashCode() ?: 0)
+        return 31 * result + thumbnail.contentHashCode()
     }
 }
 

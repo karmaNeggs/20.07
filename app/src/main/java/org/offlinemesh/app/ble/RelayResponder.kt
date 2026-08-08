@@ -362,9 +362,13 @@ class RelayResponder(
             frames += MeshFrameCodec.encodeWifiDirectCap(version = 1)
         }
         frames += presenceAndPositionFrames(toPeer)
-        for (meta in relay.relayableEvidenceMeta()) {
-            // Always sent — this bitset changes as chunks arrive, so it has to keep flowing every
-            // connection until the transfer completes on both ends, same as before this change.
+        // P5 slice 1 (docs/DECISIONS.md decision 45): fullResRelayable, NOT relayableEvidenceMeta —
+        // sending our own manifest here IS what solicits chunks back (see RelayEngine.
+        // fullResRelayable's own doc for the full mechanism), so this is the actual pull-gate. Still
+        // always sent for every item in that narrower set — the bitset changes as chunks arrive, so
+        // it has to keep flowing every connection until the transfer completes on both ends, same as
+        // before this change for whichever items are actually eligible now.
+        for (meta in relay.fullResRelayable()) {
             frames += MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
         }
         return frames
@@ -795,16 +799,38 @@ class RelayResponder(
         for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)
     }
 
+    /** Call right after [RelayEngine.requestFullResolution] succeeds (P5 slice 1, docs/DECISIONS.md
+     *  decision 45) — same gap [floodForwardLocalSos] closes for a freshly-authored SOS, applied
+     *  here to a freshly-issued pull request: without this, a request made while a link to the
+     *  holder is ALREADY open (common under P3's long-lived links, decision 19) would sit unsent
+     *  until that link happens to reconnect. Unlike [floodForwardSos]'s degree-scaled fanout
+     *  subset, this goes to EVERY currently-open link, no jitter, no exclusion — a manifest is
+     *  small and cheap, we don't know which specific link (if any) holds the content, and there's
+     *  no "already seen this, don't re-flood" concern the way there is for SOS content (a manifest
+     *  is idempotent state, not a one-shot event). No-ops silently if [evidenceId] doesn't resolve
+     *  to a member row — mirrors [RelayEngine.requestFullResolution]'s own refusal for a blind-
+     *  carried item, since there would be nothing meaningful to solicit either way. */
+    suspend fun pushFullResRequestNow(evidenceId: String) {
+        val meta = relay.evidenceMeta(evidenceId) ?: return
+        if (meta.groupId == null) return
+        val manifestFrame = MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
+        for ((_, push) in connectionRegistry.others(excludePeerKey = null)) {
+            push.send(manifestFrame)
+        }
+    }
+
     /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
      *  [frame.handle] to a real (groupId, key) pair first. Unlike SOS/position/presence, a
      *  resolution failure does NOT route to a separate in-memory opaque-custody path: this still
-     *  stores a real (if `groupId = null`) [EvidenceEntity] row, exactly like the old vacuous-
-     *  auth-pass behavior did — traced via `handleManifest`/`framesToPushOnConnect`'s manifest
-     *  loop, which reads a stored row's own `totalChunks` to offer chunks onward, something a
-     *  purely in-memory custody (SOS/position/presence's shape) has nowhere to keep. Making
-     *  `groupId` nullable preserves that existing chunk-relay-through-a-blind-carrier mechanism
-     *  while still closing the wire-level leak. */
-    private suspend fun handleEvidMeta(frame: MeshFrameCodec.Frame.EvidMeta, respond: suspend (ByteArray) -> Unit) {
+     *  stores a real (if `groupId = null`) [EvidenceEntity] row — but as of P5 slice 1 (decision
+     *  45), a `groupId = null` row only ever holds this header (id/hash/size/mimeType/thumbnail).
+     *  It is never chunk-relayed: [RelayEngine.fullResRelayable] (what [framesToPushOnConnect]
+     *  reads to decide which items to send OUR OWN manifest for) excludes every blind-carried row
+     *  by construction — a manifest is the only thing that ever solicits chunks back (see
+     *  [handleManifest]'s own doc), and a blind carrier never sends one. This function itself needs
+     *  no gating of its own for that; the header still floods to everyone, blind relay included,
+     *  same as always. */
+    private suspend fun handleEvidMeta(frame: MeshFrameCodec.Frame.EvidMeta) {
         val resolved = repo.resolveGroupKeyByHandle(frame.handle)
         if (resolved != null && !evidMetaIsAuthentic(frame, resolved.first, resolved.second)) return
         if (resolved == null) {
@@ -814,15 +840,13 @@ class RelayResponder(
             id = frame.id, groupId = resolved?.first, senderId = frame.senderId, senderIsMe = false,
             timestamp = frame.timestamp, sha256 = frame.sha256, totalChunks = frame.totalChunks,
             mimeType = frame.mimeType, ttl = frame.ttl, mac = frame.mac, signature = frame.signature,
-            handle = frame.handle,
+            handle = frame.handle, thumbnail = frame.thumbnail,
         )
-        if (relay.ingestEvidenceMeta(meta)) {
-            // Without this, the connection that first tells a peer an item exists could never
-            // also transfer its chunks — our own manifest push already happened at connection
-            // start, before we knew this item existed. Responding immediately (with our honest
-            // 0%-complete manifest) lets the sender fill us in now.
-            respond(MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id)))
-        }
+        // P5 slice 1 (docs/DECISIONS.md decision 45): no longer responds with our own manifest
+        // here. A freshly-ingested row's wantsFullRes is always false (EvidenceEntity's own
+        // default), so relay.fullResRelayable() would never have included it anyway — this was
+        // dead code the moment the gating landed, removed rather than left as an unreachable no-op.
+        relay.ingestEvidenceMeta(meta)
     }
 
     /** Split out purely to keep [handleEvidMeta]'s return count within detekt's limit, same shape
@@ -834,7 +858,8 @@ class RelayResponder(
         rootKey: ByteArray,
     ): Boolean {
         val macInput = MeshFrameCodec.evidMacInput(
-            frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks, frame.mimeType
+            frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks,
+            frame.mimeType, frame.thumbnail,
         )
         // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — frame.timestamp
         // is already cleartext in the envelope, so the exact epoch is known directly.
@@ -1312,7 +1337,7 @@ class RelayResponder(
         try {
             when (frame) {
                 is MeshFrameCodec.Frame.SosSealed -> handleSos(frame, peerAddress)
-                is MeshFrameCodec.Frame.EvidMeta -> handleEvidMeta(frame, respond)
+                is MeshFrameCodec.Frame.EvidMeta -> handleEvidMeta(frame)
                 is MeshFrameCodec.Frame.EvidChunk -> handleEvidChunk(frame)
                 is MeshFrameCodec.Frame.PositionSealed -> handlePositionSealed(frame, peerAddress)
                 is MeshFrameCodec.Frame.Presence -> handlePresence(frame, peerAddress)

@@ -166,6 +166,7 @@ interface CourierEnvelopeDao {
     suspend fun updateCopiesRemaining(id: String, copiesRemaining: Int)
 }
 
+@Suppress("TooManyFunctions") // flat query list, not code-organization pressure
 @Dao
 interface EvidenceDao {
     // Same pre-join filter as SosDao.observeForGroup — see that doc.
@@ -205,6 +206,14 @@ interface EvidenceDao {
 
     @Query("DELETE FROM evidence WHERE timestamp < :cutoffMillis")
     suspend fun pruneOlderThan(cutoffMillis: Long)
+
+    // P5 slice 1 (docs/DECISIONS.md decision 45) — see RelayEngine.fullResRelayable/
+    // requestFullResolution's own docs for the full mechanism this gates.
+    @Query("UPDATE evidence SET wantsFullRes = 1 WHERE id = :id")
+    suspend fun setWantsFullRes(id: String)
+
+    @Query("SELECT * FROM evidence WHERE ttl > 0 AND groupId IS NOT NULL AND (senderIsMe = 1 OR wantsFullRes = 1)")
+    suspend fun getFullResRelayable(): List<EvidenceEntity>
 }
 
 @Dao

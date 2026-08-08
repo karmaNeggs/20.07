@@ -158,6 +158,69 @@ class RelayEngineTest {
         assertTrue(relay.catalogKeysForGroup("group-1").isEmpty())
     }
 
+    // ---------- fullResRelayable / requestFullResolution (P5 slice 1, decision 45) ----------
+    // requestFullResolution itself is only tested via ingestEvidenceMeta-seeded rows — createEvidence
+    // is not called here for the same pre-existing Keystore/Robolectric constraint documented on
+    // this class (see the class doc above).
+
+    @Test
+    fun `fullResRelayable excludes a freshly-ingested item until full resolution is requested`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-fr-1"))
+        assertTrue(relay.fullResRelayable().none { it.id == "evid-fr-1" })
+        AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
+    }
+
+    @Test
+    fun `fullResRelayable includes an item once full resolution is requested`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-fr-2"))
+        assertTrue(relay.requestFullResolution("evid-fr-2"))
+        assertTrue(relay.fullResRelayable().any { it.id == "evid-fr-2" })
+        AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
+    }
+
+    @Test
+    fun `requestFullResolution refuses a blind-carried item, no DB change`() = runTest {
+        // groupId = null: unresolvable-to-us, the same shape RelayResponder.handleEvidMeta stores
+        // for a header it can't resolve a group for.
+        relay.ingestEvidenceMeta(evidenceFixture("evid-fr-blind").copy(groupId = null))
+        val accepted = relay.requestFullResolution("evid-fr-blind")
+        assertFalse("a blind-carried item has nothing to view without the group key", accepted)
+        val stored = AppDatabase.get(context).evidenceDao().get("evid-fr-blind")
+        assertFalse(stored?.wantsFullRes ?: true)
+        // Cleanup — a null-groupId row is outside setUp's deleteForGroup("group-1") reach.
+        AppDatabase.get(context).evidenceDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `requestFullResolution returns false for an id that was never ingested`() = runTest {
+        assertFalse(relay.requestFullResolution("nope"))
+    }
+
+    @Test
+    fun `requestFullResolution bumps the catalog epoch on success`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-fr-3"))
+        val before = relay.catalogEpoch
+        relay.requestFullResolution("evid-fr-3")
+        assertTrue(relay.catalogEpoch > before)
+        AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
+    }
+
+    // decryptedThumbnail's own early-exit branches only — the branch that actually calls
+    // repo.getGroupKey hits the same pre-existing Keystore/Robolectric constraint documented on
+    // this class (see the class doc above), so it's not reachable from here either.
+
+    @Test
+    fun `decryptedThumbnail returns null for a blind-carried item, without touching Keystore`() = runTest {
+        val evidence = evidenceFixture("evid-thumb-blind").copy(groupId = null, thumbnail = byteArrayOf(1, 2, 3))
+        assertEquals(null, relay.decryptedThumbnail(evidence))
+    }
+
+    @Test
+    fun `decryptedThumbnail returns null for an empty thumbnail`() = runTest {
+        val evidence = evidenceFixture("evid-thumb-empty").copy(thumbnail = ByteArray(0))
+        assertEquals(null, relay.decryptedThumbnail(evidence))
+    }
+
     // ---------- couriers (P4 slice 2, docs/DECISIONS.md decision 41's own follow-up) ----------
     // RelayEngine.createCourierEnvelope itself is NOT tested here — same reason createSos/
     // createEvidence never are (see this class's own doc): it calls GroupRepository.getGroupKey,

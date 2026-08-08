@@ -2658,3 +2658,97 @@ GATT wiring, handover mechanics) shipped across decisions 41-44. Per the project
 directive, next is **P5 (Media)**; the sustained field-test milestone still waits on P5 and P7
 (bitchat bridge).
 
+## 45. P5 slice 1 — thumbnail-first, full-res pull-on-demand (sealed thumbnail, corrected mid-slice)
+
+First slice of P5 (Media, `PLAN-v2.md` §4.3), the phase's own explicitly-sequenced-first item
+("requires no new transport" — items 2/3, RaptorQ fountain coding and a real bulk pipe, stay out of
+scope). A Plan agent traced the existing evidence pipeline first and confirmed the fact the whole
+design hinges on: every connected peer — member or blind relay — has always automatically received
+the full chunk set for every evidence item, because `RelayResponder.framesToPushOnConnect`
+unconditionally sends this device's own manifest for every held item on every connection, and
+sending a manifest IS what solicits chunks back. `PLAN-v2.md` §9.2 item 8's own arithmetic (20
+circulating 300KB photos = 6MB of ciphertext most blind carriers can never read) is the measured
+cost.
+
+**Fix: gate WHICH items get their own manifest sent, nothing about how manifests/chunks work.**
+`RelayEngine.fullResRelayable()` (own-authored content, or anything a member explicitly requested
+via a new `wantsFullRes` flag) replaces `relayableEvidenceMeta()` as what
+`framesToPushOnConnect`'s manifest loop reads. `handleManifest`'s push logic is untouched — it only
+ever fires reactively off an incoming manifest, so once a device stops sending its own, nothing
+triggers it. The header (`relayableEvidenceMeta`) keeps flooding to everyone exactly as before.
+
+**A real mid-slice correction, not a footnote: the thumbnail shipped cleartext-plus-MAC first, then
+was sealed before landing.** `Frame.EvidMeta` gains `thumbnail: ByteArray`, chosen over a new frame
+type since the field needs the header's own existing unconditional-flood treatment. The first pass
+matched the header's own existing cleartext-plus-MAC discipline — implemented, tested, green. Before
+committing, this was flagged to the user directly (following this project's own standing rule on new
+passive-exposure surface): a nearby device that merely connects — automatic, no interaction needed —
+would see a genuine visual hint (crowd vs. document vs. night scene), a real step up from this
+header's existing metadata-only fields (mimeType/size/hash). **User's choice: seal it**, not ship
+cleartext, not redesign to avoid flooding it to non-members entirely.
+
+Final design: `MeshFrameCodec.sealThumbnail(contentKey, id, thumbnail)`/`openThumbnail(sealed,
+contentKey)`, AES-GCM under the same content-epoch key SOS/position bodies already use, deterministic
+per-id nonce (domain-separated from `sosNonce`/`courierNonce` by a label prefix, not just a bare id
+hash) mirroring `sosNonce`'s own "sealed exactly once, ever" reasoning. A blind relay still stores
+and forwards the opaque bytes (unchanged storage-cost win — the 6MB→~100KB arithmetic is about
+carrying *ciphertext of the right size*, not about being able to read it) but can never render a
+preview. `evidMacInput` still covers `thumbnail` on top of the seal's own GCM tag — binds the sealed
+blob to this specific header, a different substitution attack than the seal's own tamper detection.
+`MAX_THUMBNAIL_BYTES = 256` is now the SEALED ceiling; new `MeshFrameCodec.GCM_OVERHEAD_BYTES = 28`
+(12-byte nonce + 16-byte tag) is exposed so `EvidenceCapture.compressThumbnail`'s plaintext target
+(`256 - 28 = 228`) derives from the same number rather than two call sites agreeing by coincidence.
+`MeshFrameCodec.VERSION` 9 → 10 — a genuine field-shape change, load-bearing for safety (an old build
+would misread every field after the new one), unlike decision 43's new-byte-type addition.
+
+**UI needs an async decrypt path now, not a synchronous field read.** `RelayEngine.decryptedThumbnail
+(evidence)` resolves the group key, derives the single exact content-epoch key (timestamp is
+cleartext, no candidate search needed — same treatment decision 39 gives evidence-meta generally),
+opens the seal; null for a blind row, empty thumbnail, or decrypt failure. Never persisted decrypted
+— cheap enough to decrypt fresh per render, unlike full-res evidence's own on-disk plaintext cache.
+`GroupChatScreen`'s `FeedThumbnail` composable calls this via `LaunchedEffect`, one decrypt per row
+render. `EvidenceCapture.compressThumbnail` (48px, quality-stepdown loop targeting the plaintext
+budget) and `FeedRow`'s three-state interaction (complete / not-yet-requested / pulling) are
+otherwise unchanged from the original design — split into `feedRowClickAction`/`fileBodyText`/
+`FeedRowHeader`/`FeedThumbnail` to keep `FeedRow` within detekt's limits
+(`@file:Suppress("TooManyFunctions")` added to the file — Compose screens naturally decompose into
+many small composables).
+
+**Storage**: blind relays stop carrying full-res chunks entirely, by construction —
+`fullResRelayable()` excludes every `groupId == null` row, `requestFullResolution` refuses one
+outright (mirrors `admitCourierEnvelope`'s early-exit shape), so nothing ever solicits a chunk from
+a blind-carrying device. `RelayResponder.pushFullResRequestNow` closes the same already-open-link
+gap decision 19 (`floodForwardLocalSos`) closed for SOS — sent to every open link directly, no
+fanout/jitter (a manifest is small, cheap, idempotent, unlike a one-shot content event).
+
+482 tests (up from 462): `MeshFrameCodecTest` (thumbnail wire round-trip at empty/near-cap/exact-cap,
+decode rejects over-cap, `evidMacInput` sensitivity, plus dedicated `sealThumbnail`/`openThumbnail`
+coverage — opaque-without-key/opens-with-key, tamper detection, same-id-twice determinism,
+different-id-different-ciphertext, empty-input no-op), `RelayEngineTest` (`fullResRelayable`
+exclude/include, `requestFullResolution` refuse-blind/refuse-unknown/bump-epoch,
+`decryptedThumbnail`'s reachable-without-Keystore branches: blind row and empty thumbnail both null),
+`RelayResponderTest` (`framesToPushOnConnect` sends no manifest unrequested / sends one once
+requested / never for a blind row — the core regression). `createEvidence`/`requestFullResolution`/
+`decryptedThumbnail`'s key-touching paths stay untestable directly under Robolectric, same
+pre-existing constraint `createSos`/`createEvidence`/`createCourierEnvelope` already live with.
+detekt clean (`TooManyFunctions` on `EvidenceDao`/`GroupChatScreen.kt`, `LongParameterList` on
+`FeedRow`). Both variants compile/test/assemble green, no `missing_rules.txt`. Version bumped to
+v0.7.12-dev, fresh debug APK built and `aapt`-confirmed (`versionCode='23' versionName='0.7.12-dev'`)
+before committing. **Production code touched**: `ble/MeshFrameCodec.kt` (`MAX_THUMBNAIL_BYTES`,
+`GCM_OVERHEAD_BYTES`, `Frame.EvidMeta.thumbnail`, `sealThumbnail`/`openThumbnail`, `encodeEvidMeta`,
+decode branch, `evidMacInput`, `VERSION` 10), `data/Entities.kt` (`EvidenceEntity.thumbnail`/
+`wantsFullRes`), `data/AppDatabase.kt` (`version` 12), `data/Daos.kt` (`setWantsFullRes`,
+`getFullResRelayable`), `ble/RelayEngine.kt` (`createEvidence` seals the thumbnail before storing,
+`fullResRelayable`, `requestFullResolution`, `decryptedThumbnail`), `ble/RelayResponder.kt`
+(`framesToPushOnConnect`'s manifest loop, `handleEvidMeta`, `evidMetaIsAuthentic`,
+`pushFullResRequestNow`), `ble/MeshService.kt` (`sendEvidence` gains `thumbnail`,
+`requestFullResolution`, `decryptedThumbnail`), `evidence/EvidenceCapture.kt` (`compressThumbnail`),
+`ui/GroupChatScreen.kt` (picker computes both compress+thumbnail, `FeedRow` rewritten, async
+`FeedThumbnail`). **NOT hardware-confirmed** — a genuine field-shape `VERSION` bump, adds to the
+existing next-live-round backlog (37/38/40/43).
+
+**Explicitly deferred to later P5 slices**: §4.3 item 2 (RaptorQ/fountain coding, replacing
+`FRAME_MANIFEST`/the have-bitset/the per-peer deficit computation entirely) and item 3 (a real bulk
+pipe — BLE L2CAP CoC, Wi-Fi Aware). This slice's pull-gating decision (*whether* to solicit full
+resolution) stays conceptually valid underneath either future transport — only the mechanism for
+actually moving symbols/bytes once solicited would change.

@@ -71,6 +71,33 @@ object MeshFrameCodec {
      *  arbitrarily large message from a wire frame with no size hint anyone actually chose. */
     const val MAX_SOS_MESSAGE_BYTES = 2000
 
+    /** P5 slice 1 (`docs/DECISIONS.md` decision 45, `PLAN-v2.md` §4.3's "thumbnail-first, full-res
+     *  pull-on-demand") — ceiling on [Frame.EvidMeta.thumbnail], which as of this same decision's
+     *  own follow-up carries [sealThumbnail]'s SEALED output, not a raw JPEG. A blind relay stores
+     *  this header regardless — it can't resolve a group key, so it can never open the seal either
+     *  way — so this decode-time length cap exists purely as the resource-exhaustion guard
+     *  [MAX_EVIDENCE_CHUNKS] plays for `totalChunks`: a hostile frame claiming an enormous
+     *  "thumbnail" field still costs real storage/bandwidth to carry even though nobody without the
+     *  key could ever render it. 256 bytes (sealed, i.e. plaintext + AES-GCM's 28-byte nonce+tag
+     *  overhead — see `EvidenceCapture.compressThumbnail`'s own smaller plaintext target) is chosen
+     *  by working backward from this app's own proven-reliable write budget, not a "looks nice"
+     *  number: a single ATT characteristic write is capped at 512 bytes regardless of negotiated
+     *  MTU, [PAD_BUCKETS]' own `512` bucket is the largest size class the rest of this app's
+     *  traffic already relies on (`FRAME_EVID_CHUNK`'s 400-byte chunks + overhead land there), and
+     *  an `EvidMeta` frame's own fixed fields already consume roughly ~221 bytes before the
+     *  thumbnail — 256 more keeps the whole padded frame inside that same 512 bucket rather than
+     *  pushing it into the 1024/2048 zone this codebase already treats as higher-risk (see
+     *  [MAX_SOS_MESSAGE_BYTES]'s own frame, similarly sized, similarly flagged in decision 40's own
+     *  write-up as an existing MTU-fragmentation gap). */
+    const val MAX_THUMBNAIL_BYTES = 256
+
+    /** AES-GCM's fixed per-message overhead — [CryptoUtils.encryptWithNonce]'s 96-bit nonce (12
+     *  bytes) prepended to the ciphertext, plus its 128-bit authentication tag (16 bytes) appended
+     *  by the cipher itself. Exposed here (not just inlined) so [MAX_THUMBNAIL_BYTES] (the SEALED
+     *  ceiling) and `EvidenceCapture.compressThumbnail`'s plaintext target derive from the same
+     *  number instead of two call sites silently agreeing on 28 by coincidence. */
+    const val GCM_OVERHEAD_BYTES = 28
+
     /** Largest value a single unsigned wire byte can carry — hop/ttl fields coerce into this. */
     private const val MAX_UNSIGNED_BYTE = 255
 
@@ -119,7 +146,11 @@ object MeshFrameCodec {
     // anyway, matching this project's own standing discipline (see v8's note above) of treating
     // every wire-affecting change as one discoverable signal rather than distinguishing "needed for
     // safety" from "needed for discoverability."
-    const val VERSION: Int = 9
+    // v10: FRAME_EVID_META gains `thumbnail` (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3's
+    // thumbnail-first item) — a genuine field-shape change on an existing frame type (unlike v9's
+    // new-byte-type addition), so an old build parsing a new-shape frame would misread every field
+    // after the new one. This IS load-bearing for safety, not just discoverability.
+    const val VERSION: Int = 10
 
     private const val PAD_BUCKET_1 = 256
     private const val PAD_BUCKET_2 = 512
@@ -212,9 +243,26 @@ object MeshFrameCodec {
          *  [org.offlinemesh.app.data.GroupRepository.resolveGroupKeyByHandle]) before it can verify
          *  [mac]/[signature] or construct a full entity — see [EvidenceEntity.groupId]'s own doc
          *  for what happens when that resolution fails (a blind relay still stores a row, with
-         *  `groupId = null`, so the existing manifest/chunk-relay mechanism keeps working without
-         *  ever learning which group this belongs to). Every other field here is unchanged from
-         *  what [EvidenceEntity] itself carries — this is a 1:1 field list minus `groupId`. */
+         *  `groupId = null`, keeping ONLY this header — see [thumbnail]'s own doc for why, as of
+         *  P5 slice 1, a blind relay no longer solicits or carries the full chunk set at all).
+         *
+         *  [thumbnail] (P5 slice 1, `docs/DECISIONS.md` decision 45, `PLAN-v2.md` §4.3) — carries
+         *  [sealThumbnail]'s AES-GCM output, NOT a raw preview. The decision's own first pass shipped
+         *  this cleartext-plus-MAC, matching every other field here; caught before landing as a real
+         *  passive-exposure increase (any nearby device that connects — automatic, no interaction
+         *  needed — would otherwise see a genuine visual hint: crowd vs. document vs. night scene,
+         *  a step up from this header's existing metadata-only fields) and corrected to seal it
+         *  under the same content-epoch key SOS/position bodies already use. A blind relay still
+         *  stores and forwards the opaque bytes (same "carry without reading" role every other
+         *  sealed field in this app plays) but can never render a preview — only a member holding
+         *  the key can [openThumbnail] it. Empty (never sealed) when no thumbnail exists — see
+         *  [sealThumbnail]'s own no-op-on-empty shortcut. Capped at [MAX_THUMBNAIL_BYTES] — see that
+         *  constant's own doc for the exact byte-budget reasoning, now against the SEALED size.
+         *  Still covered by [evidMacInput] on top of the seal's own GCM tag — binds this specific
+         *  sealed blob to this specific header's other fields, so a relay can't splice a
+         *  validly-sealed thumbnail from a DIFFERENT evidence item onto this one; the two checks
+         *  cover different substitution attacks, not the same one twice. Every other field here is
+         *  unchanged from what [EvidenceEntity] itself carries. */
         data class EvidMeta(
             val id: String,
             val handle: ByteArray,
@@ -226,6 +274,7 @@ object MeshFrameCodec {
             val ttl: Int,
             val mac: ByteArray?,
             val signature: ByteArray?,
+            val thumbnail: ByteArray,
         ) : Frame()
         data class EvidChunk(val chunk: EvidenceChunkEntity) : Frame()
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
@@ -416,12 +465,18 @@ object MeshFrameCodec {
     fun broadcastSosMacInput(id: String, groupId: String, message: String, timestamp: Long): ByteArray =
         build { d -> d.writeStr(id); d.writeStr(groupId); d.writeSosMessage(message); d.writeLong(timestamp) }
 
+    // P5 slice 1 (docs/DECISIONS.md decision 45): thumbnail added to the covered bytes — without
+    // this, a relay could swap the thumbnail for different content while sha256/mac (computed over
+    // the full-res ciphertext, never touching the thumbnail) stayed valid, exactly the class of gap
+    // decision 37 already fixed once for SOS's own writeStr16-vs-writeStr mac-input mismatch.
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSos's identical suppress
     fun evidMacInput(
         id: String, groupId: String, senderId: String, timestamp: Long,
-        sha256Hex: String, totalChunks: Int, mimeType: String
+        sha256Hex: String, totalChunks: Int, mimeType: String, thumbnail: ByteArray,
     ): ByteArray = build { d ->
         d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp)
         d.write(hexToBytes(sha256Hex)); d.writeInt(totalChunks); d.writeStr(mimeType)
+        d.writeStr16Bytes(thumbnail)
     }
 
     fun nicknameMacInput(groupId: String, senderId: String, username: String, updatedAt: Long): ByteArray =
@@ -559,11 +614,42 @@ object MeshFrameCodec {
 
     // e.handle should always be populated by the time this is called — see EvidenceEntity.handle's
     // doc — writeBlob's null tolerance is defensive only, matching every other blob field here.
+    // e.thumbnail already carries the SEALED bytes (see sealThumbnail's own doc) — encodeEvidMeta
+    // itself stays keyless, same as every other encode function in this file; it never seals
+    // anything, only frames whatever the caller already produced.
     fun encodeEvidMeta(e: EvidenceEntity): ByteArray = frame(FRAME_EVID_META) { d ->
         d.writeStr(e.id); d.writeBlob(e.handle); d.writeStr(e.senderId); d.writeLong(e.timestamp)
         d.write(hexToBytes(e.sha256)); d.writeInt(e.totalChunks); d.writeStr(e.mimeType)
         d.writeByte(e.ttl.coerceIn(0, 255)); d.writeBlob(e.mac); d.writeBlob(e.signature)
+        d.writeStr16Bytes(e.thumbnail)
     }
+
+    /** Domain-separated from [sosNonce]/[courierNonce] by a fixed label prefix, not just by
+     *  whatever id happens to be passed — those two functions hash a bare id with no prefix, so an
+     *  evidence id that ever collided with a SOS/courier envelope id under the SAME derived key
+     *  would otherwise risk a nonce collision across genuinely different plaintexts. A thumbnail is
+     *  sealed EXACTLY ONCE, ever, same "content is immutable once created" reasoning [sosNonce]'s
+     *  own doc gives — hashing the id (now prefixed) is sufficient. */
+    private fun thumbnailNonce(id: String): ByteArray =
+        CryptoUtils.sha256("evid-thumb:$id".toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
+
+    /** Seals a thumbnail under [contentKey] (P5 slice 1, `docs/DECISIONS.md` decision 45's own
+     *  follow-up correcting that decision's original cleartext-plus-MAC design) — a non-member
+     *  blind relay stores and forwards the resulting opaque bytes without ever being able to render
+     *  a preview, closing the passive-exposure gap the cleartext version would have opened (any
+     *  nearby device that connects — automatic, no interaction needed — would otherwise see a
+     *  genuine visual hint: crowd vs. document vs. night scene). Only a member holding
+     *  [contentKey] can [openThumbnail] it. Returns an empty array unchanged for an absent
+     *  thumbnail — sealing zero bytes would just add ciphertext overhead for nothing to protect. */
+    fun sealThumbnail(contentKey: ByteArray, id: String, thumbnail: ByteArray): ByteArray =
+        if (thumbnail.isEmpty()) thumbnail else CryptoUtils.encryptWithNonce(contentKey, thumbnail, thumbnailNonce(id))
+
+    /** Inverse of [sealThumbnail]. Null on a wrong key / tampered bytes — same "failed decrypt IS
+     *  the auth failure" contract [openSos]/[openPosition] already establish. An empty [sealed]
+     *  round-trips to an empty result without needing a real key, matching [sealThumbnail]'s own
+     *  no-op-on-empty shortcut. */
+    fun openThumbnail(sealed: ByteArray, contentKey: ByteArray): ByteArray? =
+        if (sealed.isEmpty()) sealed else CryptoUtils.decrypt(contentKey, sealed)
 
     fun encodeChunk(c: EvidenceChunkEntity): ByteArray = frame(FRAME_EVID_CHUNK) { d ->
         d.writeStr(c.evidenceId); d.writeInt(c.chunkIndex); d.write(c.data)
@@ -960,10 +1046,14 @@ object MeshFrameCodec {
                     val ttl = buf.get().toInt() and 0xFF
                     val mac = buf.readBlob()
                     val signature = buf.readBlob()
+                    // MAX_THUMBNAIL_BYTES' own doc: sealed, so a blind relay could never open this
+                    // regardless — this length cap is a resource-exhaustion guard, not an auth check.
+                    val thumbnail = buf.readStr16Bytes()
+                    if (thumbnail.size > MAX_THUMBNAIL_BYTES) return null
                     Frame.EvidMeta(
                         id = id, handle = handle, senderId = senderId, timestamp = timestamp,
                         sha256 = bytesToHex(sha), totalChunks = totalChunks, mimeType = mimeType,
-                        ttl = ttl, mac = mac, signature = signature,
+                        ttl = ttl, mac = mac, signature = signature, thumbnail = thumbnail,
                     )
                 }
                 FRAME_EVID_CHUNK -> {
