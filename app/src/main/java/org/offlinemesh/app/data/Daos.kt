@@ -149,13 +149,21 @@ interface CourierEnvelopeDao {
     @Query("SELECT id FROM courier_envelopes WHERE groupId IS NULL ORDER BY createdAt ASC LIMIT 1")
     suspend fun oldestBlindCarryId(): String?
 
-    // Own-group only — a blind-carry row is held (and advertised as held via allIds(), so a peer's
-    // filter stops re-offering it to us) but never proactively PUSHED onward to a third peer, since
-    // nothing bounds that propagation yet (copiesRemaining stays inert until a later P4 slice —
-    // see RelayEngine.admitCourierEnvelope's own doc for why this is a hard scope line, not an
-    // oversight).
+    // Own-group rows are always handover-eligible regardless of copiesRemaining (see
+    // RelayEngine.relayableCourierEnvelopes' own doc for the P4 slice 3 -> 4 history: blind-carry
+    // rows were excluded entirely until copiesRemaining had a real bound; slice 4 gives it one).
     @Query("SELECT * FROM courier_envelopes WHERE groupId IS NOT NULL")
     suspend fun getOwnGroup(): List<CourierEnvelopeEntity>
+
+    // P4 slice 4 (docs/DECISIONS.md decision 44) — blind-carry rows only become handover-eligible
+    // once copiesRemaining actually bounds further propagation (CourierHandover.MIN_COPIES_TO_SPLIT).
+    // A row already down to its last copy stays held (and advertised via allIds()) but is never
+    // offered onward again — it simply waits out the 24h prune.
+    @Query("SELECT * FROM courier_envelopes WHERE groupId IS NULL AND copiesRemaining >= :minCopies")
+    suspend fun getBlindCarryWithBudget(minCopies: Int): List<CourierEnvelopeEntity>
+
+    @Query("UPDATE courier_envelopes SET copiesRemaining = :copiesRemaining WHERE id = :id")
+    suspend fun updateCopiesRemaining(id: String, copiesRemaining: Int)
 }
 
 @Dao

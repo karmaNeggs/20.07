@@ -98,6 +98,10 @@ class RelayResponder(
     // takeOpaqueNicknameCustody's doc.
     private val opaqueNickname = OpaqueFrameRelay()
 
+    // P4 slice 4 (docs/DECISIONS.md decision 44) — rate-limits repeated handover attempts for the
+    // same (envelope, peer) pair, see CourierHandoverTracker's own class doc.
+    private val courierHandoverTracker = CourierHandoverTracker()
+
     // See framesToPushOnConnect's doc for what this default is for. 517 matches the MTU every
     // connection actually requests (MeshGattClient.onConnectionStateChange's requestMtu(517)) —
     // i.e. "assume negotiation succeeds," not a conservative floor.
@@ -1133,8 +1137,9 @@ class RelayResponder(
         val (nicknamesToPush, nickSkipped) = partitionByFilter(nicknames, peerFilter) {
             "nick:${it.groupId}:${it.senderId}:${it.updatedAt}"
         }
-        // Own-group only (RelayEngine.relayableCourierEnvelopes) — a blind-carry row is advertised
-        // as held (currentCatalogKeys) but never reaches this push path. See that function's own doc.
+        // RelayEngine.relayableCourierEnvelopes: own-group rows plus blind-carry rows that still
+        // have spare copy budget (P4 slice 4, decision 44) — see that function's own doc for how
+        // this set grew from slice 3's own-group-only version.
         val (courierToPush, courierSkipped) =
             partitionByFilter(relay.relayableCourierEnvelopes(), peerFilter) { "cour:${it.id}" }
         val filterSkipped = sosSkipped + evidSkipped + nickSkipped + courierSkipped
@@ -1154,7 +1159,7 @@ class RelayResponder(
         var pushed = pushUpTo(sosToPush, allowedToPush, ::reframeStoredSos, respond)
         pushed += pushUpTo(evidToPush, allowedToPush - pushed, MeshFrameCodec::encodeEvidMeta, respond)
         pushed += pushUpTo(nicknamesToPush, allowedToPush - pushed, MeshFrameCodec::encodeNickname, respond)
-        pushed += pushUpTo(courierToPush, allowedToPush - pushed, ::reframeStoredCourier, respond)
+        pushed += pushCouriersWithHandover(courierToPush, allowedToPush - pushed, peerAddress, respond)
         val budgetSkipped = wantToPush - pushed
 
         // The single most useful line for diagnosing "messaging isn't arriving" from a live
@@ -1198,15 +1203,44 @@ class RelayResponder(
     private fun reframeStoredSos(sos: SosEntity): ByteArray =
         MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, sos.ttl, sos.hop, sos.sealed!!)
 
-    /** Re-frames a stored, already-sealed courier envelope for push — same "forward the original
-     *  ciphertext verbatim" role [reframeStoredSos] plays for SOS. `tag`/`sealed` are null only
-     *  transiently during construction, never for a stored row (see [CourierEnvelopeEntity.tag]/
-     *  `sealed`'s own docs), so `!!` here documents an invariant rather than papering over a real
-     *  null case. */
-    private fun reframeStoredCourier(envelope: CourierEnvelopeEntity): ByteArray =
-        MeshFrameCodec.encodeCourier(
-            envelope.tag!!, envelope.id, envelope.createdAt, envelope.copiesRemaining, envelope.sealed!!
-        )
+    /** Pushes courier envelopes with a real handover, unlike [reframeStoredSos]'s "forward
+     *  verbatim" role for SOS — P4 slice 4 (docs/DECISIONS.md decision 44). Not built on the
+     *  generic [pushUpTo] helper: that helper's `encode` step is a pure, synchronous mapper, but a
+     *  courier handover needs a suspend, side-effecting sequence per item (rate-limit check, split,
+     *  persist the local `keep`, THEN encode/respond with `give`) — conflating that into `pushUpTo`
+     *  would either lose the persistence step or force every OTHER item category to accept the same
+     *  suspend/side-effect shape for no benefit.
+     *
+     *  [CourierHandover.split] returns `null` for an envelope with fewer than
+     *  [CourierHandover.MIN_COPIES_TO_SPLIT] copies left — skipped entirely, not pushed unsplit
+     *  (matches [RelayEngine.relayableCourierEnvelopes]' own filtering for the blind-carry case; an
+     *  own-group row can still reach here with too few copies if a previous handover already
+     *  depleted it, so this check applies uniformly to both tiers). [courierHandoverTracker] gates
+     *  a SECOND, independent reason to skip: a rate-limited (envelope, peer) pair is left for a
+     *  later reconnect rather than re-split on every connection — see that tracker's own class doc.
+     *  `tag`/`sealed` are null only transiently during construction, never for a stored row (see
+     *  [CourierEnvelopeEntity.tag]/`sealed`'s own docs), so `!!` here documents an invariant. */
+    private suspend fun pushCouriersWithHandover(
+        items: List<CourierEnvelopeEntity>,
+        remainingBudget: Int,
+        peerAddress: String,
+        respond: suspend (ByteArray) -> Unit,
+    ): Int {
+        val peerKey = peerIdentity.resolve(peerAddress)
+        var pushed = 0
+        for (envelope in items) {
+            if (pushed >= remainingBudget) break
+            if (!courierHandoverTracker.canAttempt(envelope.id, peerKey)) continue
+            val (keep, give) = CourierHandover.split(envelope.copiesRemaining) ?: continue
+            relay.updateCourierCopiesRemaining(envelope.id, keep)
+            courierHandoverTracker.recordAttempt(envelope.id, peerKey)
+            respond(
+                MeshFrameCodec.encodeCourier(envelope.tag!!, envelope.id, envelope.createdAt, give, envelope.sealed!!)
+            )
+            pushed++
+        }
+        return pushed
+    }
 
     /** Pushes [items] one at a time via [encode]/[respond] until either [items] is exhausted or
      *  [remainingBudget] items have been pushed — the shared shape behind each of

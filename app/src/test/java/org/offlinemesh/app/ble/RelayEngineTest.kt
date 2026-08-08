@@ -294,14 +294,34 @@ class RelayEngineTest {
     }
 
     @Test
-    fun `relayableCourierEnvelopes excludes blind-carry rows`() = runTest {
+    fun `relayableCourierEnvelopes always includes own-group rows regardless of copiesRemaining`() = runTest {
         relay.admitCourierEnvelope(courierFixture("env-own-2"))
-        relay.admitCourierEnvelope(blindCourierFixture("env-blind-2"))
         val relayable = relay.relayableCourierEnvelopes().map { it.id }
         assertTrue(relayable.contains("env-own-2"))
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `relayableCourierEnvelopes includes a blind-carry row that still has spare copy budget`() = runTest {
+        // P4 slice 4 (docs/DECISIONS.md decision 44): once copiesRemaining has a real bound, a
+        // blind carrier with copies to spare becomes a legitimate handover candidate — this is the
+        // multi-hop spray step slice 3 deliberately left disabled.
+        val envelope = blindCourierFixture("env-blind-budget").copy(copiesRemaining = 4)
+        relay.admitCourierEnvelope(envelope)
+        val relayable = relay.relayableCourierEnvelopes().map { it.id }
+        assertTrue(relayable.contains("env-blind-budget"))
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `relayableCourierEnvelopes excludes a blind-carry row down to its last copy`() = runTest {
+        val exhausted = blindCourierFixture("env-blind-exhausted").copy(copiesRemaining = 1)
+        relay.admitCourierEnvelope(exhausted)
+        val relayable = relay.relayableCourierEnvelopes().map { it.id }
         assertFalse(
-            "a blind-carried envelope must never be proactively pushed to a third peer",
-            relayable.contains("env-blind-2"),
+            "a blind-carry row with fewer than CourierHandover.MIN_COPIES_TO_SPLIT copies has " +
+                "nothing left to hand over and must stay held, not offered again",
+            relayable.contains("env-blind-exhausted"),
         )
         AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
     }

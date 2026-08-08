@@ -1,10 +1,38 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-08 (session continued past the P6 checkpoint below).**
+**RESUME HERE — current status as of 2026-08-09 (session continued past the P6 checkpoint below).**
 This is the single status block to trust; anything else in this document (including inline "STATUS"
 notes inside Part 7 below) is detail underneath this, not a competing source. If a phase's own
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
+
+- **2026-08-09, decision 44 (`docs/DECISIONS.md`): P4's fourth and final slice, handover
+  mechanics — copy-budget split + rate limiting, DONE. P4 is now fully code-complete.** New
+  `CourierHandover.split(copiesRemaining)` — the classic Spray-and-Wait arithmetic §4.2 names
+  (`floor(N/2)` given away, `ceil(N/2)` kept, `null` below `MIN_COPIES_TO_SPLIT`=2), pure and
+  directly unit-tested including a conservation-property test (`keep+give` always equals the input,
+  no copy minted or lost) across every N from 2-20. §4.2's own "cap 8" figure is honestly NOT
+  independently enforced by anything this slice builds — automatically satisfied by conservation as
+  long as no envelope is ever re-injected above the initial budget of 4, and this slice adds no
+  reinjection path, so 8 is never approached; flagged explicitly rather than building enforcement
+  for a scenario nothing in this codebase can trigger yet. New `CourierHandoverTracker` (mirrors
+  `ConnectionAttemptTracker`'s bounded/LRU/protect-on-access shape) enforces the "1 attempt per
+  envelope per 10 min" rate limit, keyed on the peer's resolved stable identity, not the rotating BLE
+  address. `RelayResponder.pushCouriersWithHandover` replaces slice 3's placeholder verbatim-forward
+  (`reframeStoredCourier`) with a real split: persists the local `keep` value before pushing a frame
+  carrying `give`. `RelayEngine.relayableCourierEnvelopes` now also includes blind-carry rows with
+  spare budget (own-group rows were already always included) — this is the actual multi-hop spray
+  step slice 3 deliberately left disabled pending a real bound on propagation. Two slice-3 tests that
+  asserted a blanket "blind-carry always excluded" were updated (not reverted) to the real, narrower
+  boundary: excluded only below `MIN_COPIES_TO_SPLIT`, included and genuinely split-and-pushed above
+  it. 462 tests (up from 442), detekt clean, both variants green, no `missing_rules.txt`. Version
+  bumped to v0.7.11-dev, fresh debug APK built and `aapt`-confirmed. No wire-format change —
+  `Frame.Courier`'s shape and `MeshFrameCodec.VERSION` (9) are unchanged from slice 3. **NOT
+  hardware-confirmed** — adds to the existing next-live-round backlog (37/38/40/43). Full detail in
+  decision 44's own entry and Part 7's own P4 entry.
+
+  **P4 is now fully code-complete (decisions 41-44).** Per the project's sequencing directive, next
+  is **P5 (Media)**; the sustained field-test milestone still waits on P5 and P7 (bitchat bridge).
 
 - **2026-08-08, decision 43 (`docs/DECISIONS.md`): P4's third slice, GATT wiring — wire type,
   resolver, member/blind-carry paths, bounded pool with tiers, DONE.** The first slice where a
@@ -1134,7 +1162,7 @@ cooldown regime; diversity-based link selection; RSSI-gated scheduling.
 v1 baseline.*
 
 **P4 — Couriers (§4.2).** Group-addressed spray-and-wait for partition-crossing eventuality.
-**STATUS (2026-08-08): slices 1-3 of 4 done — see `docs/DECISIONS.md` decisions 41-43.**
+**STATUS (2026-08-09): all 4 slices done, P4 code-complete — see `docs/DECISIONS.md` decisions 41-44.**
 
 **Slice 1 (41) — courier tag + envelope seal/open, crypto construction only.** `MeshFrameCodec.
 courierTag`/`candidateCourierTags` (`HMAC(groupKey, UTC-day)`, 16 bytes) and `sealCourierBody`/
@@ -1183,15 +1211,24 @@ are held/advertised (stopping redundant re-pushes) but never proactively offered
 envelope actually crosses a GATT connection. **NOT hardware-confirmed** — adds to the existing
 next-live-round backlog (37/38/40).
 
-**Slice 4 (not started) — handover mechanics: copy-budget split + rate limiting.** Per-envelope
-`copiesRemaining` persisted on `CourierEnvelopeEntity` (unlike `OpaqueFrameRelay`'s in-memory design
-— a 24h TTL must survive an app restart). Per-(envelope, peer) last-handover-timestamp for the
-10-minute rate limit, in-memory, bounded LRU mirroring `ConnectionAttemptTracker`'s pattern. Handover
-arithmetic: on meeting a courier that doesn't yet hold envelope E with local `copiesRemaining = N`,
-give `floor(N/2)`, keep `ceil(N/2)`, subject to the spec's cap 8 total-ever-in-existence from any
-single injection — worth a dedicated unit test on the split arithmetic alone, decoupled from any GATT
-plumbing, given how easy an off-by-one here is to get wrong silently. Deliberately last, once slices
-2-3 already give couriers a working (if handover-less, pure flood-relay) delivery path to fall back on.
+**Slice 4 (44) — handover mechanics: copy-budget split + rate limiting.** New `CourierHandover.
+split(copiesRemaining)` — classic Spray-and-Wait arithmetic (`floor(N/2)` given, `ceil(N/2)` kept,
+`null` below `MIN_COPIES_TO_SPLIT`=2), pure, unit-tested including a conservation-property sweep
+(`keep+give` always equals the input for every N 2-20). §4.2's "cap 8" is honestly NOT independently
+enforced — automatically satisfied by conservation as long as nothing re-injects an envelope above
+the initial budget of 4, and this slice adds no reinjection path, so 8 is never approached; flagged
+explicitly rather than building enforcement for a scenario nothing in this codebase can trigger yet.
+New `CourierHandoverTracker` (mirrors `ConnectionAttemptTracker`'s bounded/LRU/protect-on-access
+shape) enforces the 10-minute rate limit, keyed on the peer's resolved stable identity rather than
+the rotating BLE address. `RelayResponder.pushCouriersWithHandover` replaces slice 3's placeholder
+verbatim-forward with a real split: persists the local `keep` value before pushing a frame carrying
+`give`. `RelayEngine.relayableCourierEnvelopes` now also includes blind-carry rows with spare
+budget — the actual multi-hop spray step slice 3 deliberately left disabled pending a real bound.
+462 tests (up from 442). No wire-format change — `Frame.Courier`/`MeshFrameCodec.VERSION` (9)
+unchanged from slice 3, only what value the already-existing `copiesRemaining` field carries.
+**NOT hardware-confirmed** — adds to the existing next-live-round backlog (37/38/40/43).
+
+**P4 is fully code-complete.** Per the project's sequencing directive, next is **P5 (Media)**.
 
 *Sim gate: message delivered across a partition healed 20 min later; copy budget stays bounded.*
 *Hardware gate: 3 phones, one carried out of range and back — message arrives.*

@@ -289,12 +289,28 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
      *  what's actually eligible to be PUSHED, a strictly narrower set. */
     suspend fun heldCourierIds(): List<String> = courierEnvelopeDao.allIds()
 
-    /** Own-group rows only — see [org.offlinemesh.app.data.CourierEnvelopeDao.getOwnGroup]'s own doc
-     *  for why a blind-carry row is held and advertised ([heldCourierIds]) but never proactively
-     *  pushed onward: nothing bounds that further propagation yet, since [CourierEnvelopeEntity.
-     *  copiesRemaining] stays inert (forwarded verbatim, never split) until a later P4 slice's
-     *  handover arithmetic gives it real meaning. */
-    suspend fun relayableCourierEnvelopes(): List<CourierEnvelopeEntity> = courierEnvelopeDao.getOwnGroup()
+    /** Handover-eligible rows: every own-group row, plus blind-carry rows that still have at least
+     *  [CourierHandover.MIN_COPIES_TO_SPLIT] copies left. Through P4 slice 3, this returned
+     *  own-group only — a blind-carry row was held and advertised ([heldCourierIds]) but never
+     *  proactively pushed onward, because [CourierEnvelopeEntity.copiesRemaining] was still inert
+     *  (forwarded verbatim, never split), so nothing bounded further propagation. Slice 4 (decision
+     *  44) gives it a real bound: [org.offlinemesh.app.ble.RelayResponder]'s push path now actually
+     *  splits the count on handover (see [CourierHandover]), so a blind carrier with copies left to
+     *  spare can safely pass some along — a row already down to its last copy still isn't included
+     *  here, so it stays held but never offered again, same as before. */
+    suspend fun relayableCourierEnvelopes(): List<CourierEnvelopeEntity> {
+        val minCopies = CourierHandover.MIN_COPIES_TO_SPLIT
+        return courierEnvelopeDao.getOwnGroup() + courierEnvelopeDao.getBlindCarryWithBudget(minCopies)
+    }
+
+    /** P4 slice 4 (docs/DECISIONS.md decision 44) — persists the local copy count a handover split
+     *  left behind. Called by [org.offlinemesh.app.ble.RelayResponder] right after a successful
+     *  split-and-push, never directly by a caller that hasn't actually pushed anything (a query
+     *  without a matching action would silently desync the stored count from what was really handed
+     *  out). */
+    suspend fun updateCourierCopiesRemaining(id: String, copiesRemaining: Int) {
+        courierEnvelopeDao.updateCopiesRemaining(id, copiesRemaining)
+    }
 
     // ---------- ingesting items heard over the mesh ----------
 

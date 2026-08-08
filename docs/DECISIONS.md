@@ -2576,3 +2576,85 @@ debug APK built and `aapt`-confirmed (`versionCode='21' versionName='0.7.10-dev'
 `VERSION` 9 wire addition and every path above are new and untested on real hardware; adds to the
 existing next-live-round backlog (37/38/40 already queued).
 
+## 44. P4 slice 4 — handover mechanics: copy-budget split + rate limiting. P4 is now code-complete
+
+Fourth and final slice of P4 (Couriers, `PLAN-v2.md` §4.2). Closes the scope line slice 3 drew
+deliberately: `CourierEnvelopeEntity.copiesRemaining` finally gets real semantics, which is what
+lets a blind carrier safely pass an envelope on to a *further* peer (genuine multi-hop spray) instead
+of only ever holding what arrived.
+
+**`CourierHandover.split(copiesRemaining): Pair<Int, Int>?`** — the classic Spray-and-Wait
+arithmetic §4.2 names (Spyropoulos et al.): `floor(N/2)` given away, `ceil(N/2)` kept, `null` below
+`MIN_COPIES_TO_SPLIT` (2) since handing away 0 copies isn't a handover. Applied uniformly regardless
+of which tier is splitting — an own-group holder and a blind carrier use the identical function;
+nothing about the arithmetic itself depends on membership. Pure, no DAO access, directly
+unit-tested (conservation property — `keep + give` always equals the input for every N from 2 to 20,
+proving no copy is ever minted or lost — plus the boundary cases at 0/1/2 and a negative-input
+defensive check). **§4.2's "cap 8" figure is honestly not independently enforced by anything this
+slice builds**: it's automatically satisfied by conservation as long as no envelope is ever
+re-injected above `RelayEngine.COURIER_INITIAL_COPY_BUDGET` (4), and this slice adds no reinjection
+path — flagged explicitly rather than building enforcement machinery for a scenario nothing in this
+codebase can trigger yet.
+
+**`CourierHandoverTracker`** — new bounded, injectable-clock rate limiter (mirrors
+`ConnectionAttemptTracker`'s own LRU-with-`removeEldestEntry` shape and its "checking an entry
+protects it from eviction" precedent) enforcing §4.2's "1 attempt per envelope per 10 min," keyed on
+`(envelopeId, peerKey)` where `peerKey` is the peer's *resolved stable identity*
+(`PeerIdentityResolver.resolve`), not the raw BLE address — the address rotates roughly every ~15
+minutes, which would make a 10-minute rate limit nearly useless keyed on it directly. Falls back
+gracefully to the raw address when identity isn't resolved yet, the same "worst case is one
+redundant attempt, not a correctness bug" degradation `ingestOpenedSos`'s own `excludeKey`
+computation already accepts.
+
+**A real, intended behavior change from slice 3's placeholder verbatim-forward.** Slice 3's
+`reframeStoredCourier` forwarded `copiesRemaining` unchanged on every push, own-group or blind — a
+deliberate stopgap while the field was still inert. This slice replaces it with
+`RelayResponder.pushCouriersWithHandover`: for each handover-eligible envelope, checks the rate
+limiter, computes `CourierHandover.split`, **persists the local `keep` value** (`RelayEngine.
+updateCourierCopiesRemaining`, a new DAO update query) before pushing a frame carrying `give`, and
+records the attempt. Not built on the generic `pushUpTo` helper — that helper's `encode` step is a
+pure, synchronous mapper, but a handover needs a suspend, side-effecting sequence per item (rate-
+limit check → split → persist → encode/respond), and conflating that into `pushUpTo` would either
+lose the persistence step or force every other item category into the same suspend/side-effect shape
+for no benefit.
+
+**`RelayEngine.relayableCourierEnvelopes` grows to include blind-carry rows with spare budget.**
+Through slice 3 this returned own-group only, by design (nothing bounded further blind propagation).
+Now: own-group rows always (regardless of `copiesRemaining` — an own-group holder can still directly
+deliver to a resolving peer even down to its last copy, and `pushCouriersWithHandover` itself skips
+the actual push if `split` returns null) plus blind-carry rows with at least
+`CourierHandover.MIN_COPIES_TO_SPLIT` copies (`CourierEnvelopeDao.getBlindCarryWithBudget`, new). A
+blind row already down to its last copy stays held and advertised (stopping redundant re-pushes,
+unchanged from slice 3) but is still never offered onward — the "wait" half of spray-and-wait,
+naturally falling out of `split`'s own `null` case rather than a separate check.
+
+**Existing slice 3 tests updated to reflect the real, narrower boundary, not reverted.** Two tests
+asserted a blanket "blind-carry rows are always excluded from `relayableCourierEnvelopes`" — correct
+through slice 3, now imprecise. Replaced with tests proving the actual boundary: a blind row *with*
+budget is now included and gets a genuine split-and-push (asserting the pushed frame carries exactly
+`floor(4/2)=2` and the stored local row drops to `ceil(4/2)=2`, not left at 4); a blind row *without*
+budget (`copiesRemaining=1`) is still excluded, same as before. A new rate-limit test proves a second
+`CatalogFilter` round trip to the same peer within the window does not re-split/re-push.
+
+462 tests (up from 442): 8 new in `CourierHandoverTest` (split arithmetic — conservation property,
+every boundary case, negative-input defensive check), 6 new in `CourierHandoverTrackerTest` (window
+boundary at exactly the rate limit, per-pair scoping, LRU eviction, protect-on-access), `RelayEngineTest`
+additions (own-group always included, blind-with-budget now included, blind-without-budget still
+excluded), `RelayResponderTest` additions (opaque-relay path never used by couriers regardless of
+budget, blind-without-budget never offered, blind-with-budget genuinely split-and-pushed with the
+exact halved numbers asserted, rate-limit window enforced end to end). detekt clean, both variants
+compile/test/assemble green, no `missing_rules.txt`. Version bumped to v0.7.11-dev, fresh debug APK
+built and `aapt`-confirmed (`versionCode='22' versionName='0.7.11-dev'`) before committing.
+**Production code touched**: `ble/CourierHandover.kt` (new), `ble/CourierHandoverTracker.kt` (new),
+`data/Daos.kt` (`getBlindCarryWithBudget`, `updateCopiesRemaining`), `ble/RelayEngine.kt`
+(`relayableCourierEnvelopes` extended, `updateCourierCopiesRemaining`), `ble/RelayResponder.kt`
+(`courierHandoverTracker` field, `pushCouriersWithHandover` replacing `reframeStoredCourier`). No
+wire-format change — `Frame.Courier`'s shape and `MeshFrameCodec.VERSION` (9) are unchanged from
+slice 3, this slice only changes what value the already-existing `copiesRemaining` field carries.
+**NOT hardware-confirmed** — adds to the existing next-live-round backlog (37/38/40/43).
+
+**P4 is now fully code-complete** — all four slices (courier tag + seal/open, persisted storage,
+GATT wiring, handover mechanics) shipped across decisions 41-44. Per the project's sequencing
+directive, next is **P5 (Media)**; the sustained field-test milestone still waits on P5 and P7
+(bitchat bridge).
+

@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -421,21 +422,85 @@ class RelayResponderTest {
     }
 
     @Test
-    fun `a blind-carried courier envelope is never proactively re-offered to a further peer`() = runTest {
-        // The single most important behavior this slice enforces (see Frame.Courier's/
-        // RelayEngine.relayableCourierEnvelopes' own docs on why): nothing bounds multi-hop blind
-        // propagation yet (copiesRemaining stays inert until a later P4 slice), so a blind carrier
-        // must hold what arrived without pushing it onward — unlike SOS/position/presence/nickname's
-        // opaque custody, which DOES re-offer (see the "a carried frame is..." tests above).
+    fun `a courier envelope never uses the opaque-relay re-offer path, blind or not`() = runTest {
+        // Couriers never use OpaqueFrameRelay/refreshFramesToPush at all — unlike SOS/position/
+        // presence/nickname's opaque custody (see the "a carried frame is..." tests above),
+        // delivery flows exclusively through the CatalogFilter push cycle (see the tests below).
+        // Budget-independent: true whether or not the envelope has spare copiesRemaining.
         val tag = ByteArray(16) { it.toByte() }
         val frame = MeshFrameCodec.encodeCourier(tag, "env-blind", System.currentTimeMillis(), 4, byteArrayOf(1))
         responder.handleIncoming(frame, "peer1") { }
 
         val carried = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue(carried.none { it is MeshFrameCodec.Frame.Courier })
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `a blind-carried envelope down to its last copy is never offered onward`() = runTest {
+        val tag = ByteArray(16) { it.toByte() }
+        // copiesRemaining = 1: below CourierHandover.MIN_COPIES_TO_SPLIT, nothing left to hand over.
+        val frame = MeshFrameCodec.encodeCourier(tag, "env-blind-1", System.currentTimeMillis(), 1, byteArrayOf(1))
+        responder.handleIncoming(frame, "peer1") { }
 
         val toPush = relay.relayableCourierEnvelopes()
-        assertTrue("relayableCourierEnvelopes must exclude blind-carry rows", toPush.none { it.id == "env-blind" })
+        assertFalse(
+            "a blind-carry row with fewer than MIN_COPIES_TO_SPLIT copies must stay held, not offered again",
+            toPush.any { it.id == "env-blind-1" },
+        )
+        AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `a blind-carried envelope with spare copy budget is split and pushed onward, halving what it hands out`() =
+        runTest {
+            // P4 slice 4 (docs/DECISIONS.md decision 44) — the multi-hop spray step slice 3
+            // deliberately disabled: once copiesRemaining has a real bound, a blind carrier with
+            // copies to spare CAN pass some along to a further peer.
+            val tag = ByteArray(16) { it.toByte() }
+            val frame = MeshFrameCodec.encodeCourier(tag, "env-blind-4", System.currentTimeMillis(), 4, byteArrayOf(1))
+            responder.handleIncoming(frame, "peer1") { }
+
+            val peerFilter = CatalogFilter.build(emptyList())
+            val peerFilterFrame =
+                MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+            val responded = mutableListOf<ByteArray>()
+            responder.handleIncoming(peerFilterFrame, "peer2") { responded.add(it) }
+
+            val pushed = responded.mapNotNull { MeshFrameCodec.decode(it) }
+                .filterIsInstance<MeshFrameCodec.Frame.Courier>().singleOrNull { it.id == "env-blind-4" }
+            checkNotNull(pushed)
+            assertEquals("expected floor(4/2) handed out", 2, pushed.copiesRemaining)
+
+            // And the local row's own count dropped to ceil(4/2) = 2, not left at the original 4.
+            val stored = AppDatabase.get(context).courierEnvelopeDao().getById("env-blind-4")
+            assertEquals(2, stored?.copiesRemaining)
+            AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
+        }
+
+    @Test
+    fun `a courier handover is not repeated for the same peer within the rate-limit window`() = runTest {
+        val tag = ByteArray(16) { it.toByte() }
+        val frame = MeshFrameCodec.encodeCourier(tag, "env-rate", System.currentTimeMillis(), 4, byteArrayOf(1))
+        responder.handleIncoming(frame, "peer1") { }
+
+        val peerFilter = CatalogFilter.build(emptyList())
+        val peerFilterFrame =
+            MeshFrameCodec.encodeCatalogFilter(peerFilter.seed, peerFilter.sizeBits, peerFilter.toBits())
+
+        val firstResponse = mutableListOf<ByteArray>()
+        responder.handleIncoming(peerFilterFrame, "peer2") { firstResponse.add(it) }
+        val firstPush = firstResponse.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Courier>().singleOrNull { it.id == "env-rate" }
+        checkNotNull(firstPush)
+
+        // Same peer, same envelope, immediately again (well within the 10-minute window) — must
+        // not be re-split/re-pushed a second time.
+        val secondResponse = mutableListOf<ByteArray>()
+        responder.handleIncoming(peerFilterFrame, "peer2") { secondResponse.add(it) }
+        val secondPush = secondResponse.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.Courier>().singleOrNull { it.id == "env-rate" }
+        assertEquals(null, secondPush)
         AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
     }
 
