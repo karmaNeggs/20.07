@@ -153,23 +153,49 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         /** See the class-level note on why this is 180s and not 90s. */
         private const val BASE_MAX_AGE_SECONDS = 180L
 
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — [hop]'s slack contribution is now
+        // capped here, NOT decoupled from maxPositionRelayHops the way decision 33 (below) left it.
+        // Two problems found with letting slack scale all the way to a real position hop (up to
+        // RelayResponder.maxPositionRelayHops/BeaconRadio's own copy, 120): (1) product — the
+        // resulting staleness budget at hop 120 is `180 + 120*45` = ~93 minutes, and a position that
+        // old is still admitted by [forGroup] and drawn as a (faded, but present) walkable dot on
+        // the radar; for a crowd-navigation tool this is the most dangerous class of wrong output it
+        // can produce. (2) security — [hop] lives in the cleartext envelope BY DESIGN (a blind relay
+        // must increment it with no group key), so it carries no MAC/signature; anyone who captures
+        // one position frame can replay it with hop rewritten upward and buy up to ~93 minutes of
+        // acceptance instead of the intended ~3-6. 6 hops covers any realistic topology for this
+        // app's stated 3-8 person group inside a crowd (`PLAN-v2.md` §5.5) — capping the SLACK term
+        // here, not [maxPositionRelayHops] itself (propagation depth, an unrelated question), keeps
+        // both windows under ~7.5 minutes regardless of how far a legitimate long relay chain's
+        // envelope hop actually climbs.
+        private const val MAX_SLACK_HOPS = 6
+
         /** `internal`, no instance state — directly unit-testable. [hop] is a position record's
          *  OWN stored hop value (0 = the sender's direct fix, relayed once more for each hop
          *  beyond that — see [MeshFrameCodec.encodePosition]'s doc) — hop 0 gets exactly
          *  [baseMaxAgeSeconds], since a direct fix needs only one connection to refresh; each
          *  relay hop beyond that adds [PER_HOP_SLACK_SECONDS] of margin for the one additional,
-         *  independent reconnect cycle that hop's propagation depends on. */
+         *  independent reconnect cycle that hop's propagation depends on, up to [MAX_SLACK_HOPS]
+         *  (CR-12, `PLAN-v2.md` Part 10) — see that constant's own doc for why the slack no longer
+         *  scales all the way to a real (attacker-influenceable) hop value. */
         internal fun effectiveMaxAgeSeconds(baseMaxAgeSeconds: Long, hop: Int): Long =
-            baseMaxAgeSeconds + hop.coerceAtLeast(0) * PER_HOP_SLACK_SECONDS
+            baseMaxAgeSeconds + hop.coerceIn(0, MAX_SLACK_HOPS) * PER_HOP_SLACK_SECONDS
 
         /** [effectiveMaxAgeSeconds] pinned to this class's own [BASE_MAX_AGE_SECONDS] — the single
          *  source of truth callers outside this file should use (decision 33, `docs/DECISIONS.md`)
          *  rather than re-declaring the 180s literal themselves the way `RadarView`'s fade curve
          *  used to. Public specifically so `RadarCanvas` can size a dot's fade-out window to the
-         *  SAME staleness budget [forGroup] actually enforces for it, instead of an unrelated flat
-         *  constant that stopped matching once `RelayResponder.maxPositionRelayHops` grew from 4 to
-         *  a much larger ceiling — a hop-120 position's real staleness budget is over 90 minutes,
-         *  not the ~3-6 minutes the old flat constant assumed. */
+         *  SAME staleness budget [forGroup] actually enforces for it.
+         *
+         *  **Correction (CR-12, `PLAN-v2.md` Part 10, 2026-08-09):** decision 33's original note
+         *  here said a hop-120 position's real staleness budget was "over 90 minutes, not the ~3-6
+         *  minutes the old flat constant assumed" — true of the arithmetic at the time, but the
+         *  90-minute end of that range was never actually a good answer for a crowd-navigation tool
+         *  (a walkable dot that old, still shown) and depended on [hop], an unauthenticated
+         *  cleartext-envelope field a replay can inflate. [MAX_SLACK_HOPS] now caps the real budget
+         *  at ~7.5 minutes regardless of how large a legitimate long relay chain's envelope hop
+         *  actually gets — this function's own doc still holds for why a flat constant is wrong at
+         *  ANY hop above 1, just bounded now instead of unbounded. */
         fun effectiveMaxAgeSecondsFor(hop: Int): Long = effectiveMaxAgeSeconds(BASE_MAX_AGE_SECONDS, hop)
     }
 }

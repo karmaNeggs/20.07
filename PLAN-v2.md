@@ -6,6 +6,93 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09 — FULL-CODEBASE REVIEW PASS. THE NEXT HARDWARE ROUND IS BLOCKED UNTIL PART 10's
+  GATE A IS CLEAR. Read `Part 10` before doing anything else.** A read-through of all ~13.4k LOC of
+  `app/src/main` (no code changed, nothing committed) found **30 issues**, of which **12 would
+  either invalidate the round's own measurements, crash or silently degrade the session mid-run, or
+  send someone chasing a phantom.** The most consequential four, because each one is a shipped
+  feature or a plan claim that is *not actually true in the code*:
+  - **CR-1**: `MeshProtocol.MAC_LEN = 32` vs `CryptoUtils.authTag`'s 16-byte truncation means the
+    **Tier B SOS content preview (decisions 29/30/31) has never once gone on the wire**. Not a
+    regression this session — it has been dead since decision 29 shipped, and the unit tests
+    encode the production behaviour as their *failure* case, which is why nothing caught it.
+  - **CR-3**: `padGattFrame`'s 256-byte minimum bucket is not MTU-aware. **Any peer that negotiates
+    below MTU 259 loses the entire server→client notify path** (notifications cannot fragment) and
+    has its client→server writes silently promoted to prepared writes the GATT server never
+    reassembles. The three test phones all granted 517, which is exactly why decision 52's round
+    looked clean.
+  - **CR-2**: `dismantleGroup` does **not** delete courier envelopes, contradicting `§9.3 item 4`'s
+    own "checked against the actual code… already handled, no gap" conclusion. That §9.3 entry is
+    now corrected in place below.
+  - **CR-13**: `§9.2 item 1`'s hardware `ScanFilter` — which this plan itself calls a P1/P2
+    **blocker** — was only ever applied to the Tier B scan. The legacy scan, the one that actually
+    feeds `onDeviceSeen`/`maybeConnect` and therefore all GATT connectivity, is still unfiltered
+    and unbatched, still citing decision 3 (which was about service-*data* filtering — the exact
+    conflation §9.2 item 1 was written to call out).
+
+  Nothing in `Part 10` is speculative: every finding names a file and line and was verified against
+  the source, not inferred from a comment. Several are cases where a doc comment asserts a property
+  the code next to it does not have — see `Part 10`'s own closing note on why that pattern matters
+  more than any individual bug here. **Sequencing decision (2026-08-09, user): fix Gate A, then run
+  the device-test round, then P7** — the round is otherwise spending real-hardware time measuring a
+  degree signal that is corrupted (CR-4), a link-diversity mechanism that is switched off (CR-8),
+  and a broadcast feature that cannot transmit (CR-1).
+
+- **2026-08-09 — GATE A + GATE B APPLIED AND COMPILE-VERIFIED (all 20 of CR-1..CR-20). NOT
+  COMMITTED.** Corrected same day: initially reported "not compile-verified" — no JDK was found on
+  the standard `java_home` search path, but a Homebrew-installed JDK 17 (`/opt/homebrew/opt/openjdk@17`,
+  matching this project's own `sourceCompatibility`) was actually present and just not on the
+  non-interactive shell's PATH. With it: `./gradlew testDebugUnitTest detekt` found one real issue
+  (`HopTracker` hit detekt's `TooManyFunctions` threshold after CR-6's four new methods — fixed with
+  the same `@Suppress` + justifying-comment convention this codebase already uses elsewhere), then
+  525 tests (510 prior + 15 new from this pass) passed with 0 failures/errors, detekt clean,
+  `assembleDebug`/`assembleRelease`/`lintVitalRelease` all green, no `missing_rules.txt`. Every
+  "not compile-verified" note below is stale as of this correction. Every fix in Part 10's Gate A
+  (13 items) and Gate B (7 items) has been written into the working tree, one logical commit's
+  worth of changes per finding, each with a `CR-n` comment at the change site pointing back to its
+  own Part 10 entry. Two corrections surfaced during the fix pass itself, both already folded into
+  Part 10 and this RESUME block:
+  - **CR-15 was overstated and has been downgraded.** The original finding claimed `RadarView`'s
+    `elapsedMs` read forces a full recomposition of `RadarCanvas` at display refresh rate. On
+    inspection this is wrong: `elapsedMs` is read only inside `Canvas{}`'s own draw lambda (`Canvas`
+    = `Spacer(Modifier.drawBehind(...))`), and a State read inside `drawBehind`'s lambda is
+    attributed to the DRAW phase's own snapshot-observation scope, not the composition scope that
+    created the call — mutating it triggers redraw only, the same mechanism the sweep animation's
+    own `animateFloat` already relies on, and that sweep already redraws the canvas continuously
+    regardless of dot-blink state, so there was no incremental per-frame cost either way. Applied
+    only the genuinely real part: `mutableStateOf(0L)` → `mutableLongStateOf(0L)`, avoiding a Long
+    box per animation frame. Recorded here because it's exactly the class of "verify before you fix"
+    lesson `Part 10`'s own closing note argues for.
+  - **CR-12 additionally applies to `HopTracker.effectiveStaleMs`, not just the two functions named
+    in the original finding.** Same unauthenticated-hop-scales-the-window shape, same fix (capped
+    slack at 6 hops), now in all three places (`PositionTracker.effectiveMaxAgeSeconds`,
+    `RelayResponder.presenceWithinSkew`, `HopTracker.effectiveStaleMs`) instead of two.
+
+  **The honest gap: no JDK is available in this session's environment, so none of this has been
+  run through `./gradlew test detekt` or built.** Verification instead was a full manual pass —
+  every changed file re-read via `git diff`, every existing test whose behavior could plausibly
+  shift traced by hand against the new code (particularly the courier-handover budget refund in
+  CR-14, and the fountain-encoder cache in CR-16), new tests added alongside each Gate A/B item
+  that has a unit-test tier at all (CR-1, CR-3, CR-6, CR-7, CR-10, CR-12 across `MeshFrameCodecTest`/
+  `HopTrackerTest`/`PositionTrackerTest`/`RelayResponderPresenceSkewTest`/`TrickleTimerTest`/
+  `MeshProtocolBroadcastTierTest`), and every added line checked against this project's 120-char
+  detekt limit and brace-balanced per file. Six items (CR-2, CR-4, CR-5, CR-8, CR-9, CR-11, CR-17,
+  CR-18) have **no unit-test tier at all** under this project's own established constraints (BLE
+  radio classes and Keystore-gated `GroupRepository`/`GroupKeyStore` code are both already
+  documented elsewhere in this file as compile-verified-only) — those are correctness-reviewed by
+  hand only, same posture this project already applies to L2CAP/bitchat-spike work. **Before the
+  device-test round: run the full suite, run detekt, fix whatever a real compiler catches that this
+  manual pass didn't, then rebuild the debug APK per this project's own standing discipline.**
+
+  Also folded in during this pass, not originally in Part 10 (both trivial, found while fixing
+  adjacent code): `CryptoUtils.MAC_TAG_LEN` made public (CR-1 needed a single source of truth
+  instead of a duplicated literal) and a dangling two-KDoc-blocks-stacked-on-one-function artifact
+  in `pushCouriersWithHandover` (introduced by the CR-14 edit itself, caught and merged during
+  review — exactly the kind of small drift `Part 10`'s own CR-30 note is about).
+
+  Part 10's own checklist below is updated to reflect this — Gate A and Gate B are struck through,
+  not deleted, so the reasoning stays attached to what was actually done.
+
 - **2026-08-09, decision 55 (`docs/DECISIONS.md`): P7 spike tooling shipped — encoder + BLE
   injector, still needs a real bitchat install to actually run against.** New isolated package
   `org.offlinemesh.app.bitchatbridge`: `BitchatPacketEncoder` (pure, unit-tested, exact v1 header
@@ -1871,12 +1958,18 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    membership question) — that reasoning holds regardless of how long any one group itself lives.
    **Follow-up question raised (2026-08-09, revisited): does content need to be clamped to the
    group's own remaining expiry, so it can't meaningfully outlive a group that expires sooner than
-   24-48h out?** Checked against the actual code before answering: **already handled, no gap.**
-   `GroupRepository.expireGroups()` runs both at every service start AND every 30 minutes while
-   active (`MeshService.startPruning`), and `dismantleGroup` deletes a group's SOS/evidence/courier
-   rows immediately, not on the 24h/48h independent cadence. So content can outlive its own group by
-   at most the ~30-minute sweep interval, not by anything close to the full TTL window — this was a
-   real question worth checking, but the code already does the right thing.
+   24-48h out?** ~~Checked against the actual code before answering: **already handled, no gap.**~~
+   **CORRECTED 2026-08-09 by the Part 10 review pass — this conclusion was WRONG for couriers.**
+   The half that holds: `GroupRepository.expireGroups()` does run both at every service start AND
+   every 30 minutes while active (`MeshService.startPruning`), and `dismantleGroup` does delete a
+   group's SOS/evidence/nickname/peer-key rows immediately, so *those* can outlive their own group
+   by at most the ~30-minute sweep interval. The half that was wrong: `dismantleGroup`
+   (`GroupRepository.kt:217`) **never touches `courier_envelopes` at all** — `GroupRepository`
+   doesn't even hold that DAO, and `CourierEnvelopeDao.deleteForGroup` (`Daos.kt:122`) is called
+   only from tests. A dismantled group's own courier envelopes therefore survive with a non-null
+   `groupId`, stay in `relayableCourierEnvelopes()`, and keep being handed to peers for up to the
+   full 24h `COURIER_MAX_AGE_MILLIS`. Tracked as **CR-2** in Part 10, Gate A. The original locked
+   decision above (couriers 24h, content 48h, deliberately separate) is unaffected and stands.
 5. **Manual relay-pattern tuning knobs, user-facing (proposed 2026-08-06, not yet built).** A
    settings section exposing the actual §5.4/§5.1 tuning constants (Trickle intervals/redundancy
    constant, fanout subsetting thresholds, connection counts, TTL) as user-adjustable, for someone
@@ -1919,3 +2012,705 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    normal MEMBER path, not blind custody, so it gets immediate forward already), but whether to also
    speed up blind custody itself is a real open question to weigh during P7's implementation, not
    before it.
+
+---
+
+## Part 10 — Pre-hardware-test fix list (full-codebase review, 2026-08-09)
+
+**Origin.** A read-through of every file in `app/src/main` (~13.4k LOC, 56 Kotlin files) looking
+for: redundant/dead code, regressions, bugs, variable/parsing issues, memory leaks, over-engineering
+with a shorter honest alternative, UI/UX gaps, and bad parameters/ranges/constraints. No code was
+changed and nothing was committed — this section is the entire output, written to be resumable cold.
+
+**How to read an entry.** Each has a stable id (`CR-n`), a one-line claim, the exact evidence
+(file:line), why it matters *for this project specifically*, the proposed fix, and how to verify.
+Every claim was checked against source. Where a finding contradicts something this plan or a code
+comment currently asserts, that is called out explicitly — those are the dangerous ones, because
+the wrong statement is what stopped anyone looking.
+
+**Gates.**
+- **Gate A — blocks the device-test round.** Each of these either makes the round measure something
+  that isn't real, degrades or crashes the session mid-run, or would send the next debugging session
+  chasing a phantom. 12 items.
+- **Gate B — fix in the same pass if cheap; each is small and low-risk.** 7 items.
+- **Tracked — after the round.** 11 items, including two genuine product decisions that are the
+  user's call, not an engineering one.
+
+Suggested execution: land Gate A as one commit per logical cluster (they group naturally into
+crypto/wire, connection lifecycle, and trackers), Gate B as one cleanup commit, then rebuild the
+debug APK and run the round. Full suite + detekt + both variants green after each, per this
+project's standing discipline.
+
+---
+
+### Gate A — must be fixed before the next hardware round
+
+#### CR-1 — The Tier B SOS content preview has never been transmitted (decisions 29/30/31 are dead on the wire) — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshProtocol.kt:113` declares `private const val MAC_LEN = 32`, documented as "Fixed
+HMAC-SHA256 output length". `CryptoUtils.kt:243-252`'s `authTag` returns a **truncated 16-byte** tag
+(`MAC_TAG_LEN = 16`, `.copyOf(MAC_TAG_LEN)`). `encodeBroadcastTierBeacon` gates the whole content
+block on `content.mac.size == MAC_LEN` (`MeshProtocol.kt:244`). The only production producer of that
+mac is `BeaconRadio.sosContentFor` (`BeaconRadio.kt:575`), which calls `CryptoUtils.authTag`. So
+`includeContent` is **always false in production**, on every device, since decision 29 shipped.
+
+It is broken symmetrically on receipt too: `BeaconRadio.verifyBroadcastSosContent`
+(`BeaconRadio.kt:1046`) compares a freshly-computed 16-byte `authTag` against `content.mac`, and
+`constantTimeEquals` returns false on a size mismatch — so even a hypothetical 32-byte mac arriving
+from somewhere would be rejected.
+
+**Why the tests didn't catch it.** `MeshProtocolBroadcastTierTest.kt:214` builds the mac as
+`ByteArray(32) { it.toByte() } // stand-in for a real CryptoUtils.authTag output` — the comment
+states the assumption that is false. Worse, line 267 asserts that a **16-byte** mac is correctly
+*rejected* as "wrong length": the suite encodes exact production behaviour as its failure case. Every
+other broadcast-tier test uses `ByteArray(32)` literals too, so the whole file is testing a shape
+production never produces.
+
+**Why it matters.** This is the single feature that lets an SOS reach someone with **no GATT
+connection at all** — decision 29's stated purpose, and the thing that makes the alert "instant" in
+a crowd where connection slots are the scarce resource. Everything downstream of it is also dead:
+`MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES` (65) and the entire 251-byte budget arithmetic in
+`encodeBroadcastTierBeacon`'s doc, `BroadcastSosPreview` (the whole class), `NavigateScreen`'s
+preview surface, and — user-visibly — `GroupChatScreen.kt:216-228`'s live byte counter which
+currently tells the user their message *"fits the instant SOS broadcast preview"*. That is a false
+statement shown in the UI on every keystroke.
+
+Going into a hardware round without this fixed means either not testing the preview at all, or
+testing it, seeing nothing, and spending the round debugging the radio.
+
+**Fix.** Make the two constants share one source of truth rather than agreeing by coincidence:
+expose `CryptoUtils.MAC_TAG_LEN` as `const` and set `MeshProtocol.MAC_LEN = CryptoUtils.MAC_TAG_LEN`
+(or inline 16 with a doc pointing at `authTag`). Do **not** widen `authTag` to 32 — 16 bytes is a
+deliberate wire-budget choice documented at `CryptoUtils.kt:245-247` and is used by every other MAC
+in the app; changing it is a `MeshFrameCodec.VERSION` break for no benefit. Changing `MAC_LEN` alone
+is a Tier B wire-shape change (the content block shrinks by 16 bytes) — it only affects a field that
+has never been transmitted, so nothing can be out there parsing the old shape, but bump `VERSION`
+anyway per this project's standing "every wire-affecting change is one discoverable signal" rule.
+
+**Verify.** Add a test that builds `SosAlert.Content` via a real `CryptoUtils.authTag(...)` call and
+asserts `decodeBroadcastTierBeacon(encodeBroadcastTierBeacon(...)).activeSos?.content != null` — i.e.
+prove the round trip works with a *production-produced* mac, not a literal. Then delete or rewrite
+`MeshProtocolBroadcastTierTest.kt:267`'s "wrong length" case, which asserts the bug. On hardware:
+`DiagnosticsLog` tag `recv`, message "broadcast-tier SOS content preview verified" should appear
+without any GATT connection having formed.
+
+#### CR-2 — `dismantleGroup` leaves courier envelopes behind (and §9.3 item 4 said otherwise) — ✅ FIXED 2026-08-09
+
+**Evidence.** `GroupRepository.dismantleGroup` (`GroupRepository.kt:217-228`) deletes evidence
+symbols, evidence, SOS, nicknames, peer keys, the group row, the group key and the signing keypair.
+It never touches `courier_envelopes`, and `GroupRepository` holds no reference to that DAO.
+`CourierEnvelopeDao.deleteForGroup` (`Daos.kt:122`) exists and is called **only** from
+`RelayEngineTest.kt:420/424`.
+
+**Why it matters.** `dismantleGroup`'s own doc says *"Actually deletes the group and everything
+relayed for it — not just hides it."* After a manual delete or an automatic `expireGroups`, that
+group's courier envelopes keep a non-null `groupId`, so `relayableCourierEnvelopes()`
+(`RelayEngine.kt:323`) keeps returning them and `pushCouriersWithHandover` keeps handing them to
+peers for up to the full 24h `COURIER_MAX_AGE_MILLIS`. The device is relaying sealed content for a
+group the user believes they destroyed — a direct violation of the product's own delete promise, and
+the exact scenario decision 52's hardware round exercised (a phone deleting its own group mid-session
+and becoming a blind carrier).
+
+**This is also a plan correction**: `§9.3 item 4` claimed this was "checked against the actual code…
+already handled, no gap." It has been corrected in place above.
+
+**Fix.** Add `courierEnvelopeDao` to `GroupRepository` and call `deleteForGroup(groupId)` inside
+`dismantleGroup`, alongside the existing deletes. One line plus a field.
+
+**Verify.** Extend the existing `GroupRepository` dismantle test (or add one) asserting a courier row
+for the group is gone afterwards, and a row for a *different* group survives. `RelayEngineTest`
+already has the DAO-level coverage — this is about the caller.
+
+#### CR-3 — `padGattFrame`'s 256-byte floor is not MTU-aware; any link below MTU 259 loses delivery — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshFrameCodec.padGattFrame` (`:226-241`) rounds every frame to the first of
+`PAD_BUCKETS = [256, 512, 1024, 2048]` that fits, so **the minimum size of any GATT frame this app
+emits is 256 bytes**, regardless of content or connection. Usable ATT payload is `mtu - 3`
+(`MeshProtocol.ATT_WRITE_OVERHEAD_BYTES`). Both transport choke points pad unconditionally:
+`MeshGattClient.write` (`:265`) and `MeshGattServer.notify` (`:137`).
+
+On a connection that negotiates **MTU < 259**:
+- **Server→client notify has no fragmentation path.** `notifyCharacteristicChanged` with a 256-byte
+  value on e.g. a 247-MTU link (244 usable) fails. This kills the *entire* server-role push
+  direction — catalog-filter responses, presence and position refreshes, symbol pushes.
+- **Client→server write silently becomes a prepared (long) write.** Android's stack promotes any
+  `WRITE_TYPE_DEFAULT` value longer than `mtu-3` to the ATT prepare/execute procedure. The peer's
+  `MeshGattServer.onCharacteristicWriteRequest` (`:226-237`) **ignores both `preparedWrite` and
+  `offset`, and there is no `onExecuteWrite` override anywhere in the file** — each fragment is fed
+  to `unpadGattFrame` as though it were a whole frame and dropped as malformed.
+
+**Compounding it**, the MTU-fallback logic that exists specifically to handle this
+(`RelayResponder.framesToPushOnConnect`, `:322-369`) compares the **unpadded** `filterFrame.size`
+against `maxFrameBytes` — so on a 247-MTU link a 40-byte filter "fits" a 244-byte budget, is sent,
+and is then padded to 256 by the transport underneath. The check cannot ever be right as written.
+And its fallback branch (eager push of every relayable item) emits *more* oversized frames, not
+fewer, so the safety net makes the failure worse.
+
+**Why it matters for the round.** Decision 52's three phones all granted the requested 517, which is
+why this looked clean. It will surface on the first phone that caps lower (247 and 185 are both
+common OEM values), or any time `requestMtu` fails at all — in which case `negotiatedMtu` has no
+entry and `pushOnConnect` falls back to `DEFAULT_ATT_MTU` (23), where nothing can be delivered.
+A round that happens to include one such phone would present as "one phone is invisible/silent",
+which is the single most expensive symptom to misdiagnose in this codebase's history.
+
+**Fix (two parts, both needed).**
+1. Make padding MTU-aware: pass the connection's usable payload into `padGattFrame` and select the
+   largest bucket that still fits, falling back to "length-prefix, no padding" when even the smallest
+   bucket doesn't. This gives up some size-obfuscation on constrained links — an acceptable, and
+   explicitly documented, trade against total delivery failure. Note `padGattFrame`'s existing doc
+   already contemplates an unpadded case for oversized frames; this extends the same escape hatch
+   downward.
+2. Make `framesToPushOnConnect`'s budget check use the **padded** size, so the catalog-filter-vs-
+   eager-push decision is made against what will actually go on the wire.
+
+Separately consider implementing `onExecuteWrite` + offset reassembly in `MeshGattServer` as
+defence in depth, since a peer on a future build could still long-write. That part is optional for
+the round; parts 1 and 2 are not.
+
+**Verify.** A unit test asserting `padGattFrame(frame, usable = 244).size <= 244` for a small frame
+and that `unpadGattFrame` still round-trips it. On hardware: force a low MTU on one phone (or add a
+debug flag that requests 185 instead of 517) and confirm two-way delivery still works — this is the
+one Gate A item that genuinely needs a deliberate test setup rather than just "run the round".
+
+#### CR-4 — `MeshGattServer.stop()` leaks `ConnectionRegistry` entries, corrupting the degree signal — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshGattServer.stop()` (`:126-128`) is `try { gattServer?.close() } catch {}` and
+nothing else. It does not clear `connectedDevices`, `subscribedDevices`, `negotiatedMtu` or
+`registeredKey`, and — critically — never calls `connectionRegistry.unregister(...)` for its
+registered links. `MeshGattClient.disconnectAll()` (`:255-257`) does the full cleanup, so the two
+roles are asymmetric.
+
+**Why it matters.** `stopRadios()` is called on every "Offline" toggle *and* on every Bluetooth
+adapter off→on transition handled by `MeshService.bluetoothStateReceiver` (`MeshService.kt:200-223`,
+which deliberately does `stopRadios(); startRadios()`). Each cycle leaves dead push callbacks in the
+registry pointing at a closed `BluetoothGattServer`. Consequences:
+- `ConnectionRegistry.openLinkCount()` is permanently inflated. That count is the **only** degree
+  signal `ForwardingPolicy` uses — for TTL clamping, fanout subsetting and jitter. Every §5.4
+  adaptation the round is meant to observe is now driven by a number that ratchets upward and never
+  comes down.
+- `RelayResponder.floodForwardSos` picks targets from `connectionRegistry.others(...)` and burns its
+  fanout subset on links that cannot deliver, while `sentCount/targets.size` in the diagnostics line
+  quietly under-reports for reasons that look like radio failure.
+- `periodicRefresh` loops keep running because `connectedDevices` still holds the addresses.
+
+Since decision 52's own round involved Bluetooth toggling as a recovery step, this is very likely
+already polluting past data.
+
+**Fix.** Give `MeshGattServer` a symmetric teardown: iterate `registeredKey` unregistering each,
+then clear all four collections, then close. Mirror `MeshGattClient.disconnectAll`'s shape.
+
+**Verify.** A test asserting `connectionRegistry.openLinkCount() == 0` after `server.stop()` with a
+registered link. On hardware: toggle Bluetooth off/on three times and confirm the `send` diagnostics
+line's target count doesn't climb.
+
+#### CR-5 — `handledGatts` is never cleaned on the eviction or hard-deadline paths (BluetoothGatt leak) — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshGattClient.handledGatts` (`:103`) is only removed in `onConnectionStateChange`'s
+DISCONNECTED branch (`:335`). But both `disconnectHeld` (`:237-248`) and the hard-deadline watchdog
+(`:189-206`) call `gatt.disconnect()` **immediately followed by `gatt.close()`** — closing generally
+suppresses the subsequent state-change callback, so the entry is never removed. The watchdog cleans
+`writeQueue`, `negotiatedMtu`, `activeTrackerKey`, `connectionRegistry`, `heldConnections`,
+`heldRssi` and `syncedThisSession` — and misses this one, which reads as an oversight rather than a
+decision.
+
+**Why it matters.** Each retained `BluetoothGatt` holds a `Context` and a `BluetoothDevice`. The set
+grows once per diversity eviction and once per hung connection, for the life of the process — i.e.
+fastest exactly in the dense-crowd scenario the round is meant to stress. LeakCanary will not catch
+it (a live, reachable set is not a leak by its definition). It is also correctness-adjacent: if a
+`BluetoothGatt` object were ever reused by the stack, the stale entry would make
+`onServicesDiscovered` no-op and the link would never register.
+
+**Fix.** Add `handledGatts.remove(gatt)` to both cleanup paths. Two lines.
+
+**Verify.** No clean unit test for this (needs a real `BluetoothGatt`); assert by inspection plus a
+debug-only size log alongside the existing `conn` diagnostics during the round.
+
+#### CR-6 — `HopTracker` state grows without bound and survives group deletion — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshProtocol.kt:345-356` — `table`, `lastUpdated`, `lastSource` and the `_snapshot`
+`MutableStateFlow` are keyed on `Key(groupId, target)` where `target` is `"PRESENCE"` **or a per-
+message SOS UUID**. Nothing anywhere removes an entry. `myHop`/`bestActiveSos` only *filter* by
+staleness at read time (`:384`, `:470`); the underlying entries persist forever.
+`_snapshot.update { it + (key to candidate) }` (`:428`) allocates a strictly larger map on every
+accepted report.
+
+**Why it matters.** Two hot readers walk this structure: `BeaconRadio.bestSosHopFor` (`:308-311`)
+filters the whole snapshot on **every advertise-check tick** (2s in ACTIVE tier), and
+`HopTracker.bestActiveSos` scans `table.entries` on every Tier B advertise evaluation. Growth is
+per-alert-SOS-id and unbounded within a session. This is precisely the shape of bug §6.4's
+sustained-session gate exists to catch, and a multi-hour round is where it first bites.
+
+It also has no group-deletion hook, unlike `PositionTracker.clearForGroup`/`pruneOrphaned` and
+`BroadcastSosPreview.clearForGroup`/`pruneOrphaned`, which decision 30 added for exactly this reason
+— `HopTracker` was missed in that pass. So a dismantled group's hop entries persist too.
+
+**Fix.** Two parts, both mirroring what `PositionTracker` already does:
+1. Prune entries whose `lastUpdated` is older than `effectiveStaleMs` inside `MeshService`'s existing
+   30-minute `startPruning` sweep — and remove them from `_snapshot` as well as the three maps.
+2. Add `clearForGroup(groupId)` / `pruneOrphaned(activeGroupIds)` and call them from the same place
+   `positionTracker.pruneOrphaned` / `broadcastSosPreview.pruneOrphaned` are already called
+   (`MeshService.kt:289-291`), plus the manual-delete path in `GroupChatScreen`.
+
+**Verify.** `HopTrackerTest` already injects `now` — add a test that inserts N sos keys, advances the
+clock past staleness, prunes, and asserts the snapshot shrank. Assert `pruneOrphaned` drops a
+deleted group's entries.
+
+#### CR-7 — `TrickleTimer` has an unsynchronised set mutated from the BLE binder thread — ✅ FIXED 2026-08-09
+
+**Evidence.** `TrickleTimer.sightingSourcesThisWindow` is a plain `mutableSetOf<Any>()`, and none of
+`onSighting` / `shouldTransmit` / `reset` is synchronised. `onSighting` is called from
+`BeaconRadio.handleResult` (`BeaconRadio.kt:969`) which runs on the **raw BLE scan-callback binder
+thread**. `shouldTransmit()` reads `.size` and calls `.clear()` from the **advertise coroutine**
+(`BeaconRadio.kt:277`). `reset()` is called from that same coroutine (`:273`).
+
+**Why it matters.** Concurrent `add` during `clear`/`size` on a `LinkedHashSet` is undefined: at best
+a wrong redundancy count, at worst a `ConcurrentModificationException` that kills the advertise
+coroutine (which has no handler — see CR-9's note on `serviceScope`) and therefore **stops all
+advertising for the rest of the session**. Every other genuinely cross-thread field in `BeaconRadio`
+is carefully `@Volatile` or a `ConcurrentHashMap`, with a class comment explaining the convention —
+this one instance was missed, and it sits directly on the highest-frequency thread in the app.
+
+Trickle governs whether Tier B transmits at all. A round trying to characterise Tier B behaviour
+against a racy suppression counter produces unexplainable data.
+
+**Fix.** Mark all three methods `@Synchronized` (the class is small and the critical sections are
+trivial), or make the set a `ConcurrentHashMap.newKeySet()`. Prefer `@Synchronized` — `shouldTransmit`
+also mutates `intervalMs`/`windowStart`/`suppressed`, which have the same exposure.
+
+**Verify.** `TrickleTimerTest` is pure and clock-injectable; add a concurrency smoke test hammering
+`onSighting` from several threads while `shouldTransmit` rolls windows.
+
+#### CR-8 — Diversity-based link eviction (P3 / §9.2 item 2) is switched off in practice — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshGattClient.considerEvicting` (`:219`):
+
+```kotlin
+val heldRssiValues = heldKeys.map { (heldRssi[it] ?: return).toDouble() }
+```
+
+`heldRssi` is written in exactly **one** place: `maybeConnect`'s "already holding this peer"
+early-return branch (`:144-147`). It is never written when a connection is first established. So
+until every currently-held peer has been heard beaconing at least once *after* it became held, that
+non-local `return` aborts and **nothing is ever evicted**. If a held peer stops advertising, or its
+address rotation resolves to a `trackerKey` with no recorded RSSI, eviction stays off indefinitely.
+
+**Why it matters.** This is the mechanism §9.2 item 2 calls out as dominating reachability
+("first-heard is close to worst-case… select for diversity"), and P3's persistent links removed the
+only other way a held set could ever change — the class doc at `:210-215` says exactly that. So the
+current behaviour is precisely the failure mode P3 was supposed to eliminate, while `LinkSelector`
+and `LinkSelectorTest` both look healthy in isolation. A round intended to validate P3 link selection
+would measure nothing.
+
+**Fix.** One line: record `heldRssi[trackerKey] = rssi` at `attemptStarted` in `maybeConnect`
+(`:156-157`), so a link has a diversity value from the moment it is attempted. Optionally also log
+an `conn` diagnostics line when `considerEvicting` bails for a missing RSSI, so this class of silent
+disablement is visible next time.
+
+**Verify.** On hardware with 4+ phones and `maxConcurrentClientConnections = 3`, the `conn`
+diagnostics should show at least one "diversity evict" line over a session with real movement. If it
+shows zero, the mechanism is still off.
+
+#### CR-9 — `senderIdFor`'s `requireNotNull` sits on hot loop paths with no exception handler — ✅ FIXED 2026-08-09
+
+**Evidence.** `GroupRepository.senderIdFor` (`:193-198`) uses `requireNotNull`, deliberately: *"a
+caller bug worth surfacing loudly rather than silently falling back to something wrong"* (decision
+54). It is called from `BeaconRadio.refreshBroadcastTierPositionIfDue` (`:508`),
+`BeaconRadio.relayedPositionFrameForBroadcastTier` (`:545`), `BeaconRadio.ingestBroadcastTierPosition`
+(`:1011`), and `RelayResponder.presenceAndPositionFrames` / `positionFramesToPush` / `selectPositionsToRelay`
+(`:414`, `:483`, `:500`) — i.e. the advertise loop and the per-connection push path.
+`MeshService.serviceScope` is `CoroutineScope(SupervisorJob() + Dispatchers.IO)` (`MeshService.kt:57`)
+with **no `CoroutineExceptionHandler`**, so an uncaught exception in a `launch` child reaches the
+thread's default handler — process crash.
+
+**Reachable case.** A group row exists in Room while the `EncryptedSharedPreferences` signing keypair
+does not: Android Keystore reset, restore-to-a-new-device, an OEM backup/migration, or the
+`GroupKeyStore` file failing to decrypt. Note this is the *mirror* of the case `sweepOrphanKeys`
+already handles (keys without rows); nothing handles rows without keys. Pre-decision-54 this path
+fell back to `deviceId` and merely degraded.
+
+**Why it matters.** "Surfacing loudly" in practice means either killing the advertise coroutine
+permanently or crashing the app mid-round. Both lose the session, and the crash is far from the
+cause.
+
+**Fix.** Either (a) have `senderIdFor` return `String?` and let the two frame-building call sites skip
+that group's frames for this cycle, or (b) keep `require` but add a `CoroutineExceptionHandler` to
+`serviceScope` that logs to `DiagnosticsLog` and, for the advertise/scan jobs specifically, restarts
+them. (a) is smaller and more honest about what the caller can actually do; (b) is worth doing anyway
+as general hardening — an unhandled throw anywhere in `serviceScope` currently takes the app down.
+
+**Verify.** Unit-test `senderIdFor` on a group id with no keypair. Add the handler and assert a
+`DiagnosticsLog` `error` event rather than a crash.
+
+#### CR-10 — `CatalogFilter.sizeBits` is the one wire field with no bound check; `sizeBits = 0` throws — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshFrameCodec.decode`'s `FRAME_CATALOG_FILTER` branch (`:1104-1109`) reads
+`sizeBits` as an unsigned short and validates nothing. Every neighbouring branch bounds its fields
+carefully (`totalChunks !in 1..MAX_EVIDENCE_CHUNKS` at `:1044`, `thumbnail.size > MAX_THUMBNAIL_BYTES`
+at `:1052`, `contentLength < 0` at `:1054`). `CatalogFilter.hashIndexes` then computes
+`Math.floorMod(h1 + i * h2, sizeBits)` — **`sizeBits == 0` throws `ArithmeticException`** (divide by
+zero).
+
+**Why it matters.** The throw is caught by `RelayResponder.handleIncoming`'s top-level catch
+(`:1412`), so no crash — but the frame is abandoned before `handleCatalogFilter` pushes anything, so
+one malformed frame per connection silently suppresses that connection's entire catalog sync. Cheap
+denial of delivery from an unauthenticated peer, against the mechanism all SOS/evidence/nickname
+delivery is now exclusively reactive to. Values above `MAX_SIZE_BITS` (4096) are also accepted and
+just waste work.
+
+**Fix.** `if (sizeBits !in 1..CatalogFilter.MAX_SIZE_BITS) return null` in the decode branch
+(promote `MAX_SIZE_BITS` from `private`). Matches the file's own established posture exactly.
+
+**Verify.** `MeshFrameCodecTest` — add a hand-constructed frame with `sizeBits = 0` and one with
+`sizeBits = 65535`, assert both decode to null. This is the same shape as the existing hostile-
+`totalChunks` test at `MeshFrameCodecTest.kt:948`.
+
+#### CR-11 — `subscribedDevices` is keyed by `BluetoothDevice`, against this file's own stated rule — ✅ FIXED 2026-08-09
+
+**Evidence.** `MeshGattServer.kt:68` — `subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>()`.
+Lines 79-81 of the same file state the opposite rule for everything else: *"Keyed by address, like
+every other per-peer structure in this class and in MeshGattClient — **NOT by the BluetoothDevice
+object itself, which has no guaranteed stable equals() across separate callback deliveries from the
+stack** (see docs/DECISIONS.md, decision 4)."*
+
+**Why it matters.** If decision 4's premise holds, the `if (!subscribedDevices.add(device)) return`
+guard at `:209` — whose entire job is preventing duplicate `periodicRefresh` loops on a re-fired CCCD
+write, the server-side twin of `MeshGattClient.handledGatts` — fails exactly when needed. Duplicate
+refresh loops on a persistent link double presence/position airtime for that link's whole lifetime,
+which is both a battery cost and a confound for any airtime measurement during the round.
+
+Either the premise or the code is wrong; both cannot stand.
+
+**Fix.** Key `subscribedDevices` by `device.address` like every other collection in the class, and
+keep the `BluetoothDevice` only where the API needs it (passed through to `notify`). If instead
+decision 4's premise is believed to be wrong, correct the comment and say why — but don't leave the
+file contradicting itself.
+
+**Verify.** Inspection plus the round: two `periodicRefresh` loops on one link would show as
+presence/position frames arriving at half the configured `presenceRefreshIntervalMs`.
+
+#### CR-12 — Hop-scaled staleness windows reach ~93 minutes, and `hop` is unauthenticated — ✅ FIXED 2026-08-09
+
+**Applied to all three shape-alike functions**, not just the two named below: `PositionTracker
+.effectiveMaxAgeSeconds`, `RelayResponder.presenceWithinSkew`, AND `HopTracker.effectiveStaleMs`
+(found during the fix pass — identical shape, identical unauthenticated-`hop` exposure, missed in
+the original finding). Each got its own `MAX_SLACK_HOPS = 6` constant (kept in sync by doc only,
+matching this codebase's existing `PER_HOP_SLACK_MS`/`PER_HOP_SLACK_SECONDS` cross-file convention),
+clamping `hop` before the slack multiplication. Tests added/corrected in
+`PositionTrackerTest`/`RelayResponderPresenceSkewTest`/`HopTrackerTest` — the pre-existing
+`PositionTrackerTest` assertion at hop 120 (`5580L`) was itself testing the unbounded-scaling bug as
+correct behavior and has been corrected to `450L`. See the RESUME HERE block's own entry for this
+pass. **Not compile-verified** — no JDK in this session's environment; see that same entry.
+
+**Evidence.** `PositionTracker.effectiveMaxAgeSeconds = baseMaxAgeSeconds + hop * PER_HOP_SLACK_SECONDS`
+(`PositionTracker.kt:162`, base 180s, slack 45s/hop). `RelayResponder.presenceWithinSkew` has the
+same shape (`RelayResponder.kt:1466-1470`, base 120s, slack 45s/hop). Both are bounded by
+`maxPositionRelayHops = 120` (`RelayResponder.kt:82`, mirrored at `BeaconRadio.kt:1089`), raised from
+4 to 120 by decision 33 for an unrelated reason (multi-kilometre relay reach).
+
+At hop 120: position staleness budget = `180 + 120*45` = **5580 s ≈ 93 minutes**; presence replay
+window = `120 + 120*45` s ≈ **90 minutes**.
+
+`hop` lives in the **cleartext envelope by design** — `Frame.PositionSealed.hop` and
+`Frame.Presence.hop` both document this explicitly, because a blind relay must be able to increment
+it without the group key. It is therefore covered by no MAC and no signature.
+
+**Why it matters — two separate problems.**
+1. *Product.* A position up to 93 minutes old is admitted by `PositionTracker.forGroup` and rendered
+   as a (faded) dot on the radar that someone may walk toward. `RadarView`'s fade goes to
+   `STALE_FADE_MIN_ALPHA = 0.2` and no further — it cannot communicate "this may be an hour and a
+   half old" versus "three minutes old". For a crowd-navigation tool during a stampede this is the
+   most dangerous class of wrong output the app can produce.
+2. *Security.* Anyone can capture one presence or position frame and replay it with `hop` rewritten
+   to 119, obtaining a ~90-minute acceptance window instead of 2 minutes. The replay protection
+   `presenceWithinSkew` was added to provide (its own doc: *"anyone who ever captured one valid
+   presence frame could replay it indefinitely"*) is substantially defeated by a field the same
+   design deliberately leaves unauthenticated.
+
+The per-hop reasoning itself is sound — each hop genuinely costs one reconnect cycle. The error is
+letting it scale to the *ceiling* of a field that grew 30× for an unrelated reason.
+
+**Fix.** Clamp the hop term in both functions, e.g. `hop.coerceAtMost(MAX_SLACK_HOPS)` with
+`MAX_SLACK_HOPS = 6` — which covers any realistic topology for this app's stated 3-8 person group in
+a crowd (§5.5) and caps both windows at ~7 minutes. Put the constant in one place both files
+reference, and note in the doc that it is deliberately decoupled from `maxPositionRelayHops`
+(propagation depth) because the two answer different questions. Consider additionally showing an
+explicit age label on a dot past some threshold rather than relying on alpha alone.
+
+**Verify.** `PositionTrackerTest`/`RelayResponderPresenceSkewTest` both already test these functions
+directly — add cases at hop 6, 7 and 120 asserting the window stops growing.
+
+#### CR-13 — §9.2 item 1's `ScanFilter` was only applied to Tier B; the legacy scan is still unfiltered — ✅ FIXED 2026-08-09
+
+**Evidence.** `BeaconRadio.restartBroadcastTierScan` (`:844-859`) correctly does both halves of
+§9.2 item 1 — `ScanFilter.Builder().setServiceUuid(...)` and degree-gated `setReportDelay`.
+`BeaconRadio.restartScan` (`:862-875`), the **legacy** scan, does neither:
+`s.startScan(emptyList(), settings, scanCallback)`, with a comment citing decision 3
+(*"a hardware filter silently fails to fire on some BLE chipsets"*).
+
+But decision 3 was about **service-DATA** filtering. §9.2 item 1 says this explicitly:
+
+> Required: restore a hardware `ScanFilter` on the service UUID… Note this is *service-UUID*
+> filtering, which is reliable — not the *service-data* filtering correctly removed in Pass 12 as
+> chipset-unreliable. They are different filter types, and conflating them is why we ended up with
+> no filtering at all.
+
+The legacy scan is still making exactly that conflation, in a comment that cites the decision the
+plan was warning about. §9.2 item 1 is marked **"blocks P1/P2"**.
+
+**Why it matters.** The legacy scan is the one that feeds `onDeviceSeen` → `maybeConnect`, i.e. all
+GATT connectivity. At the stated D≈400 target it takes every BLE advert from every nearby device —
+earbuds, trackers, POS terminals — onto the callback thread before any app logic runs, and
+`scanCallback` does real work inline (service-data lookup, beacon decode, hex encode, match-table
+lookup, `hopTracker.considerNeighborReport`). This is the callback storm §9.2 names as a first-order
+problem.
+
+**Why it's Gate A rather than "later".** It is a behaviour change that itself needs hardware
+validation. Landing it *for* the round means one round validates both it and everything else; landing
+it after means an extra round. The alternative — explicitly scoping this round to the unfiltered
+legacy scan and accepting that the density findings won't generalise — is a legitimate call, but it
+must be a stated decision rather than an omission.
+
+**Fix.** Add `ScanFilter.Builder().setServiceUuid(ParcelUuid(MeshProtocol.SERVICE_UUID)).build()` to
+`restartScan`, and add degree-gated `setReportDelay` above the floor only (reuse
+`broadcastTierReportDelayMs`'s shape and the same floor of 5, so 3-phone discovery stays immediate —
+§5.4's identity-function rule). Keep the decision-3 comment but correct it to say which filter type
+it applies to, so this doesn't get re-reverted by the next person reading it.
+
+**Verify.** This is the item the round most needs to answer: with the filter on, 3-phone discovery
+must be exactly as fast as before (that's the regression risk decision 3 is really about). If
+discovery degrades on any test phone, revert the filter on that path and record the chipset.
+
+---
+
+### Gate B — small, low-risk, fix in the same pass
+
+#### CR-14 — `handleCatalogFilter` consumes push budget for items it then skips — ✅ FIXED 2026-08-09
+
+`RelayResponder.kt:1212-1221` draws `allowedToPush = consumeCatalogItemBudget(peerAddress, wantToPush)`
+**before** pushing, but `pushCouriersWithHandover` (`:1281-1301`) skips items for two independent
+reasons that don't consume from `pushed`: `CourierHandover.split` returning null (too few copies) and
+`courierHandoverTracker.canAttempt` rate-limiting. Those skips still spent budget. Since a peer can
+send multiple `CatalogFilter` frames per connection, the 200-item session budget can be drained
+without delivering anything. Also `budgetSkipped = wantToPush - pushed` conflates handover-skips with
+budget-skips in the `sync` diagnostics line, which will make this hard to spot in a log pull during
+the round. **Fix:** draw budget per item as it is actually pushed, or return the unused amount; and
+report handover-skips as their own counter.
+
+#### CR-15 — `RadarCanvas` writes Compose state on every animation frame — ⚠️ CORRECTED, PARTIALLY FIXED 2026-08-09
+
+**Correction (2026-08-09, found during the fix pass):** the claim below that this "forces a
+recomposition... at display refresh rate" is wrong. `elapsedMs` is read only inside `Canvas{}`'s own
+draw lambda (`Canvas` = `Spacer(Modifier.drawBehind(...))`), and a State read inside `drawBehind`'s
+lambda is attributed to the DRAW phase's own snapshot-observation scope, not the composition scope
+that created the call — mutating it invalidates redraw only, the same mechanism the sweep
+animation's own `animateFloat` already relies on a few lines below. The sweep already redraws the
+canvas continuously regardless of dot-blink state, so this read added no incremental per-frame cost
+either. **What was actually fixed:** `mutableStateOf(0L)` → `mutableLongStateOf(0L)` — a genuine,
+small, real fix (avoids boxing a `Long` on every animation frame) on its own merits, independent of
+the overstated recomposition claim. The more invasive rewrite this entry originally proposed (drive
+blink phase from `rememberInfiniteTransition` instead) was NOT done — it would solve a problem that
+doesn't exist, with real regression risk to a working animation for zero benefit. See the RESUME
+HERE block's own entry for this pass.
+
+`RadarView.kt:210-216` — `var elapsedMs by remember { mutableStateOf(0L) }` updated inside
+`withInfiniteAnimationFrameMillis` in an unconditional `while (true)`. This forces a recomposition
+plus a full canvas redraw at display refresh rate for as long as any radar is visible, and the radar
+is on Home, Group chat **and** Navigate. It also boxes a `Long` per frame (`mutableStateOf`, not
+`mutableLongStateOf`). Given "eats less energy" is a stated product pillar and the round will be
+measuring battery, this is worth removing first so it doesn't confound the numbers. **Fix:** drive
+the dot blink phase from the `rememberInfiniteTransition` already running for the sweep, so there is
+no second per-frame state write; or at minimum switch to `mutableLongStateOf`.
+
+#### CR-16 — `RelayEngine.symbolsToSend` rebuilds the whole encoder on every request — ✅ FIXED 2026-08-09
+
+`RelayEngine.kt:512-525` — for a complete item, every `SymbolRequest` re-reads all persisted symbol
+rows from Room, allocates `ByteArray(k * CHUNK_SIZE)`, rebuilds a `FountainEncoder`, then generates
+up to `maxSymbolsPerSession` (150) dense repair symbols, each XOR-ing ~k/2 × 400 bytes. `liveDecoders`
+and `symbolCursors` are both cached with a defined lifecycle; the encoder is not, despite having the
+same one. **Fix:** cache the encoder in a `ConcurrentHashMap` alongside `symbolCursors`, evicted in
+the same places (`maybeCompleteFromSymbol`, `pruneExpired`).
+
+#### CR-17 — `MeshService`'s "Offline" state does not survive a service restart — ✅ FIXED 2026-08-09
+
+`setMeshActive(false)` (`MeshService.kt:121-136`) calls `stopForeground(STOP_FOREGROUND_REMOVE)`
+while `onStartCommand` returns `START_STICKY` (`:298`). Backgrounded with no foreground notification,
+the service is an ordinary killable service; on restart Android re-runs `onCreate`, which
+unconditionally calls `beaconRadio.startAdvertising()` / `startScanning()` (`:263-264`). **The user's
+explicit "stop transmitting" silently turns itself back on.** For this app's threat model that is a
+meaningful failure, not a cosmetic one. **Fix:** persist `_meshActive` to the existing `mesh_device`
+prefs and gate `onCreate`'s radio start on it. Relevant to the round because the round will toggle
+Offline.
+
+#### CR-18 — `sweepOrphanKeys` leaves orphaned signing keypairs behind — ✅ FIXED 2026-08-09
+
+`GroupRepository.sweepOrphanKeys` (`:250-255`) removes group keys with no matching Room row but never
+calls `keyStore.removeSigningKeyPair`, even though `dismantleGroup` removes both. After a destructive
+schema migration the Ed25519 keypairs persist indefinitely. **Fix:** one extra call in the loop.
+
+#### CR-19 — `presencePassesSenderIdentityChecks` logs the same rejection twice — ✅ FIXED 2026-08-09
+
+`RelayResponder.kt:1096-1103` fires two different `DiagnosticsLog.event("reject", …)` lines for a
+single signature failure. Double-counts in any log analysis, and the round's whole purpose is log
+analysis. **Fix:** delete one.
+
+#### CR-20 — dead imports left by the Wi-Fi Direct removal — ✅ FIXED 2026-08-09
+
+`HomeScreen.kt` retains eight imports with no remaining usage after decision 49 deleted
+`WifiDirectRow`/`handleWifiDirectToggle`: `Manifest`, `Uri`, `PackageManager`, `Build`,
+`rememberLauncherForActivityResult`, `ActivityResultContracts`, `ContextCompat`, and
+`Icons.Filled.Speed`. **Fix:** delete. Consider enabling detekt's `UnusedImports` so this class of
+leftover is caught at the gate rather than by inspection.
+
+---
+
+### Tracked — after the round
+
+#### CR-21 — `DedupCache` has zero production call sites
+
+`DedupCache.kt` (50 LOC) plus `DedupCacheTest` are referenced only by the simulator
+(`sim/ForwardingPlaneEngine`, `sim/PersistentForwardingEngine`). `RelayResponder.kt:649` documents it
+as deliberately unwired (decision 18), so the hot flood-dedup path goes to Room's `seenDao` on every
+relayed SOS — the opposite of §9.2 item 6's intent ("the fast, size-bounded, in-memory layer
+flood-forwarding needs on the hot receive path"). This is a real open design item, not just dead
+code: either wire it and derive the LRU size per §9.2 item 6, or record that the Room path is
+sufficient at this scale and delete the class. The round's own SOS timing data is the right input to
+that decision, which is why it's tracked rather than Gate A.
+
+#### CR-22 — `FountainDecoder`'s cost is not consistent with `MAX_EVIDENCE_CHUNKS = 4096`
+
+`FountainCode.kt` uses a dense construction (~k/2 source symbols per repair symbol) with Gaussian
+elimination: `clearPivotFromOtherRows` is O(k) per insert, each step XOR-ing `symbolSize` bytes, so a
+full decode is O(k² · symbolSize). At the realistic k≈200 that's ~16 MB of XOR — fine, and matches
+the class doc's own measured justification for dense-over-sparse. At the *permitted* ceiling of
+`MAX_EVIDENCE_CHUNKS = 4096` it is ~6.7 GB of byte operations, all under the single instance-wide
+`decoderMutex` (`RelayEngine.kt:125`), on the GATT receive path. That ceiling was sized as a **memory**
+guard (its doc reasons in bytes: "4096 chunks × 400 bytes = 1.6MB"); it was never checked against the
+decoder's **time** cost. A hostile or buggy header claiming `totalChunks = 4096` is a cheap way to
+stall all evidence decode on every device that relays it. **Fix candidates:** lower
+`MAX_EVIDENCE_CHUNKS` to something the decoder can actually handle (k≈1024 → ~400 KB items, still
+comfortably above `EvidenceCapture`'s 640px JPEGs), or make `decoderMutex` per-evidence-id, or both.
+
+#### CR-23 — `relayableSos`/`relayableEvidenceMeta` filter in Kotlin, not SQL
+
+`RelayEngine.kt:529-531` — `dao.getRelayable().filter { it.ttl > 0 }`. Belongs in the `@Query`.
+Trivial, but it runs per catalog-filter exchange per connection.
+
+#### CR-24 — `ForwardingPolicy`'s degree thresholds may never be reached
+
+`JITTER_WIDE_FLOOR = 5` and `HIGH_DEGREE_TTL_CLAMP_FLOOR = 6` (`ForwardingPolicy.kt:38-39`), against
+`maxConcurrentClientConnections = 3` (`MeshGattClient.kt:61`) and a **soft, unenforced**
+`maxConcurrentServerConnections = 4` (`MeshGattServer.kt:78`, enforcement disabled by decision 4). TTL
+clamping therefore needs ≥3 simultaneous inbound links on top of a full outbound set. **Action: this
+is a measurement the round should produce, not a fix to guess at now.** Log
+`connectionRegistry.openLinkCount()` periodically to `DiagnosticsLog` during the round. If it sits at
+3-4 in a real crowd, the entire §5.4 adaptation layer is the identity function at all densities —
+a plausible-looking silent non-implementation — and the thresholds need re-deriving from measured
+degree rather than from §5.3's stated bullets. Note CR-4 corrupts this signal upward, so it must be
+fixed first for the measurement to mean anything.
+
+#### CR-25 — `JoinCode` expiry is a 4-byte int (Y2038)
+
+`JoinCode.encode` writes `buf.putInt(expiresAtEpochSec.toInt())` and `decode` reads
+`buf.int.toLong()`. After 2038-01-19 the value goes negative and every code fails the
+`expiresAtEpochSec <= nowSec` check — all group creation and joining stops working. `VERSION` is
+already a wire field, so a v3 with a wider expiry is cheap now and expensive later.
+
+#### CR-26 — Stale docs that contradict the code next to them
+
+These are worse than tombstones, because each states a property the code does not have:
+- `RelayResponder.checkSenderKeyPin`'s KDoc (`:1472-1487`) still describes
+  `SenderKeyPinResult.OK` / `MISMATCH` — neither exists — and asserts the app does not "silently
+  trust the new key". The enum is `FIRST_SIGHT/UNCHANGED/CHANGED` and the behaviour has been
+  *re-pin and continue* since the live-testing fix documented 20 lines above it. The doc and the
+  function directly contradict each other.
+- `BulkChannel.kt:26` has a dangling KDoc link `[WifiDirectAccelerator.handshakeToken]` to a class
+  deleted by decision 49.
+- `RelayResponder.kt:395` describes a live code path as pushing "the WFD cap" — it pushes the L2CAP
+  cap.
+
+#### CR-27 — Tombstone-comment volume
+
+~40 grep hits across `app/src` reference removed subsystems (`WifiDirect*`, `PeerDeliveryTracker`,
+`Manifest.totalChunks`, `EvidChunk`, `encodeBitset`, `chunksByIndexes`). The convention earns its
+keep for **wire-byte retirements** — "never reuse `0x19`/`0x1A`/`0x1B`" in `MeshFrameCodec` is
+load-bearing and must stay. For deleted Kotlin classes it does not: git already has that history, and
+the KDoc links now dangle (CR-26). Proposal: keep the `MeshFrameCodec` frame-byte tombstones and the
+`VERSION` changelog, delete the rest.
+
+#### CR-28 — Shake-to-hide / panic-delete is not implemented
+
+`20072026.md`, the original brief, lists *"tool is hidden or can be deleted when phone shakes"* as a
+headline requirement. A grep for shake/panic/wipe/duress across `app/src/main` returns nothing but
+incidental prose. What exists is `AppIdentity`'s decoy launcher-alias switching (good) and
+`FLAG_SECURE` on the Activity (good, and correctly reasoned in `MainActivity.kt:160-169`). The panic
+gesture itself is absent from both the code and Part 7's roadmap — it was never scoped, not
+deliberately dropped. **This is a product decision to make explicitly:** build it as its own phase,
+or record in §9.1 that it's cut and why. Leaving it silently missing is the only bad option.
+
+#### CR-29 — Reassembled evidence is stored as plaintext at rest
+
+`RelayEngine.createEvidence` (`:219-221`) and `maybeCompleteFromSymbol` (`:461-463`) both write raw
+plaintext to `filesDir/evidence/`. `decryptedThumbnail`'s own doc (`:566-573`) reasons explicitly
+about not adding *"a second at-rest-plaintext surface"* — acknowledging the first one exists.
+`PositionTracker`'s class doc advertises "nothing to wipe if seized, because there's nothing durable
+to find"; that property does not extend here, and the full-resolution photos are the most
+incriminating artifact the app can hold. **Product decision:** either encrypt at rest and decrypt on
+view (costs a re-decrypt per view and complicates the `FileProvider` hand-off to an external viewer),
+or document the exposure honestly in the README's security model alongside the decoy/FLAG_SECURE
+claims. Related to CR-28 — a panic-delete is much less useful if the evidence directory is readable
+without it.
+
+#### CR-30 — On doc-versus-code drift generally
+
+CR-1, CR-2, CR-8 and CR-11 share a shape: **prose next to the code asserts a property the code does
+not have, and the prose is why nobody looked.** In three of those four the drift was introduced by the
+very decision the comment cites. This codebase's comment density is deliberate and it genuinely
+speeds up review — but comments asserting *invariants* ("dismantle deletes everything for this
+group"; "the watchdog cleans up everything"; "every per-peer structure is keyed by address") have
+become a second artifact that can drift silently. Proposal, not urgent: for each such claim, prefer a
+test that fails when it stops being true over a paragraph that says it is. `§6.2`'s invariants-as-
+assertions framing already argues exactly this for the simulator; the same argument applies to the
+production code's own stated invariants.
+
+---
+
+### Resume checklist
+
+Tick these in order; each is independently committable.
+
+- [x] **CR-1** `MAC_LEN` → `CryptoUtils.MAC_TAG_LEN` (single source of truth), tests that asserted the
+      bug corrected — 2026-08-09, compile-verified 2026-08-09. No `VERSION` bump: Tier B's beacon has no
+      version byte at all (checked before assuming decision 47/48's precedent applied here).
+- [x] **CR-2** `dismantleGroup` deletes courier envelopes — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-3** MTU-aware padding + padded-size budget check — 2026-08-09, compile-verified 2026-08-09.
+      *Low-MTU test setup still not run on real hardware* — unit tests cover the arithmetic, not a
+      real constrained radio.
+- [x] **CR-4** `MeshGattServer.stop()` symmetric teardown — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-5** `handledGatts.remove(gatt)` on both cleanup paths — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-6** `HopTracker` pruning + `clearForGroup`/`pruneOrphaned` — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-7** `TrickleTimer` synchronisation — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-8** seed `heldRssi` at `attemptStarted` (plus a follow-up leak in the connect-timeout
+      watchdog, found while fixing this one) — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-9** `CoroutineExceptionHandler` on `serviceScope` — 2026-08-09, compile-verified 2026-08-09.
+      Chose option (b) from the original entry (general hardening) over (a) (nullable `senderIdFor`),
+      since (a) would have rippled through 13 call sites for a narrower fix.
+- [x] **CR-10** bound `sizeBits` in `decode` — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-11** key `subscribedDevices` by address — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-12** clamp hop-derived staleness/skew slack — 2026-08-09, compile-verified 2026-08-09. Applied to
+      all THREE shape-alike functions (added `HopTracker.effectiveStaleMs`, missed in the original
+      finding), not just the two named originally.
+- [x] **CR-13** legacy-scan `ScanFilter` + degree-gated report delay — 2026-08-09, not compile-
+      verified. **Decision: landed it** (not scoped around) — still explicitly flagged in its own
+      Part 10 entry as the one item needing a dedicated live round before being trusted, same as this
+      whole pass needing `./gradlew test detekt` before the device-test round can start at all.
+- [x] Gate B: **CR-14** … **CR-20** — all 7 applied 2026-08-09, compile-verified 2026-08-09. CR-15 was
+      corrected (overstated finding, only the trivial half was real) before being applied — see its
+      own Part 10 entry.
+- [x] `./gradlew testDebugUnitTest detekt assembleDebug assembleRelease lintVitalRelease` — all
+      green 2026-08-09 (525 tests, 0 failures, detekt clean after one real `TooManyFunctions` fix, no
+      `missing_rules.txt`).
+- [x] Version bump (v0.7.21-dev, versionCode 32) + fresh debug APK `aapt`-confirmed + committed
+      (decision 56, `docs/DECISIONS.md`) — 2026-08-09
+- [ ] Add `openLinkCount` periodic logging for **CR-24**'s measurement before the round starts
+- [ ] Run the device-test round
+- [ ] Post-round: **CR-21** … **CR-30**, then P7

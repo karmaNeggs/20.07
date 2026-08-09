@@ -240,7 +240,15 @@ object CryptoUtils {
 
     fun sha256Hex(bytes: ByteArray): String = sha256(bytes).joinToString("") { "%02x".format(it) }
 
-    private const val MAC_TAG_LEN = 16
+    /** Truncated HMAC-SHA256 authentication tag length, in bytes — not private: this is the single
+     *  source of truth for anything that needs to validate a tag's length before/without calling
+     *  [authTag] itself (e.g. [org.offlinemesh.app.ble.MeshProtocol]'s Tier B `SosAlert.Content.mac`
+     *  size check). Found live (2026-08-09 review pass) that `MeshProtocol.MAC_LEN` had silently
+     *  drifted to 32 while this stayed 16 — every `content.mac.size == MAC_LEN` check in that file
+     *  was therefore always false against a real [authTag] output, which meant the Tier B SOS
+     *  content preview (decisions 29/30/31) had never actually been transmitted. Referencing this
+     *  constant directly is what makes that drift impossible to reintroduce. */
+    const val MAC_TAG_LEN = 16
 
     /** Truncated HMAC-SHA256 authentication tag. 16 bytes is ample against forgery here and keeps
      *  the tag off the wire budget — it exists so a phone without the group key cannot fabricate a

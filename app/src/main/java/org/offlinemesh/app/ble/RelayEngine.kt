@@ -116,6 +116,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     // asking, so there's nothing to evict and nothing that goes stale as peers come and go.
     private val symbolCursors = ConcurrentHashMap<String, AtomicInteger>()
 
+    // CR-16 (PLAN-v2.md Part 10, 2026-08-09 review pass) — was rebuilt on EVERY symbolsToSend call
+    // for a complete item: re-read all persisted symbol rows from Room, re-allocate the padded
+    // buffer, re-run FountainCode.encoder. liveDecoders/symbolCursors above are both cached with a
+    // defined lifecycle for the identical reason; this one wasn't. Same "keyed on content, not on
+    // who's asking" shape as symbolCursors — an item's canonical symbol set never changes once
+    // `complete = true` (content is immutable once created, this codebase's own established
+    // principle for SosEntity/EvidenceEntity alike), so caching the built encoder forever (until
+    // cleared alongside symbolCursors below) is safe, not just an optimization with an expiry story.
+    private val symbolEncoders = ConcurrentHashMap<String, FountainEncoder>()
+
     // Guards the rehydrate-or-fetch + addSymbol + persist sequence in ingestSymbol against two GATT
     // connections concurrently feeding symbols for the SAME evidenceId — FountainDecoder itself has
     // no internal synchronization. A single instance-wide mutex, not per-evidenceId, is sufficient
@@ -473,6 +483,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         evidenceDao.update(meta.copy(complete = true))
         liveDecoders.remove(evidenceId)
         symbolCursors.remove(evidenceId)
+        symbolEncoders.remove(evidenceId) // CR-16 (PLAN-v2.md Part 10) — defensive, same as symbolCursors above
     }
 
     /** How many more distinct symbols THIS device still needs for [evidenceId] before it can
@@ -515,11 +526,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         if (!meta.complete) {
             return symbolDao.allSymbols(evidenceId).take(wantCount).map { Symbol(it.esi, it.data) }
         }
-        val canonical = symbolDao.allSymbols(evidenceId).sortedBy { it.esi }
-        if (canonical.size < meta.totalChunks) return emptyList() // defensive; shouldn't happen once complete
-        val padded = ByteArray(canonical.size * CHUNK_SIZE)
-        for ((i, row) in canonical.withIndex()) System.arraycopy(row.data, 0, padded, i * CHUNK_SIZE, CHUNK_SIZE)
-        val encoder = FountainCode.encoder(padded, CHUNK_SIZE)
+        // CR-16 (PLAN-v2.md Part 10) — cache hit skips the Room re-read, the padded-buffer
+        // re-allocation, and the FountainEncoder rebuild entirely; only a cache miss (first request
+        // for this item since it completed, or since process start) pays that cost.
+        val encoder = symbolEncoders[evidenceId] ?: run {
+            val canonical = symbolDao.allSymbols(evidenceId).sortedBy { it.esi }
+            if (canonical.size < meta.totalChunks) return emptyList() // defensive; shouldn't happen once complete
+            val padded = ByteArray(canonical.size * CHUNK_SIZE)
+            for ((i, row) in canonical.withIndex()) System.arraycopy(row.data, 0, padded, i * CHUNK_SIZE, CHUNK_SIZE)
+            FountainCode.encoder(padded, CHUNK_SIZE).also { symbolEncoders[evidenceId] = it }
+        }
         val cursor = symbolCursors.getOrPut(evidenceId) { AtomicInteger(0) }
         return List(wantCount) { encoder.symbol(cursor.getAndIncrement()) }
     }
@@ -631,11 +647,13 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val expiredIds = evidenceDao.idsOlderThan(cutoff)
         for (id in expiredIds) {
             symbolDao.deleteForEvidence(id)
-            // Bounds liveDecoders/symbolCursors growth to active items — without this they'd only
-            // ever shrink on completion (maybeCompleteFromSymbol), never on an item that expires
-            // still incomplete.
+            // Bounds liveDecoders/symbolCursors/symbolEncoders growth to active items — without
+            // this they'd only ever shrink on completion (maybeCompleteFromSymbol), never on an
+            // item that expires still incomplete (or, for symbolEncoders, a complete item whose
+            // 48h retention window has simply passed — CR-16, PLAN-v2.md Part 10).
             liveDecoders.remove(id)
             symbolCursors.remove(id)
+            symbolEncoders.remove(id)
         }
         evidenceDao.pruneOlderThan(cutoff)
         sosDao.pruneOlderThan(cutoff)

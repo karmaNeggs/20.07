@@ -155,6 +155,14 @@ class MeshGattClient(
         }
         attemptTracker.attemptStarted(trackerKey)
         activeTrackerKey[addr] = trackerKey
+        // CR-8 (PLAN-v2.md Part 10, 2026-08-09 review pass) — was only ever written in the
+        // already-held branch above, so considerEvicting's `heldRssi[it] ?: return` aborted with
+        // no eviction candidate for ANY held peer not yet re-heard beaconing since it connected,
+        // which in practice meant diversity eviction (P3/§9.2 item 2 — the whole point of moving
+        // off first-heard link selection) was switched off until every held slot happened to be
+        // freshly re-heard. Seeding it here, from the RSSI this very call already has, means a link
+        // has a diversity value from the moment it's attempted, not only after it's first re-heard.
+        heldRssi[trackerKey] = rssi
         val generation = attemptCounter.incrementAndGet()
         attemptGeneration[addr] = generation
         val gatt = device.connectGatt(context, false, callback)
@@ -172,6 +180,12 @@ class MeshGattClient(
                 DiagnosticsLog.event("conn", "timeout, no callback: ${addr.take(PEER_ID_LOG_CHARS)}")
                 attemptTracker.connectionEnded(trackerKey)
                 activeTrackerKey.remove(addr)
+                // CR-8 (PLAN-v2.md Part 10) follow-up: heldRssi is now seeded at attemptStarted
+                // above (the fix that stops considerEvicting from aborting for lack of a value) —
+                // a failed attempt that never reaches onConnectionStateChange at all (this branch's
+                // whole reason to exist) must still clear that seed, or it leaks one entry per
+                // distinct trackerKey that ever hits this undocumented failure mode.
+                heldRssi.remove(trackerKey)
                 return@launch
             }
             // Second watchdog, for the failure the first one structurally cannot see. Once
@@ -191,6 +205,12 @@ class MeshGattClient(
                 DiagnosticsLog.event("conn", "hung past deadline: ${addr.take(PEER_ID_LOG_CHARS)}")
                 try { gatt.disconnect() } catch (_: Exception) {}
                 try { gatt.close() } catch (_: Exception) {}
+                // CR-5 (PLAN-v2.md Part 10) — disconnect() immediately followed by close() usually
+                // suppresses the later onConnectionStateChange callback, which is the only other
+                // place this set is cleaned — without this line, a hung connection's gatt object
+                // (and its Context/BluetoothDevice references) was retained for the process's whole
+                // life even though it can never fire onServicesDiscovered again.
+                handledGatts.remove(gatt)
                 writeQueue.clear(addr)
                 negotiatedMtu.remove(addr)
                 attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(addr))
@@ -240,6 +260,11 @@ class MeshGattClient(
         connectionRegistry.unregister(trackerKey)
         try { held.gatt.disconnect() } catch (_: Exception) {}
         try { held.gatt.close() } catch (_: Exception) {}
+        // CR-5 (PLAN-v2.md Part 10) — same reasoning as the hard-deadline watchdog's identical line:
+        // disconnect()+close() usually suppresses onConnectionStateChange, the only other place this
+        // set is cleaned, so a diversity-evicted link's gatt object would otherwise leak for the
+        // process's whole life — fastest exactly during the dense-crowd sessions this exists for.
+        handledGatts.remove(held.gatt)
         writeQueue.clear(held.gatt.device.address)
         negotiatedMtu.remove(held.gatt.device.address)
         activeTrackerKey.remove(held.gatt.device.address)
@@ -262,7 +287,11 @@ class MeshGattClient(
             // Bucket-padded here, not by the caller — every outgoing frame goes through this one
             // function, so this is the choke point where padding applies uniformly to all frame
             // types without each call site having to remember to pad. See padGattFrame's own doc.
-            characteristic.value = MeshFrameCodec.padGattFrame(data)
+            // CR-3 (PLAN-v2.md Part 10): usable payload passed explicitly — an unbounded pad here
+            // could pick a bucket this connection's own negotiated MTU can never actually carry.
+            val mtu = negotiatedMtu[gatt.device.address] ?: MeshProtocol.DEFAULT_ATT_MTU
+            val usable = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
+            characteristic.value = MeshFrameCodec.padGattFrame(data, usable)
             try { gatt.writeCharacteristic(characteristic) } catch (e: Exception) { false }
         }
 

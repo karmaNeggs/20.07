@@ -229,6 +229,16 @@ class HopTrackerTest {
     }
 
     @Test
+    fun `effectiveStaleMs stops adding slack past MAX_SLACK_HOPS`() {
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09) — hop is sourced from the same unauthenticated
+        // cleartext envelope field every relay increments; without this cap a stale or replayed
+        // reading at a large hop could sit displayed as "N hops away" for up to ~90 minutes.
+        val atSixHops = HopTracker.effectiveStaleMs(90_000L, hop = 6)
+        assertEquals(atSixHops, HopTracker.effectiveStaleMs(90_000L, hop = 7))
+        assertEquals(atSixHops, HopTracker.effectiveStaleMs(90_000L, hop = 120))
+    }
+
+    @Test
     fun `a direct (1-hop) presence reading goes stale at exactly the base window`() {
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
@@ -307,5 +317,65 @@ class HopTrackerTest {
         // Same peer, new address, now genuinely further away — must be able to revise upward.
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "newAddr")
         assertEquals(3, t.myHop("group-1", "PRESENCE"))
+    }
+
+    // ---------- CR-6 (PLAN-v2.md Part 10, 2026-08-09): pruning — table/lastUpdated/lastSource/
+    // snapshot used to grow forever (myHop/bestActiveSos only ever FILTERED by staleness, never
+    // removed an entry) ----------
+
+    @Test
+    fun `pruneStale removes an entry past its staleness window from the snapshot`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
+        assertEquals(1, t.snapshot.value.size)
+        clock += 180_001
+        t.pruneStale()
+        assertEquals(0, t.snapshot.value.size)
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `pruneStale leaves a still-fresh entry alone`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
+        t.pruneStale()
+        assertEquals(1, t.snapshot.value.size)
+        assertEquals(1, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `pruneStale respects hop-aware staleness, not a flat window`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 1, sourceId = "peerA") // -> 2
+        clock += 180_001 // would prune a hop-1 reading, must not prune this hop-2 one
+        t.pruneStale()
+        assertEquals(2, t.myHop("group-1", "PRESENCE"))
+    }
+
+    @Test
+    fun `clearForGroup removes every key for that group, including sos entries, and leaves others alone`() {
+        val t = tracker()
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA")
+        t.markSosOrigin("group-1", "sos-1")
+        t.considerNeighborReport("group-2", "PRESENCE", neighborHop = 0, sourceId = "peerB")
+
+        t.clearForGroup("group-1")
+
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "PRESENCE"))
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-1", "sos-1"))
+        assertEquals(1, t.myHop("group-2", "PRESENCE")) // untouched
+        assertEquals(1, t.snapshot.value.size)
+    }
+
+    @Test
+    fun `pruneOrphaned removes every group not in the active set`() {
+        val t = tracker()
+        t.considerNeighborReport("group-live", "PRESENCE", neighborHop = 0, sourceId = "peerA")
+        t.considerNeighborReport("group-gone", "PRESENCE", neighborHop = 0, sourceId = "peerB")
+
+        t.pruneOrphaned(setOf("group-live"))
+
+        assertEquals(1, t.myHop("group-live", "PRESENCE"))
+        assertEquals(MeshProtocol.UNKNOWN_HOP, t.myHop("group-gone", "PRESENCE"))
     }
 }

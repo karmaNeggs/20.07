@@ -3585,3 +3585,64 @@ above. Both variants green (`assembleDebug`/`assembleRelease`, `lintVitalRelease
 `aapt`-confirmed. **Not hardware-confirmed — genuinely can't be, from here.** Running this against
 a real bitchat install, and separately confirming multi-hop relay via a packet capture, is the
 next, user-owned step before any of the real P7 bridge gets built.
+
+## 56. Full-codebase review pass (30 findings) — all 20 pre-hardware-round fixes shipped
+
+A read-through of all of `app/src/main` (~13.4k LOC) against the codebase itself rather than
+against `PLAN-v2.md`'s own claims — looking for redundant/dead code, regressions, bugs, memory
+leaks, over-engineering, UI/UX gaps, and bad parameters/constraints. Found 30 issues, written up in
+full (evidence, why it matters, fix, verify) in `PLAN-v2.md` Part 10, which is the source of truth
+for this decision's detail; this entry is the summary. Four of the 30 were the most consequential
+because each is a shipped feature or an existing plan claim that turned out not to be true in the
+code: the Tier B SOS content preview (decisions 29/30/31) has never once transmitted (`MAC_LEN`
+silently drifted to 32 against `authTag`'s real 16 bytes, and the unit tests encoded the bug as
+their passing case); `padGattFrame`'s 256-byte minimum bucket broke both directions of GATT
+delivery on any connection below MTU 259 (the three hardware-round phones all granted 517, which is
+why decision 52's round looked clean); `dismantleGroup` never deleted a group's own courier
+envelopes, contradicting §9.3 item 4's "already handled, no gap" conclusion (corrected in place);
+and §9.2 item 1's hardware `ScanFilter` — a stated P1/P2 blocker — was applied to the Tier B scan
+but never to the legacy scan that actually feeds `MeshGattClient.maybeConnect` and therefore all
+GATT connectivity.
+
+Split into three tiers: **Gate A** (13 items) — anything that would corrupt the round's own
+measurements, crash or silently degrade mid-session, or send a future debugging session chasing a
+phantom; **Gate B** (7 items) — small, low-risk, same pass; **Tracked** (10 items) — after the
+round, including two product decisions that are the user's call (a panic-delete gesture from the
+original brief was never scoped, only silently absent; reassembled evidence photos are stored
+plaintext at rest).
+
+**All 20 Gate A + Gate B items shipped this decision.** Two corrections surfaced while fixing them,
+both already folded into Part 10: CR-15's original claim (a `RadarCanvas` state read forces full
+recomposition at display refresh rate) was wrong — Compose attributes a State read inside
+`Canvas`/`drawBehind`'s own lambda to the draw phase, not the composition scope, so only the
+`mutableStateOf` → `mutableLongStateOf` box-avoidance half of that finding was real; CR-12's
+hop-scaled-staleness-window fix applies to `HopTracker.effectiveStaleMs` too, not just the two
+functions the original finding named (identical unauthenticated-`hop` exposure, missed the first
+time). Notable individual fixes: CR-1 makes `MeshProtocol.MAC_LEN` reference
+`CryptoUtils.MAC_TAG_LEN` directly instead of a duplicated literal (no `VERSION` bump — Tier B's
+beacon has no version byte to bump); CR-12 caps hop-derived staleness/replay-skew slack at 6 hops
+everywhere it appears, since `hop` is cleartext-by-design and therefore replay-inflatable, and a
+93-minute-stale position rendered as a walkable radar dot is a real product hazard on top of the
+security one; CR-13 restores the hardware `ScanFilter` to the legacy scan (still flagged in its own
+Part 10 entry as needing a dedicated live round, unlike the rest of this pass, since it changes
+previously-proven-stable scan behavior on the exact path decision 3 was once burned by); CR-14 fixes
+a courier-handover budget-refund gap found while re-deriving the fix (a rate-limited or
+too-few-copies handover skip used to burn its session-budget slot anyway).
+
+525 tests (510 prior + 15 new — `MeshFrameCodecTest`/`HopTrackerTest`/`PositionTrackerTest`/
+`RelayResponderPresenceSkewTest`/`TrickleTimerTest`/`MeshProtocolBroadcastTierTest`). One real
+detekt issue found and fixed along the way: `HopTracker` crossed the `TooManyFunctions` threshold
+once CR-6's four new pruning methods landed, suppressed with the same justifying-comment convention
+this codebase already uses elsewhere. detekt clean, both variants green
+(`assembleDebug`/`assembleRelease`, `lintVitalRelease`), no `missing_rules.txt`. Version bumped to
+v0.7.21-dev (versionCode 32), fresh debug APK built and `aapt`-confirmed.
+
+**Six items (CR-2, CR-4, CR-5, CR-8, CR-9, CR-11, CR-17, CR-18) have no unit-test tier at all**
+under this project's own already-documented constraints (BLE radio classes and Keystore-gated
+`GroupRepository`/`GroupKeyStore` code are both established elsewhere in this file as
+compile-verified-only) — correctness-reviewed by hand, same posture the L2CAP and bitchat-spike
+work already carries. **Still open before the device-test round can start:** CR-13 itself needs
+live confirmation that 3-phone discovery stays exactly as fast as before and that no test chipset
+silently stops delivering results once the filter is added (decision 3's own failure mode — silent,
+not an exception this code could catch and fall back from). The 10 Tracked items (CR-21..CR-30)
+remain deliberately deferred to after the round, per `PLAN-v2.md` Part 10's own sequencing.

@@ -302,11 +302,13 @@ fun GroupChatScreen(
                 TextButton(onClick = {
                     scope.launch {
                         repo.dismantleGroup(groupId)
-                        // PositionTracker/BroadcastSosPreview are in-memory, owned by MeshService, not
-                        // Room - dismantleGroup can't reach them itself (see PositionTracker
-                        // .clearForGroup's own doc, decision 30).
+                        // PositionTracker/BroadcastSosPreview/HopTracker are in-memory, owned by
+                        // MeshService, not Room - dismantleGroup can't reach them itself (see
+                        // PositionTracker.clearForGroup's own doc, decision 30; HopTracker added
+                        // CR-6, PLAN-v2.md Part 10 — it was missed by the original decision-30 pass).
                         meshService?.positionTracker?.clearForGroup(groupId)
                         meshService?.broadcastSosPreview?.clearForGroup(groupId)
+                        meshService?.hopTracker?.clearForGroup(groupId)
                         showDeleteDialog = false
                         onDeleted()
                     }

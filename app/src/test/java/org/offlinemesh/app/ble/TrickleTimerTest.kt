@@ -120,4 +120,29 @@ class TrickleTimerTest {
         clock += 500
         assertTrue(t.shouldTransmit()) // exactly at the 1000ms boundary now
     }
+
+    // CR-7 (PLAN-v2.md Part 10, 2026-08-09): onSighting is called from the BLE scan-callback binder
+    // thread, shouldTransmit/reset from the advertise coroutine — a plain mutableSetOf backing
+    // onSighting was unsynchronized against that. Not a deterministic reproduction (races never are)
+    // but hammering both sides concurrently across many iterations reliably caught the unsynchronized
+    // version's ConcurrentModificationException before the @Synchronized fix; this stays green as a
+    // regression guard against reintroducing the race, using the real wall clock since the fake one
+    // isn't safe to mutate across threads either.
+    @Test
+    fun `onSighting and shouldTransmit under concurrent access do not throw`() {
+        // Thread's default uncaught-exception behavior does NOT propagate to join() — captured
+        // explicitly, or an unsynchronized CME here would print to stderr and pass anyway.
+        val caught = java.util.concurrent.atomic.AtomicReference<Throwable?>(null)
+        val handler = Thread.UncaughtExceptionHandler { _, e -> caught.compareAndSet(null, e) }
+        val t = TrickleTimer(minIntervalMs = 1L, maxIntervalMs = 5L)
+        val sightingThread = Thread { repeat(20_000) { t.onSighting("peer-$it") } }
+        val transmitThread = Thread { repeat(20_000) { t.shouldTransmit() } }
+        sightingThread.uncaughtExceptionHandler = handler
+        transmitThread.uncaughtExceptionHandler = handler
+        sightingThread.start()
+        transmitThread.start()
+        sightingThread.join()
+        transmitThread.join()
+        assertEquals(null, caught.get())
+    }
 }

@@ -213,6 +213,8 @@ class BeaconRadio(
         broadcastTierDisabledForSession = false
         broadcastTierRecentAddresses.clear()
         broadcastTierReportDelayActive = false
+        // CR-13 (PLAN-v2.md Part 10) — same restart-clean reasoning as its Tier B sibling above.
+        legacyRecentAddresses.clear()
         broadcastTierPositionFrame = null
         broadcastTierLastPositionSealedAtMs = 0L
         broadcastTierSosContentCacheId = null
@@ -756,11 +758,11 @@ class BeaconRadio(
         return groups.none { hopTracker.myHop(it.id, "PRESENCE") != MeshProtocol.UNKNOWN_HOP }
     }
 
-    /** Starts (or restarts, if the effective scan mode changed) one continuous scan. Deliberately
-     *  does NOT stop/start on a short timer — see the class doc on [BleTuning] for why that
-     *  produced a real, device-dependent discovery bug. Duty-cycling is left entirely to the OS via
-     *  the scan mode; we just poll every few seconds for whether the mode needs to change, and only
-     *  touch the radio when it actually does.
+    /** Starts (or restarts, if the effective scan mode OR report-delay batching decision changed)
+     *  one continuous scan. Deliberately does NOT stop/start on a short timer — see the class doc
+     *  on [BleTuning] for why that produced a real, device-dependent discovery bug. Duty-cycling is
+     *  left entirely to the OS via the scan mode; we just poll every few seconds for whether
+     *  either needs to change, and only touch the radio when one actually does.
      *
      *  The effective mode is the tier's mode, escalated to `LOW_LATENCY` whenever we're "blind" —
      *  present in a group but currently hearing no one in it — regardless of tier. This is the
@@ -771,18 +773,50 @@ class BeaconRadio(
      *  BALANCED scanning, escalating to aggressive LOW_LATENCY only for however long it actually
      *  takes to reacquire your group, then dropping straight back down once it does. The ACTIVE
      *  (foreground) tier is already LOW_LATENCY at all times — you're looking at the radar, finding
-     *  people now matters more than battery in that moment — so blindness changes nothing there. */
+     *  people now matters more than battery in that moment — so blindness changes nothing there.
+     *
+     *  **CR-13 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — §9.2 item 1's own two-part fix,
+     *  applied to THIS scan.** Through this review pass, only [restartBroadcastTierScan] (a
+     *  separate, additive channel) had the hardware [ScanFilter]/degree-gated report delay §9.2
+     *  item 1 calls a P1/P2 blocker — this scan, the one that actually feeds [onDeviceSeen] ->
+     *  `MeshGattClient.maybeConnect` and therefore all GATT connectivity, was still unfiltered,
+     *  still citing decision 3. Decision 3 was about **service-DATA** filtering (unreliable across
+     *  chipsets); §9.2 item 1 is explicit that a **service-UUID** filter is a different, reliable
+     *  mechanism, and conflating the two is exactly why this scan ended up with no filtering at
+     *  all — the comment on [restartScan] repeated that same conflation until now.
+     *  [legacyRecentAddresses] measures local app-device density from THIS scan's own (now
+     *  filtered) results — separate
+     *  from [broadcastTierRecentAddresses], which only ever sees Tier-B-capable broadcasters and
+     *  would undercount density on hardware without extended-advertising support. Batching is
+     *  gated on density alone (same [broadcastTierReportDelayMs] floor Tier B already uses),
+     *  independent of [isBlind] — the two levers protect different things (duty cycle vs. callback-
+     *  thread volume) and Tier B's own precedent doesn't couple them either.
+     *
+     *  **NOT hardware-confirmed as of this review pass** — unlike the other fixes in this same
+     *  pass, this one changes what was previously proven-stable, live-tested scan behavior (this
+     *  exact class doc's own "invariant" section), on the specific path decision 3/4's history
+     *  shows this codebase has been burned by before. Needs its own dedicated live round: confirm
+     *  3-phone discovery stays exactly as fast as before (the actual regression risk), and that no
+     *  test chipset silently stops delivering results once the filter is added (the failure mode
+     *  decision 3 describes as *silent*, not an exception this code could catch and fall back
+     *  from). If either regresses on a specific device, the filter should come back off for that
+     *  device class, not be re-reverted for everyone the way decision 3 originally was. */
     @SuppressLint("MissingPermission")
     fun startScanning() {
         scanner = bluetoothManager.adapter?.bluetoothLeScanner
         scanJob = serviceScope.launch {
             var activeScanMode: Int? = null
+            var activeReportDelayMs: Long? = null
             while (isActive) {
+                val nowMs = System.currentTimeMillis()
+                legacyRecentAddresses.entries.removeAll { nowMs - it.value > BROADCAST_TIER_DEGREE_WINDOW_MS }
                 val tierMode = BleTuning.forTier(currentTier()).scanMode
                 val wantMode = if (isBlind()) ScanSettings.SCAN_MODE_LOW_LATENCY else tierMode
-                if (wantMode != activeScanMode) {
-                    restartScan(wantMode)
+                val wantDelay = broadcastTierReportDelayMs(legacyRecentAddresses.size)
+                if (wantMode != activeScanMode || wantDelay != activeReportDelayMs) {
+                    restartScan(wantMode, wantDelay)
                     activeScanMode = wantMode
+                    activeReportDelayMs = wantDelay
                 }
                 delay(3000)
             }
@@ -859,50 +893,79 @@ class BeaconRadio(
     }
 
     @SuppressLint("MissingPermission")
-    private fun restartScan(scanMode: Int) {
+    private fun restartScan(scanMode: Int, reportDelayMs: Long) {
         val s = scanner ?: return
         try { s.stopScan(scanCallback) } catch (_: Exception) {}
-        val settings = ScanSettings.Builder().setScanMode(scanMode).build()
+        val settings = ScanSettings.Builder().setScanMode(scanMode).setReportDelay(reportDelayMs).build()
         try {
-            // No ScanFilter, deliberately — a hardware filter silently fails to fire on some BLE
-            // chipsets (see docs/DECISIONS.md, decision 3); matching in onScanResult below instead
-            // is slower to wake the CPU on unrelated nearby Bluetooth traffic, but works the same
-            // on every chipset.
-            s.startScan(emptyList(), settings, scanCallback)
+            // CR-13 (PLAN-v2.md Part 10, 2026-08-09) — hardware ScanFilter restored, see
+            // startScanning's own class doc for the full reasoning: this is a service-UUID filter
+            // (reliable, evaluated in controller firmware before the data payload is even parsed),
+            // NOT the service-DATA-with-mask filter decision 3 found unreliable across chipsets —
+            // conflating the two is what left this scan with no filtering at all until now.
+            val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(MeshProtocol.SERVICE_UUID)).build()
+            s.startScan(listOf(filter), settings, scanCallback)
         } catch (e: Exception) {
             Log.w(TAG, "scan start failed: ${e.message}")
         }
     }
 
+    /** Degree signal for CR-13's report-delay batching (`PLAN-v2.md` Part 10) — distinct addresses
+     *  heard on THIS (now hardware-filtered, see [restartScan]) scan within
+     *  [BROADCAST_TIER_DEGREE_WINDOW_MS], reusing that same window constant rather than a
+     *  duplicate — deliberately separate from [broadcastTierRecentAddresses], which only ever sees
+     *  Tier-B-capable broadcasters and would undercount local app-device density on hardware
+     *  without extended-advertising support. ConcurrentHashMap: written from the scan-callback
+     *  binder thread, pruned/read from the [startScanning] coroutine — same pattern
+     *  [broadcastTierRecentAddresses] already establishes. */
+    private val legacyRecentAddresses = ConcurrentHashMap<String, Long>()
+
     @SuppressLint("MissingPermission")
     private val scanCallback = object : ScanCallback() {
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
-            val beacon = MeshProtocol.decodeBeacon(serviceData) ?: return
-            if (beacon.type == MeshProtocol.ADV_TYPE_GROUP) {
-                // O(1) lookup against the per-slot cache — no HMAC, no DB, on the hot path.
-                val groupId = matchTable[beacon.rotatingGroupId.toHex()]
-                if (groupId != null) {
-                    // Hearing the beacon at all means a real member is 1 hop away; considerNeighborReport
-                    // adds its own +1, so we feed it 0. The scanned device's address is this
-                    // report's source — see HopTracker.updateHop's doc for what that's used for
-                    // (a worse reading from a genuinely different peer can't downgrade a better
-                    // one already established by someone else).
-                    hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
-                    // Deliberately NOT feeding beacon.sosHop into hop tracking (an earlier version did,
-                    // via a "SOS_PENDING" key) — that was a second, rough, sosId-agnostic hop estimate
-                    // sitting alongside the exact, TTL-derived per-SOS tracking, and the display took
-                    // the minimum of both. With only 2 test phones the exact channel can only ever be 0
-                    // or 1; a reported "2" traced back to this rough channel's stale reading leaking
-                    // through (HopTracker.bestActiveSosHop is now the only thing the UI reads, and it's
-                    // staleness-checked). The beacon still carries sosHop — it's just not fed into hop
-                    // tracking anymore, only used to decide what this device itself advertises.
-                }
-            }
-            // Blind-carrier policy: connect to every mesh phone heard, member or not — see
-            // MeshGattClient/RelayResponder (relaying opaque bytes for groups we can't decrypt).
-            onDeviceSeen(result.device, result.rssi)
+        override fun onScanResult(callbackType: Int, result: ScanResult) = handleLegacyResult(result)
+        // CR-13 (PLAN-v2.md Part 10) — once restartScan's own setReportDelay engages (this device
+        // measured itself dense enough), Android delivers exclusively through this override, not
+        // onScanResult; without it, batching wouldn't just be slower, it would deliver nothing at
+        // all — same functional requirement broadcastTierScanCallback's identical dual-override
+        // shape already documents for the sibling channel.
+        override fun onBatchScanResults(results: MutableList<ScanResult>) { results.forEach(::handleLegacyResult) }
+        override fun onScanFailed(errorCode: Int) {
+            Log.w(TAG, "legacy scan failed: errorCode=$errorCode")
+            DiagnosticsLog.event("beacon", "legacy scan failed: errorCode=$errorCode")
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun handleLegacyResult(result: ScanResult) {
+        // CR-13 (PLAN-v2.md Part 10) — any result reaching here already passed restartScan's own
+        // hardware ScanFilter, so counting its address is exactly the "local app-device density"
+        // signal legacyRecentAddresses exists for.
+        legacyRecentAddresses[result.device.address] = System.currentTimeMillis()
+        val serviceData = result.scanRecord?.getServiceData(ParcelUuid(MeshProtocol.SERVICE_UUID)) ?: return
+        val beacon = MeshProtocol.decodeBeacon(serviceData) ?: return
+        if (beacon.type == MeshProtocol.ADV_TYPE_GROUP) {
+            // O(1) lookup against the per-slot cache — no HMAC, no DB, on the hot path.
+            val groupId = matchTable[beacon.rotatingGroupId.toHex()]
+            if (groupId != null) {
+                // Hearing the beacon at all means a real member is 1 hop away; considerNeighborReport
+                // adds its own +1, so we feed it 0. The scanned device's address is this
+                // report's source — see HopTracker.updateHop's doc for what that's used for
+                // (a worse reading from a genuinely different peer can't downgrade a better
+                // one already established by someone else).
+                hopTracker.considerNeighborReport(groupId, "PRESENCE", 0, result.device.address)
+                // Deliberately NOT feeding beacon.sosHop into hop tracking (an earlier version did,
+                // via a "SOS_PENDING" key) — that was a second, rough, sosId-agnostic hop estimate
+                // sitting alongside the exact, TTL-derived per-SOS tracking, and the display took
+                // the minimum of both. With only 2 test phones the exact channel can only ever be 0
+                // or 1; a reported "2" traced back to this rough channel's stale reading leaking
+                // through (HopTracker.bestActiveSosHop is now the only thing the UI reads, and it's
+                // staleness-checked). The beacon still carries sosHop — it's just not fed into hop
+                // tracking anymore, only used to decide what this device itself advertises.
+            }
+        }
+        // Blind-carrier policy: connect to every mesh phone heard, member or not — see
+        // MeshGattClient/RelayResponder (relaying opaque bytes for groups we can't decrypt).
+        onDeviceSeen(result.device, result.rssi)
     }
 
     /** Presence-only counterpart to [scanCallback] for the broadcast tier — deliberately does NOT

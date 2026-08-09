@@ -71,4 +71,24 @@ class RelayResponderPresenceSkewTest {
         val ancient = now - 400_000L
         assertFalse(RelayResponder.presenceWithinSkew(ancient, now, hop = 3))
     }
+
+    @Test
+    fun `slack stops growing past MAX_SLACK_HOPS, so a hop rewritten upward cannot widen the window further`() {
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09) — hop lives in the cleartext envelope by design (a
+        // blind relay must be able to increment it with no group key), so it carries no MAC. Before
+        // this cap, capturing one valid presence frame and replaying it with hop rewritten toward
+        // maxPositionRelayHops-1 (119) widened the acceptance window from ~2 minutes toward ~90 —
+        // substantially defeating the very replay protection this function exists to provide. The
+        // window at hop 6 and at hop 119 must now be identical.
+        val now = 1_700_000_000_000L
+        val atSixHopSlack = now - (120_000L + 6 * 45_000L) // base skew (120s) + 6 hops' worth of slack (45s each)
+        assertFalse(
+            "just past the hop-6 window must still be rejected regardless of a further-inflated hop",
+            RelayResponder.presenceWithinSkew(atSixHopSlack - 1_000L, now, hop = 119)
+        )
+        assertTrue(
+            "exactly at the hop-6 window must be accepted the same whether hop claims 6 or 119",
+            RelayResponder.presenceWithinSkew(atSixHopSlack, now, hop = 119)
+        )
+    }
 }

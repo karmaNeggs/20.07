@@ -261,6 +261,20 @@ class RelayResponder(
         return take
     }
 
+    /** Inverse of [consumeCatalogItemBudget] — CR-14 (`PLAN-v2.md` Part 10, 2026-08-09). A slot
+     *  reserved by [consumeCatalogItemBudget] but never actually spent (see
+     *  [pushCouriersWithHandover]'s own doc for the concrete gap this closes) must be given back,
+     *  or a peer sending several `CatalogFilter` frames on one connection could exhaust the session
+     *  budget without a matching number of items ever having been pushed. `coerceAtLeast(0)` — a
+     *  no-op if [resetSessionBudget] already cleared this address's entry mid-flight (e.g. a
+     *  concurrent disconnect/reconnect), same defensive floor [consumeSymbolBudget] already uses. */
+    @Synchronized
+    private fun refundCatalogItemBudget(address: String, amount: Int) {
+        if (amount <= 0) return
+        val used = catalogItemBudget.getOrDefault(address, 0)
+        catalogItemBudget[address] = (used - amount).coerceAtLeast(0)
+    }
+
     /** All of our currently-HELD SOS/evidence-header/nickname item keys, across every active group
      *  — the exact set [CatalogFilter] gets built over, and the exact key format
      *  [handleIncoming]'s `Frame.CatalogFilter` case tests a peer's incoming filter against. Kept
@@ -327,7 +341,16 @@ class RelayResponder(
         val keys = currentCatalogKeys()
         val filter = CatalogFilter.build(keys)
         val filterFrame = MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.sizeBits, filter.toBits())
-        if (filterFrame.size <= maxFrameBytes) {
+        // CR-3 (PLAN-v2.md Part 10, 2026-08-09) — was `filterFrame.size <= maxFrameBytes`, which
+        // compared the UNPADDED frame against the budget while the transport (MeshGattClient.write/
+        // MeshGattServer.notify) pads every outgoing frame afterward via MeshFrameCodec.padGattFrame.
+        // [maxFrameBytes] IS that same padGattFrame's own `maxUsableBytes` budget for this connection
+        // (both are `negotiated MTU - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES`, see this function's own
+        // doc), so this now asks the real question: does what padGattFrame will ACTUALLY produce for
+        // this frame, under this connection's own budget, still fit that budget? A filter within 2
+        // bytes of maxFrameBytes (padGattFrame's own length prefix) used to "fit" here and then not
+        // fit the write it was handed to moments later.
+        if (MeshFrameCodec.padGattFrame(filterFrame, maxFrameBytes).size <= maxFrameBytes) {
             frames += filterFrame
             // Cheap, low-volume (once per connection, not per frame) — lets a live logcat pull
             // during a "message isn't arriving" report confirm whether the item was even in this
@@ -1094,11 +1117,14 @@ class RelayResponder(
             // own signature is checked below against the key we just accepted.
         }
         if (!verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)) {
-            DiagnosticsLog.event("reject", "presence signature failed under the pinned key")
             Log.w(
                 "RelayResponder",
                 "presence signature failed verification under the pinned key — dropping (possible impersonation)"
             )
+            // CR-19 (PLAN-v2.md Part 10, 2026-08-09) — this used to fire twice for one rejection
+            // (once without, once with the sender id), double-counting this event in any log
+            // analysis. Kept the version that includes the truncated sender id — more useful for a
+            // live logcat/DiagnosticsLog pull than the duplicate that lacked it.
             DiagnosticsLog.event("reject", "presence signature failed for ${frame.senderId.take(SENDER_ID_LOG_CHARS)}")
             return false
         }
@@ -1217,8 +1243,21 @@ class RelayResponder(
         var pushed = pushUpTo(sosToPush, allowedToPush, ::reframeStoredSos, respond)
         pushed += pushUpTo(evidToPush, allowedToPush - pushed, MeshFrameCodec::encodeEvidMeta, respond)
         pushed += pushUpTo(nicknamesToPush, allowedToPush - pushed, MeshFrameCodec::encodeNickname, respond)
-        pushed += pushCouriersWithHandover(courierToPush, allowedToPush - pushed, peerAddress, respond)
-        val budgetSkipped = wantToPush - pushed
+        val (courierPushed, handoverSkipped) =
+            pushCouriersWithHandover(courierToPush, allowedToPush - pushed, peerAddress, respond)
+        pushed += courierPushed
+        // CR-14 (PLAN-v2.md Part 10, 2026-08-09 review pass) — consumeCatalogItemBudget above
+        // already reserved wantToPush's full count as "used," including courier items that
+        // pushCouriersWithHandover then skips via its own per-item `continue` (rate-limited by
+        // courierHandoverTracker, or too few copies left to split) rather than actually pushing.
+        // Those reserved-but-unspent slots must be given back, or a peer sending multiple
+        // CatalogFilter frames on one connection (a real, supported case) could exhaust the
+        // 200-item session budget without a corresponding number of items ever having been
+        // delivered. Distinct from the natural "ran out of budget" case (pushCouriersWithHandover's
+        // own `if (pushed >= remainingBudget) break`) — THAT count correctly stays consumed, it
+        // really is deferred to the next reconnect; only handover-specific skips are refunded here.
+        refundCatalogItemBudget(peerAddress, handoverSkipped)
+        val budgetSkipped = wantToPush - pushed - handoverSkipped
 
         // The single most useful line for diagnosing "messaging isn't arriving" from a live
         // logcat pull: confirms the round trip actually ran on this connection and exactly how it
@@ -1228,11 +1267,13 @@ class RelayResponder(
         Log.d(
             "RelayResponder",
             "catalog filter from $peerAddress: pushed $pushed, filter-skipped $filterSkipped" +
-                if (budgetSkipped > 0) ", budget-skipped $budgetSkipped (retries next connection)" else ""
+                (if (budgetSkipped > 0) ", budget-skipped $budgetSkipped (retries next connection)" else "") +
+                (if (handoverSkipped > 0) ", handover-skipped $handoverSkipped (retries next connection)" else "")
         )
         DiagnosticsLog.event(
             "sync",
-            "peer ${peerAddress.take(SENDER_ID_LOG_CHARS)}: pushed=$pushed skipped=$filterSkipped budget=$budgetSkipped"
+            "peer ${peerAddress.take(SENDER_ID_LOG_CHARS)}: pushed=$pushed skipped=$filterSkipped " +
+                "budget=$budgetSkipped handover=$handoverSkipped"
         )
     }
 
@@ -1277,19 +1318,34 @@ class RelayResponder(
      *  a SECOND, independent reason to skip: a rate-limited (envelope, peer) pair is left for a
      *  later reconnect rather than re-split on every connection — see that tracker's own class doc.
      *  `tag`/`sealed` are null only transiently during construction, never for a stored row (see
-     *  [CourierEnvelopeEntity.tag]/`sealed`'s own docs), so `!!` here documents an invariant. */
+     *  [CourierEnvelopeEntity.tag]/`sealed`'s own docs), so `!!` here documents an invariant.
+     *
+     *  **Returns (pushed, handoverSkipped), not a single `Int`** — CR-14 (`PLAN-v2.md` Part 10,
+     *  2026-08-09) split the return value specifically so [handleCatalogFilter] can give back the
+     *  budget slots this function's own per-item `continue`s reserve-but-never-spend (rate-limited
+     *  by [courierHandoverTracker], or too few copies left to split) — distinct from slots the
+     *  `if (pushed >= remainingBudget) break` below genuinely consumes on purpose. */
     private suspend fun pushCouriersWithHandover(
         items: List<CourierEnvelopeEntity>,
         remainingBudget: Int,
         peerAddress: String,
         respond: suspend (ByteArray) -> Unit,
-    ): Int {
+    ): Pair<Int, Int> {
         val peerKey = peerIdentity.resolve(peerAddress)
         var pushed = 0
+        var handoverSkipped = 0
         for (envelope in items) {
             if (pushed >= remainingBudget) break
-            if (!courierHandoverTracker.canAttempt(envelope.id, peerKey)) continue
-            val (keep, give) = CourierHandover.split(envelope.copiesRemaining) ?: continue
+            if (!courierHandoverTracker.canAttempt(envelope.id, peerKey)) {
+                handoverSkipped++
+                continue
+            }
+            val split = CourierHandover.split(envelope.copiesRemaining)
+            if (split == null) {
+                handoverSkipped++
+                continue
+            }
+            val (keep, give) = split
             relay.updateCourierCopiesRemaining(envelope.id, keep)
             courierHandoverTracker.recordAttempt(envelope.id, peerKey)
             respond(
@@ -1297,7 +1353,7 @@ class RelayResponder(
             )
             pushed++
         }
-        return pushed
+        return pushed to handoverSkipped
     }
 
     /** Pushes [items] one at a time via [encode]/[respond] until either [items] is exhausted or
@@ -1456,18 +1512,35 @@ class RelayResponder(
         // unchanged at 120s; a relayed heartbeat gets exactly the budget its path actually costs.
         private const val PRESENCE_PER_HOP_SLACK_MS = 45_000L
 
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — same fix, same reasoning as
+        // PositionTracker.MAX_SLACK_HOPS: [hop] here is the SAME cleartext, unauthenticated
+        // envelope field ([Frame.Presence.hop]) a blind relay increments with no group key. Before
+        // this cap, the very replay protection [presenceWithinSkew]'s own doc describes adding was
+        // substantially defeated by that same field — capture one valid presence frame, replay it
+        // with hop rewritten to maxPositionRelayHops-1 (119), and the skew window widens from the
+        // intended ~2 minutes to ~90 minutes. Kept in sync by doc only with PositionTracker's own
+        // MAX_SLACK_HOPS (identical value, identical reasoning — this file has no dependency on
+        // that one to hang a shared constant off, same precedent PER_HOP_SLACK_MS/PER_HOP_SLACK_MS
+        // already set for the analogous HopTracker/PositionTracker pair).
+        private const val MAX_SLACK_HOPS = 6
+
         /** Pure — no [GroupRepository]/key access, deliberately, so this can be checked (and unit-
          *  tested) before ever touching the group key. See the `Frame.Presence` case above for why
          *  the ordering matters: the MAC already covers [timestamp], so an attacker can't forge a
          *  fresher one, but nothing previously verified the timestamp was recent at all — a replay
          *  of one captured frame verified as authentic forever. `internal` so it's directly
          *  unit-testable without a Robolectric `Context` (this class's other tests need one only
-         *  because [RelayEngine]/[GroupRepository] do; this function needs neither). */
+         *  because [RelayEngine]/[GroupRepository] do; this function needs neither). [hop]'s slack
+         *  contribution is capped at [MAX_SLACK_HOPS] (CR-12, `PLAN-v2.md` Part 10) — see that
+         *  constant's own doc for why the window no longer scales all the way to a real (and
+         *  attacker-influenceable) hop value. */
         internal fun presenceWithinSkew(
             timestamp: Long,
             now: Long = System.currentTimeMillis(),
             hop: Int = 0,
-        ): Boolean = kotlin.math.abs(now - timestamp) <= PRESENCE_MAX_SKEW_MS + hop * PRESENCE_PER_HOP_SLACK_MS
+        ): Boolean =
+            kotlin.math.abs(now - timestamp) <=
+                PRESENCE_MAX_SKEW_MS + hop.coerceIn(0, MAX_SLACK_HOPS) * PRESENCE_PER_HOP_SLACK_MS
 
         /** Pure decision behind [pinOrCheckSenderKey] — given whatever's already pinned
          *  for a (groupId, senderId) and the key this frame just carried, decide OK vs. MISMATCH.

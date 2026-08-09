@@ -222,13 +222,28 @@ object MeshFrameCodec {
      *
      *  A frame already at or above the largest bucket (e.g. a near-[MAX_SOS_MESSAGE_BYTES] SOS) is
      *  sent with the length prefix but no padding — same pre-existing single-write-per-frame/no-MTU-
-     *  fragmentation gap either way, not something padding introduces or fixes. */
-    fun padGattFrame(frame: ByteArray): ByteArray {
+     *  fragmentation gap either way, not something padding introduces or fixes.
+     *
+     *  [maxUsableBytes] (CR-3, `PLAN-v2.md` Part 10, found in the 2026-08-09 review pass) — the
+     *  connection's actual usable ATT payload (`negotiated MTU - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES`),
+     *  defaulting to [Int.MAX_VALUE] for non-ATT callers ([L2capBulkTransport], which rides a raw
+     *  socket with its own flow control, not GATT's per-write size limit). Without this, the
+     *  smallest bucket (256) was picked unconditionally — on any connection whose negotiated MTU is
+     *  below 259 (usable payload below 256; common OEM values include 247 and 185), a
+     *  `notifyCharacteristicChanged` carrying a 256-byte value fails outright (no fragmentation for
+     *  notify), and a `writeCharacteristic` past `mtu-3` is silently promoted by the platform to a
+     *  prepared/long write that `MeshGattServer` never reassembles (no `onExecuteWrite` override
+     *  anywhere in this app) — so on such a link BOTH directions of GATT delivery were broken, not
+     *  just degraded. Now a bucket is only chosen if it ALSO fits [maxUsableBytes]; if none does,
+     *  this falls back to the same unpadded (length-prefix only) shape the oversized-frame case
+     *  above already uses — losing size-obfuscation on a constrained link is an acceptable trade
+     *  against total delivery failure. */
+    fun padGattFrame(frame: ByteArray, maxUsableBytes: Int = Int.MAX_VALUE): ByteArray {
         require(frame.size <= MAX_UNSIGNED_SHORT) {
             "frame too large for a UShort length prefix: ${frame.size}"
         }
         val unpaddedTotal = LENGTH_PREFIX_BYTES + frame.size
-        val bucket = PAD_BUCKETS.firstOrNull { it >= unpaddedTotal } ?: unpaddedTotal
+        val bucket = PAD_BUCKETS.firstOrNull { it >= unpaddedTotal && it <= maxUsableBytes } ?: unpaddedTotal
         val padLen = bucket - unpaddedTotal
         val out = ByteArray(bucket)
         out[0] = (frame.size ushr BITS_PER_BYTE).toByte()
@@ -1104,6 +1119,12 @@ object MeshFrameCodec {
                 FRAME_CATALOG_FILTER -> {
                     val seed = buf.long
                     val sizeBits = buf.short.toInt() and 0xFFFF
+                    // CR-10 (PLAN-v2.md Part 10, 2026-08-09): the one wire field in this whole
+                    // decode() that was unbounded — CatalogFilter.hashIndexes divides by sizeBits
+                    // (Math.floorMod), so 0 threw ArithmeticException; anything above MAX_SIZE_BITS
+                    // is likewise never something a real CatalogFilter.build produces. Same posture
+                    // as totalChunks/thumbnail/contentLength just above: bound at decode time.
+                    if (sizeBits !in 1..CatalogFilter.MAX_SIZE_BITS) return null
                     val bits = buf.readStr16Bytes()
                     Frame.CatalogFilter(seed, sizeBits, bits)
                 }

@@ -869,6 +869,39 @@ class MeshFrameCodecTest {
         assertTrue(reconstructed.mightContain("evid:b"))
     }
 
+    // ---------- hostile CatalogFilter.sizeBits must never reach CatalogFilter's own division ----------
+    // CR-10 (PLAN-v2.md Part 10, 2026-08-09) — this was the one wire field decode() left entirely
+    // unbounded, unlike every neighboring frame's own length-bearing fields (totalChunks/thumbnail/
+    // contentLength just below). A remote, unauthenticated peer sending sizeBits=0 reached
+    // CatalogFilter.hashIndexes' Math.floorMod(_, sizeBits) and threw ArithmeticException — caught
+    // by RelayResponder.handleIncoming's top-level catch, so no crash, but the whole connection's
+    // catalog sync was silently dropped: cheap denial of delivery against the mechanism all SOS/
+    // evidence/nickname content is now exclusively reactive to.
+
+    @Test
+    fun `decode rejects a catalog filter frame with sizeBits of 0`() {
+        val frame = MeshFrameCodec.encodeCatalogFilter(seed = 1L, sizeBits = 0, bits = ByteArray(0))
+        assertNull(MeshFrameCodec.decode(frame))
+    }
+
+    @Test
+    fun `decode rejects a catalog filter frame with sizeBits past MAX_SIZE_BITS`() {
+        val frame = MeshFrameCodec.encodeCatalogFilter(
+            seed = 1L, sizeBits = CatalogFilter.MAX_SIZE_BITS + 1, bits = ByteArray(8)
+        )
+        assertNull(MeshFrameCodec.decode(frame))
+    }
+
+    @Test
+    fun `decode accepts a catalog filter frame with sizeBits exactly at MAX_SIZE_BITS`() {
+        val frame = MeshFrameCodec.encodeCatalogFilter(
+            seed = 1L, sizeBits = CatalogFilter.MAX_SIZE_BITS, bits = ByteArray(CatalogFilter.MAX_SIZE_BITS / 8)
+        )
+        val decoded = MeshFrameCodec.decode(frame)
+        check(decoded is MeshFrameCodec.Frame.CatalogFilter)
+        assertEquals(CatalogFilter.MAX_SIZE_BITS, decoded.sizeBits)
+    }
+
     // The retired FRAME_WIFI_DIRECT_CAP/HANDOFF/ACCEPT round-trip tests lived here through
     // v0.7.15-dev — deleted alongside those frame types by decision 49 (docs/DECISIONS.md), Wi-Fi
     // Direct's removal.
@@ -974,6 +1007,42 @@ class MeshFrameCodecTest {
         assertEquals(1024, MeshFrameCodec.padGattFrame(ByteArray(511)).size)
         assertEquals(1024, MeshFrameCodec.padGattFrame(ByteArray(1022)).size) // 2 + 1022 == 1024, exact fit
         assertEquals(2048, MeshFrameCodec.padGattFrame(ByteArray(1023)).size) // 2 + 1023 == 1025, rolls over
+    }
+
+    // CR-3 (PLAN-v2.md Part 10, 2026-08-09) — maxUsableBytes must be honored, not just the frame's
+    // own bucket-fit: on a low-MTU connection, picking the 256-byte bucket regardless of what the
+    // connection can actually carry made notifyCharacteristicChanged fail outright (no fragmentation
+    // for notify) and silently promoted writeCharacteristic to a prepared/long write MeshGattServer
+    // never reassembles. These exercise the budget-aware path directly.
+
+    @Test
+    fun `padGattFrame never exceeds maxUsableBytes even when no bucket fits`() {
+        // A realistic constrained connection: MTU 247 (a common OEM value), usable ATT payload 244.
+        // No PAD_BUCKETS entry (256/512/1024/2048) fits under that, so this must fall back to the
+        // unpadded (length-prefix-only) shape rather than picking 256 and overrunning the budget.
+        val usable = 244
+        val frame = ByteArray(40)
+        val padded = MeshFrameCodec.padGattFrame(frame, usable)
+        assertTrue("padded frame (${padded.size}B) must fit the connection's ${usable}B budget", padded.size <= usable)
+        assertEquals(2 + frame.size, padded.size) // unpadded fallback: length prefix + frame only
+        assertArrayEquals(frame, MeshFrameCodec.unpadGattFrame(padded))
+    }
+
+    @Test
+    fun `padGattFrame still buckets normally when a bucket fits within maxUsableBytes`() {
+        // usable=512 comfortably admits the 256 bucket for a small frame — behavior must be
+        // unchanged from the unrestricted (default) case.
+        assertEquals(256, MeshFrameCodec.padGattFrame(ByteArray(1), maxUsableBytes = 512).size)
+    }
+
+    @Test
+    fun `padGattFrame falls back to unpadded when the frame itself fits the budget but no bucket does`() {
+        // frame=290 -> unpaddedTotal=292, which fits a 300-byte budget on its own, but neither the
+        // 256 bucket (too small for 292) nor the 512 bucket (over the 300 budget) does — must fall
+        // back to unpadded rather than either failing to fit the payload or overrunning the budget.
+        val padded = MeshFrameCodec.padGattFrame(ByteArray(290), maxUsableBytes = 300)
+        assertEquals(292, padded.size)
+        assertTrue(padded.size <= 300)
     }
 
     @Test

@@ -65,7 +65,16 @@ class MeshGattServer(
     private val l2capTransport: L2capBulkTransport,
 ) {
     private var gattServer: BluetoothGattServer? = null
-    private val subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>() // mutated from BLE callback threads
+    // CR-11 (PLAN-v2.md Part 10, 2026-08-09 review pass) — was keyed on BluetoothDevice itself,
+    // against this class's own stated rule two fields below (registeredKey's doc): "Keyed by
+    // address... NOT by the BluetoothDevice object itself, which has no guaranteed stable equals()
+    // across separate callback deliveries from the stack (see docs/DECISIONS.md, decision 4)." If
+    // that premise holds, the add()-returns-false guard this set exists for (preventing a duplicate
+    // periodicRefresh loop when onDescriptorWriteRequest re-fires for the same still-open link,
+    // mirroring MeshGattClient.handledGatts) fails exactly when needed — a duplicate loop doubles
+    // presence/position airtime for that link's whole lifetime. Keyed by address like every other
+    // per-peer structure in this class now.
+    private val subscribedDevices = ConcurrentHashMap.newKeySet<String>() // mutated from BLE callback threads
     private val writeQueue = GattOperationQueue()
 
     // Unlike MeshGattClient (capped at 3 outbound connections), incoming connections here have no
@@ -122,8 +131,23 @@ class MeshGattServer(
         gattServer?.addService(service)
     }
 
+    /** CR-4 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — was `gattServer?.close()` only, with
+     *  no cleanup of [connectedDevices]/[subscribedDevices]/[negotiatedMtu]/[registeredKey] or
+     *  [connectionRegistry] unregistration, asymmetric with [MeshGattClient.disconnectAll]'s full
+     *  teardown. `stop()` runs on every "Offline" toggle AND every Bluetooth adapter off→on cycle
+     *  ([MeshService.bluetoothStateReceiver] calls `stopRadios(); startRadios()`), so each cycle
+     *  left dead push callbacks in [connectionRegistry] pointing at a closed server — permanently
+     *  inflating [ConnectionRegistry.openLinkCount], the ONLY degree signal [ForwardingPolicy] uses
+     *  for TTL clamping/fanout/jitter, and leaving stale [periodicRefresh] loops running since
+     *  [connectedDevices] still held the (now-dead) addresses. Mirrors
+     *  [MeshGattClient.disconnectAll]'s shape. */
     @SuppressLint("MissingPermission")
     fun stop() {
+        for (key in registeredKey.values) connectionRegistry.unregister(key)
+        registeredKey.clear()
+        connectedDevices.clear()
+        subscribedDevices.clear()
+        negotiatedMtu.clear()
         try { gattServer?.close() } catch (_: Exception) {}
     }
 
@@ -134,7 +158,12 @@ class MeshGattServer(
         // Bucket-padded here, not by the caller — every outgoing frame goes through this one
         // function, so this is the choke point where padding applies uniformly to all frame types
         // without each call site having to remember to pad. See padGattFrame's own doc.
-        val padded = MeshFrameCodec.padGattFrame(data)
+        // CR-3 (PLAN-v2.md Part 10): usable payload passed explicitly, same reasoning as
+        // MeshGattClient.write — a bucket this connection's own negotiated MTU can't carry made
+        // notifyCharacteristicChanged fail outright on any link below MTU 259.
+        val mtu = negotiatedMtu[device.address] ?: MeshProtocol.DEFAULT_ATT_MTU
+        val usable = mtu - MeshProtocol.ATT_WRITE_OVERHEAD_BYTES
+        val padded = MeshFrameCodec.padGattFrame(data, usable)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             // value is a parameter here, not shared characteristic state — two concurrent notifies
             // to different peers can never cross-deliver each other's bytes, so per-address
@@ -206,7 +235,7 @@ class MeshGattServer(
             // whose own onServicesDiscovered re-fires (see MeshGattClient's handledGatts doc) issues
             // a second CCCD write for the same still-open link; without this guard that would spawn
             // a second periodicRefresh loop here that lives for the connection's whole lifetime.
-            if (!subscribedDevices.add(device)) return
+            if (!subscribedDevices.add(device.address)) return
             responder.resetSessionBudget(device.address)
             l2capTransport.noteDevice(device.address, device)
             // Registered as soon as the link can actually accept a notify — see
@@ -260,7 +289,7 @@ class MeshGattServer(
                 }
             } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                 connectedDevices.remove(device.address)
-                subscribedDevices.remove(device)
+                subscribedDevices.remove(device.address)
                 writeQueue.clear(device.address)
                 negotiatedMtu.remove(device.address)
                 l2capTransport.closeFor(device.address)

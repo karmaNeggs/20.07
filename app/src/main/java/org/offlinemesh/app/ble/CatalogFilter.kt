@@ -63,7 +63,15 @@ class CatalogFilter private constructor(
         // doesn't fit, but the common case should just fit rather than routinely triggering it.
         private const val BITS_PER_ITEM = 10
         private const val MIN_SIZE_BITS = 64
-        private const val MAX_SIZE_BITS = 4096
+        // Not private (CR-10, PLAN-v2.md Part 10, 2026-08-09 review pass) — MeshFrameCodec.decode's
+        // FRAME_CATALOG_FILTER branch needs this to bound a wire-carried sizeBits before it ever
+        // reaches hashIndexes' Math.floorMod(_, sizeBits), the same way every other length-bearing
+        // field in that file is already bounded at decode time (totalChunks, thumbnail size,
+        // contentLength). Without it, sizeBits = 0 threw ArithmeticException (divide by zero) from
+        // an unauthenticated peer, caught by RelayResponder.handleIncoming's top-level catch but
+        // still silently dropping the entire connection's catalog sync — cheap denial of delivery
+        // against the mechanism all SOS/evidence/nickname content is now exclusively reactive to.
+        const val MAX_SIZE_BITS = 4096
 
         private const val BITS_PER_BYTE = 8
 

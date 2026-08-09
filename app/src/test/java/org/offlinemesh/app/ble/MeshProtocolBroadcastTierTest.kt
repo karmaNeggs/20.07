@@ -4,6 +4,7 @@ import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import org.offlinemesh.app.crypto.CryptoUtils
 
 /**
  * Tier 1: [MeshProtocol.encodeBroadcastTierBeacon]/[MeshProtocol.decodeBroadcastTierBeacon] — the
@@ -211,7 +212,11 @@ class MeshProtocolBroadcastTierTest {
 
     @Test
     fun `activeSos content (message, timestamp, mac) round-trips`() {
-        val mac = ByteArray(32) { it.toByte() } // stand-in for a real CryptoUtils.authTag output
+        // A REAL authTag output, not a same-length stand-in — CR-1 (PLAN-v2.md Part 10, 2026-08-09)
+        // was exactly a test in this file using ByteArray(32) here while MeshProtocol.MAC_LEN had
+        // silently drifted to 32 against authTag's real 16-byte output, so this test kept passing
+        // while production's own `content.mac.size == MAC_LEN` check was always false.
+        val mac = CryptoUtils.authTag(ByteArray(32), "activeSos content round-trip test".toByteArray())
         val content = MeshProtocol.SosAlert.Content(message = "help, medical emergency", timestamp = 123L, mac = mac)
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
@@ -250,7 +255,8 @@ class MeshProtocolBroadcastTierTest {
     @Test
     fun `content message past the size ceiling is silently omitted, not truncated into an unverifiable mac`() {
         val oversizedMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES + 1)
-        val content = MeshProtocol.SosAlert.Content(oversizedMessage, timestamp = 1L, mac = ByteArray(32))
+        val content =
+            MeshProtocol.SosAlert.Content(oversizedMessage, timestamp = 1L, mac = ByteArray(CryptoUtils.MAC_TAG_LEN))
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
             activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
@@ -263,8 +269,14 @@ class MeshProtocolBroadcastTierTest {
     }
 
     @Test
-    fun `content with a mac that isn't exactly 32 bytes is silently omitted`() {
-        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(16)) // wrong length
+    fun `content with a mac that isn't exactly MAC_TAG_LEN bytes is silently omitted`() {
+        // CR-1 (PLAN-v2.md Part 10, 2026-08-09): this test used to assert a 16-byte mac — the
+        // correct, real CryptoUtils.authTag length — was "wrong length" and got dropped, because
+        // MeshProtocol.MAC_LEN had drifted to 32. That encoded the bug as the expected behavior; a
+        // real 16-byte mac silently never made it onto the wire in production. Now asserts the
+        // actual wrong-length case (32 bytes, one CryptoUtils.sha256 digest's worth) is what gets
+        // omitted, against the real MAC_TAG_LEN.
+        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(32))
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
             activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
@@ -275,7 +287,9 @@ class MeshProtocolBroadcastTierTest {
     @Test
     fun `decode rejects a content block whose message length prefix overruns the actual bytes`() {
         val content =
-            MeshProtocol.SosAlert.Content("a reasonably long help message", timestamp = 1L, mac = ByteArray(32))
+            MeshProtocol.SosAlert.Content(
+                "a reasonably long help message", timestamp = 1L, mac = ByteArray(CryptoUtils.MAC_TAG_LEN)
+            )
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0,
             activeSos = MeshProtocol.SosAlert(id = "sos-1", hop = 0, content = content),
@@ -288,12 +302,16 @@ class MeshProtocolBroadcastTierTest {
     fun `worst-case payload with content but no position, no filter (BeaconRadio's priority trade) fits budget`() {
         val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
         val maxMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES)
-        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = ByteArray(32))
+        val mac = ByteArray(CryptoUtils.MAC_TAG_LEN)
+        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = mac)
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = null,
             activeSos = MeshProtocol.SosAlert(maxSosId, 1, content),
         )
-        assertEquals(169, encoded.size)
+        // 169 -> 153 (CR-1, PLAN-v2.md Part 10): the mac shrank from a wrong 32 bytes to the real
+        // CryptoUtils.MAC_TAG_LEN (16), so every content-bearing worst-case total in this file drops
+        // by exactly 16 bytes.
+        assertEquals(153, encoded.size)
         assert(encoded.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
             "worst-case content-bearing Tier B beacon (${encoded.size}B) must fit the ~251B budget"
         }
@@ -306,13 +324,16 @@ class MeshProtocolBroadcastTierTest {
         // this one.
         val maxSosId = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_ID_BYTES)
         val maxMessage = "x".repeat(MeshProtocol.MAX_BROADCAST_TIER_SOS_MESSAGE_BYTES)
-        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = ByteArray(32))
+        val mac = ByteArray(CryptoUtils.MAC_TAG_LEN)
+        val content = MeshProtocol.SosAlert.Content(maxMessage, timestamp = Long.MAX_VALUE, mac = mac)
         val maxFilter = ByteArray(MeshProtocol.MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES)
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 0, positionFrame = null,
             activeSos = MeshProtocol.SosAlert(maxSosId, 1, content), catalogFilter = maxFilter,
         )
-        assertEquals(199, encoded.size)
+        // 199 -> 183 (CR-1, PLAN-v2.md Part 10) — same 16-byte real-mac correction as the sibling
+        // test above.
+        assertEquals(183, encoded.size)
         assert(encoded.size <= MeshProtocol.BROADCAST_TIER_BUDGET_BYTES) {
             "worst-case content-bearing Tier B beacon plus a maxed filter (${encoded.size}B) must still fit"
         }
@@ -338,7 +359,7 @@ class MeshProtocolBroadcastTierTest {
     fun `catalogFilter coexists with position and activeSos content without interfering`() {
         val fakeFrame = ByteArray(150) { it.toByte() }
         val fakeFilter = ByteArray(20) { (it * 5).toByte() }
-        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(32))
+        val content = MeshProtocol.SosAlert.Content("help", timestamp = 1L, mac = ByteArray(CryptoUtils.MAC_TAG_LEN))
         val encoded = MeshProtocol.encodeBroadcastTierBeacon(
             MeshProtocol.ADV_TYPE_GROUP, rid, presenceHop = 2, positionFrame = fakeFrame,
             activeSos = MeshProtocol.SosAlert("sos-1", 0, content), catalogFilter = fakeFilter,

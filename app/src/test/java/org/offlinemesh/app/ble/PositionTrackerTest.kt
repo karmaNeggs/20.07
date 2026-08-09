@@ -30,6 +30,19 @@ class PositionTrackerTest {
         assertEquals(180L, PositionTracker.effectiveMaxAgeSeconds(90L, hop = 2))
     }
 
+    @Test
+    fun `effectiveMaxAgeSeconds stops adding slack past MAX_SLACK_HOPS`() {
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09): hop is an unauthenticated cleartext-envelope
+        // field (a blind relay must be able to increment it with no group key) — letting its slack
+        // contribution scale all the way to a real relay hop (up to maxPositionRelayHops=120) meant
+        // a captured frame replayed with an inflated hop bought up to ~93 minutes of stale-position
+        // acceptance instead of the intended few minutes. Slack now caps at 6 hops' worth
+        // regardless of how much further the actual hop climbs.
+        val atSixHops = PositionTracker.effectiveMaxAgeSeconds(90L, hop = 6)
+        assertEquals(atSixHops, PositionTracker.effectiveMaxAgeSeconds(90L, hop = 7))
+        assertEquals(atSixHops, PositionTracker.effectiveMaxAgeSeconds(90L, hop = 120))
+    }
+
     // ---------- effectiveMaxAgeSecondsFor (decision 33 — RadarView's per-dot fade window) ----------
 
     @Test
@@ -39,11 +52,13 @@ class PositionTrackerTest {
     }
 
     @Test
-    fun `effectiveMaxAgeSecondsFor at a large relay hop count gives a real multi-minute budget`() {
-        // The exact scenario decision 33 raised maxPositionRelayHops for: a position relayed
-        // through many hops must not be treated as fresh for only a few minutes, or a long-chain
-        // relay would arrive already "expired" on delivery.
-        assertEquals(5580L, PositionTracker.effectiveMaxAgeSecondsFor(hop = 120))
+    fun `effectiveMaxAgeSecondsFor at a large relay hop count is bounded, not unbounded`() {
+        // CORRECTED (CR-12, PLAN-v2.md Part 10, 2026-08-09) — this test used to assert 5580L
+        // (~93 minutes) here, treating decision 33's original unbounded scaling as correct. A
+        // position that old being admitted and drawn as a walkable radar dot is the exact product
+        // risk CR-12 identifies, compounded by hop being replayable/unauthenticated. Now capped at
+        // 6 hops' worth of slack — see effectiveMaxAgeSeconds' own MAX_SLACK_HOPS doc.
+        assertEquals(450L, PositionTracker.effectiveMaxAgeSecondsFor(hop = 120))
     }
 
     @Test

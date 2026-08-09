@@ -24,7 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -207,7 +207,16 @@ private fun ringScaleFor(farthestMeters: Float): Int =
 @Composable
 fun RadarCanvas(dots: List<RadarDot>, headingDegrees: Float, modifier: Modifier = Modifier, sizeDp: Dp = 260.dp) {
     val maxDistance = ringScaleFor(dots.maxOfOrNull { it.distanceMeters } ?: 0f).toFloat()
-    var elapsedMs by remember { mutableStateOf(0L) }
+    // CR-15 (PLAN-v2.md Part 10) correction: the original finding claimed this read forces a full
+    // recomposition of RadarCanvas at display refresh rate. It does not — elapsedMs is read ONLY
+    // inside the Canvas{} draw lambda (Canvas = Spacer(Modifier.drawBehind(...))), and a State read
+    // inside drawBehind's own lambda is attributed to the DRAW phase's snapshot-observation scope,
+    // not the composition scope that created this call — mutating it invalidates redraw only, the
+    // same mechanism sweepAngle's own animateFloat below already relies on. The canvas is already
+    // redrawing continuously every frame for the sweep regardless of dot-blink state, so this reads
+    // adds no incremental per-frame cost either. mutableLongStateOf (not mutableStateOf<Long>) is
+    // still a genuine small fix on its own merits — avoids boxing a Long on every animation frame.
+    var elapsedMs by remember { mutableLongStateOf(0L) }
     LaunchedEffect(Unit) {
         val start = System.currentTimeMillis()
         while (true) {

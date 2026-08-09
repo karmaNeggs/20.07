@@ -71,6 +71,14 @@ class GroupKeyStore(context: Context) {
     fun allGroupIds(): Set<String> =
         prefs.all.keys.filter { it.startsWith(KEY_PREFIX) }.map { it.removePrefix(KEY_PREFIX) }.toSet()
 
+    /** CR-18 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — [SIGN_PREFIX] counterpart to
+     *  [allGroupIds]. [GroupRepository.sweepOrphanKeys] used to only ever scan the symmetric-key
+     *  namespace, so an orphaned signing keypair (Ed25519 private key material) with no matching
+     *  symmetric key entry — or, before this fix existed, one this same sweep itself left behind by
+     *  removing only the symmetric key — was never visited and leaked indefinitely. */
+    fun signingKeyGroupIds(): Set<String> =
+        prefs.all.keys.filter { it.startsWith(SIGN_PREFIX) }.map { it.removePrefix(SIGN_PREFIX) }.toSet()
+
     companion object {
         // Both namespaced so the same prefs file can hold a group's symmetric key and its
         // Ed25519 signing keypair side by side without either misreading the other's entries as

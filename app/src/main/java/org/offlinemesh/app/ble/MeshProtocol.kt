@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import org.offlinemesh.app.crypto.CryptoUtils
 
 object MeshProtocol {
     // Public, fixed — identifies "this app's phone" at the radio level. Not secret; matching
@@ -108,9 +109,14 @@ object MeshProtocol {
      *  much content a group holds, and watch that change over time, without ever connecting. */
     const val MAX_BROADCAST_TIER_CATALOG_FILTER_BYTES = 30
 
-    /** Fixed HMAC-SHA256 output length — see [MeshFrameCodec.broadcastSosMacInput]'s doc for what
-     *  this authenticates and, critically, what it deliberately leaves out. */
-    private const val MAC_LEN = 32
+    /** [CryptoUtils.MAC_TAG_LEN] — see [MeshFrameCodec.broadcastSosMacInput]'s doc for what this
+     *  authenticates and, critically, what it deliberately leaves out. Referencing the constant
+     *  directly (not a local literal) is a deliberate fix: this used to be its own `32`, which
+     *  never matched a real [CryptoUtils.authTag] output (16 bytes) — every `content.mac.size ==
+     *  MAC_LEN` check in this file was therefore always false, so the Tier B SOS content preview
+     *  (decisions 29/30/31) had never actually been transmitted in production. Found and fixed in
+     *  the 2026-08-09 review pass (`PLAN-v2.md` Part 10, CR-1). */
+    private const val MAC_LEN = CryptoUtils.MAC_TAG_LEN
 
     /** The sender's own nearest known active SOS for this group — [id] is the real SOS id (matching
      *  `SosEntity.id`), NOT a rough placeholder — see [encodeBroadcastTierBeacon]'s own doc for why
@@ -342,6 +348,13 @@ object MeshProtocol {
  *  active SOS. [now] is injectable (defaults to the real clock) so staleness behavior — a real,
  *  previously-buggy part of this class (see [bestActiveSosHop]'s doc) — is testable without waiting
  *  out a real 90-second window. */
+// TooManyFunctions: one small, single-purpose function per distance-vector operation (report,
+// query, or prune) rather than fewer, more overloaded ones — matches this codebase's own established
+// reasoning for the same suppress elsewhere (e.g. RelayResponder's "one small handler per wire frame
+// type... instead of one large dispatcher"). Crossed the threshold when CR-6 (PLAN-v2.md Part 10,
+// 2026-08-09) added pruneStale/clearForGroup/pruneOrphaned/removeKeys, mirroring PositionTracker's
+// own pruning shape.
+@Suppress("TooManyFunctions")
 class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     data class Key(val groupId: String, val target: String) // target = "PRESENCE" or an sosId
     private val table = ConcurrentHashMap<Key, Int>()
@@ -376,6 +389,54 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     // disagree about whether anyone is there at all — the exact hop-vs-radar mismatch already
     // reported as confusing.
     private val staleMs = BASE_STALE_MS
+
+    /** CR-6 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — [table]/[lastUpdated]/[lastSource]/
+     *  [_snapshot] are keyed on `Key(groupId, target)` where [target] is `"PRESENCE"` **or a
+     *  per-message SOS UUID** ([markSosOrigin]/[considerNeighborReport]'s `target` param), and
+     *  nothing removed an entry — [myHop]/[bestActiveSos] only ever FILTERED by staleness at read
+     *  time, so a session with many distinct alert-flagged SOS ids grew this unboundedly, on the
+     *  exact structure [BeaconRadio.bestSosHopFor] scans on every advertise-check tick (2s in
+     *  ACTIVE tier). Call periodically (same cadence as [org.offlinemesh.app.data.GroupRepository
+     *  .expireGroups]/`RelayEngine.pruneExpired`, see `MeshService.startPruning`) to actually evict
+     *  what [myHop]/[bestActiveSos] already treat as gone, mirroring [PositionTracker]'s own
+     *  filter-at-read-plus-prune-on-schedule shape. */
+    fun pruneStale() {
+        val nowMs = now()
+        val staleKeys = table.keys.filter { key ->
+            val ts = lastUpdated[key] ?: return@filter true
+            val hop = table[key] ?: return@filter true
+            nowMs - ts > effectiveStaleMs(staleMs, hop)
+        }
+        removeKeys(staleKeys)
+    }
+
+    /** Call when a group is dismantled — same "in-memory state Room-layer deletion can't reach on
+     *  its own" reasoning [PositionTracker.clearForGroup]/[BroadcastSosPreview.clearForGroup]
+     *  already establish for the identical gap (decision 30, `docs/DECISIONS.md`); this class was
+     *  simply missed in that pass (CR-6, `PLAN-v2.md` Part 10). Without this, a dismantled group's
+     *  hop entries (presence AND every alert-flagged SOS it ever tracked) persist until
+     *  [pruneStale] eventually ages them out, up to [effectiveStaleMs]'s own window. */
+    fun clearForGroup(groupId: String) {
+        removeKeys(table.keys.filter { it.groupId == groupId })
+    }
+
+    /** Periodic safety net alongside [clearForGroup]'s immediate per-group clear — same shape and
+     *  same reason [PositionTracker.pruneOrphaned]/[BroadcastSosPreview.pruneOrphaned] exist: catches
+     *  automatic expiry and any other dismantle path without needing every caller to remember this
+     *  table exists. */
+    fun pruneOrphaned(activeGroupIds: Set<String>) {
+        removeKeys(table.keys.filter { it.groupId !in activeGroupIds })
+    }
+
+    private fun removeKeys(keys: List<Key>) {
+        if (keys.isEmpty()) return
+        for (key in keys) {
+            table.remove(key)
+            lastUpdated.remove(key)
+            lastSource.remove(key)
+        }
+        _snapshot.update { it - keys.toSet() }
+    }
 
     fun myHop(groupId: String, target: String): Int {
         val key = Key(groupId, target)
@@ -488,11 +549,25 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
         /** Deliberately equal to PositionTracker's BASE_MAX_AGE_SECONDS — see staleMs' note. */
         private const val BASE_STALE_MS = 180_000L
 
+        // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — same fix as
+        // PositionTracker.MAX_SLACK_HOPS/RelayResponder's own copy, applied here for the identical
+        // reason: [hop] (both [considerNeighborReport]'s neighborHop and [considerDirectHop]'s
+        // hopValue, ultimately sourced from the same unauthenticated cleartext envelope field every
+        // relay increments) fed this table's own staleness window uncapped, so a stale or replayed
+        // reading at a large hop could sit displayed as "N hops away" for up to ~90 minutes instead
+        // of the intended 3 minutes. Kept in sync by doc only with the other two copies — this file
+        // already keeps [PER_HOP_SLACK_MS] in sync with `MeshGattClient.reconnectCooldownMs` the
+        // same way.
+        private const val MAX_SLACK_HOPS = 6
+
         /** `internal`, no instance state — directly unit-testable (see [HopTrackerTest]). [hop]
          *  is the CURRENTLY STORED value at a key, not a hop being newly considered — a hop of 0
          *  or 1 (self, or a direct single-connection neighbor) gets exactly [baseStaleMs], since
-         *  those need only one connection to refresh; each hop beyond that adds [PER_HOP_SLACK_MS]. */
+         *  those need only one connection to refresh; each hop beyond that adds [PER_HOP_SLACK_MS],
+         *  up to [MAX_SLACK_HOPS] (CR-12, `PLAN-v2.md` Part 10) — see that constant's own doc for
+         *  why the window no longer scales all the way to a real (and attacker-influenceable) hop
+         *  value. */
         internal fun effectiveStaleMs(baseStaleMs: Long, hop: Int): Long =
-            baseStaleMs + (hop - 1).coerceAtLeast(0) * PER_HOP_SLACK_MS
+            baseStaleMs + (hop.coerceAtMost(MAX_SLACK_HOPS) - 1).coerceAtLeast(0) * PER_HOP_SLACK_MS
     }
 }

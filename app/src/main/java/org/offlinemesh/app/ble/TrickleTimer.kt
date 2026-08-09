@@ -21,6 +21,17 @@ package org.offlinemesh.app.ble
  *
  * [now] is injectable so backoff/reset timing is testable without waiting out real seconds.
  *
+ * **Thread-safety (CR-7, `PLAN-v2.md` Part 10, 2026-08-09 review pass).** [onSighting] is called
+ * from `BeaconRadio.handleResult`, which runs on the raw BLE scan-callback binder thread;
+ * [shouldTransmit]/[reset] are called from the advertise coroutine. Found unsynchronized against a
+ * plain `mutableSetOf`, unlike every other genuinely cross-thread field in `BeaconRadio` (careful
+ * `@Volatile`/`ConcurrentHashMap`, per that class's own documented convention) — this class was the
+ * one instance missed. All three mutating methods are `@Synchronized`: the critical sections are
+ * trivial (one set add/clear plus a few `Long`/`Boolean` field writes), so a coarse lock costs
+ * nothing measurable against the risk it closes — a `ConcurrentModificationException` here would
+ * kill the advertise coroutine, which has no supervisor to restart it, silently ending Tier B
+ * advertising for the rest of the session.
+ *
  * **[redundancyConstant] counts DISTINCT sources per window, not raw [onSighting] calls** — see
  * decision 25 (`docs/DECISIONS.md`) for why this matters and isn't just a style choice: unlike
  * RFC 6206's own peers (which self-limit to at most one transmission per interval by the same
@@ -54,6 +65,7 @@ class TrickleTimer(
      *  fine [sourceId] here even though longer-lived state elsewhere in this app deliberately
      *  avoids keying on it (decision 15's peer-identity work is about state that must survive
      *  rotation; this is not that). */
+    @Synchronized
     fun onSighting(sourceId: Any) {
         sightingSourcesThisWindow.add(sourceId)
     }
@@ -66,6 +78,7 @@ class TrickleTimer(
      *  Edge-triggered (a one-shot "transmit now" pulse) — the classic Trickle/RFC 6206 usage,
      *  for a "send one packet at this tick" caller. See [isSuppressed] for the alternative,
      *  level-style query a continuously-running radio should poll instead. */
+    @Synchronized
     fun shouldTransmit(): Boolean {
         if (now() - windowStart < intervalMs) return false
         val fewEnoughSightings = sightingSourcesThisWindow.size < redundancyConstant
@@ -86,11 +99,13 @@ class TrickleTimer(
      *  call — reflects whatever the last completed window decided, unchanged until the next one
      *  closes. Defaults to false (not suppressed) before any window has ever closed, matching
      *  [shouldTransmit]'s own default-to-permissive behavior on a fresh timer. */
+    @Synchronized
     fun isSuppressed(): Boolean = suppressed
 
     /** Drops back to the minimum interval — call when local conditions change enough that
      *  cached backoff is no longer trustworthy (e.g. this device just lost track of the group
      *  entirely and needs to announce itself aggressively again). */
+    @Synchronized
     fun reset() {
         intervalMs = minIntervalMs
         windowStart = now()

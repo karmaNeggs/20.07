@@ -16,9 +16,11 @@ import android.location.Location
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import org.offlinemesh.app.R
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -54,7 +56,30 @@ class MeshService : Service() {
     }
 
     private val binder = LocalBinder()
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // CR-9 (PLAN-v2.md Part 10, 2026-08-09 review pass) — a SupervisorJob keeps a sibling coroutine
+    // alive when one child throws, but with no handler installed the exception still reaches the
+    // thread's default handler, which on Android means the whole process crashes. The concrete
+    // reachable case found: GroupRepository.senderIdFor's requireNotNull (a deliberate hard-fail —
+    // "a caller bug worth surfacing loudly," decision 54) sits on the advertise loop and the
+    // per-connection push path (BeaconRadio/RelayResponder), reachable whenever a group row exists
+    // in Room with no matching signing keypair in EncryptedSharedPreferences (Keystore reset,
+    // restore-to-a-new-device, an OEM backup/migration). "Surfacing loudly" was meant to mean a
+    // clear failure signal, not losing the whole mesh session — this makes it the former: logged to
+    // DiagnosticsLog (exportable, unlike a bare Log.e) rather than propagating to a crash. Applies to
+    // every child of this scope, not just that one call site — general hardening, since nothing here
+    // was protected against an unexpected throw anywhere before this.
+    private val serviceExceptionHandler = CoroutineExceptionHandler { _, throwable ->
+        Log.e(
+            "MeshService",
+            "uncaught exception in serviceScope: ${throwable::class.simpleName} ${throwable.message}",
+            throwable,
+        )
+        DiagnosticsLog.event(
+            "error",
+            "serviceScope uncaught: ${throwable::class.simpleName} ${throwable.message}"
+        )
+    }
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + serviceExceptionHandler)
 
     private lateinit var repo: GroupRepository
     private lateinit var relay: RelayEngine
@@ -133,7 +158,28 @@ class MeshService : Service() {
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
         _meshActive.value = active
+        // CR-17 (PLAN-v2.md Part 10, 2026-08-09 review pass) — was not persisted at all: the
+        // "Offline" toggle removes the foreground notification (above), which is exactly what lets
+        // Android (or an OEM battery manager, already a documented risk this app works around
+        // elsewhere — see the manifest's REQUEST_IGNORE_BATTERY_OPTIMIZATIONS comment) kill the
+        // service in the background once there's nothing left protecting it. `onStartCommand`
+        // returns START_STICKY, so a killed service gets a fresh onCreate — which, before this fix,
+        // unconditionally started both radios and both sensors regardless of what the user last
+        // chose, silently reversing an explicit "stop transmitting" decision. See onCreate's own use
+        // of [loadMeshActivePersisted] for the other half of this fix.
+        persistMeshActive(active)
     }
+
+    /** [setMeshActive]'s persisted counterpart (CR-17, `PLAN-v2.md` Part 10) — same prefs file
+     *  [pickOncePerInstall] already uses for other per-install state. */
+    private fun persistMeshActive(active: Boolean) {
+        getSharedPreferences("mesh_device", Context.MODE_PRIVATE).edit().putBoolean("mesh_active", active).apply()
+    }
+
+    /** Defaults to `true` (matching [_meshActive]'s own original default) for a genuinely first-ever
+     *  launch, where nothing has been persisted yet. */
+    private fun loadMeshActivePersisted(): Boolean =
+        getSharedPreferences("mesh_device", Context.MODE_PRIVATE).getBoolean("mesh_active", true)
 
     // Split out of setMeshActive so the Bluetooth-adapter receiver below can restart just the
     // radio-dependent pieces (not location/compass/the notification, which have nothing to do with
@@ -230,8 +276,15 @@ class MeshService : Service() {
         bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
         _bluetoothEnabled.value = bluetoothManager.adapter?.isEnabled ?: false
         registerReceiver(bluetoothStateReceiver, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
-        locationTracker = LocationTracker(applicationContext).also { it.start() }
-        compassTracker = CompassTracker(applicationContext, locationTracker).also { it.start() }
+        // CR-17 (PLAN-v2.md Part 10) — read before anything below decides whether to actually
+        // start sensors/radios, so a process restart (START_STICKY, after the OS killed this
+        // service while offline — see setMeshActive's own doc) respects the user's last choice
+        // instead of defaulting back to active.
+        val meshActivePersisted = loadMeshActivePersisted()
+        _meshActive.value = meshActivePersisted
+        locationTracker = LocationTracker(applicationContext).also { if (meshActivePersisted) it.start() }
+        compassTracker = CompassTracker(applicationContext, locationTracker)
+            .also { if (meshActivePersisted) it.start() }
         createSosNotificationChannel()
         // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — constructed before responder
         // deliberately: RelayResponder's bulkChannelOpener param is a plain method reference
@@ -248,7 +301,7 @@ class MeshService : Service() {
         gattServer = MeshGattServer(
             this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity, ::currentTier,
             l2capTransport,
-        ).also { it.start() }
+        ).also { if (meshActivePersisted) it.start() }
         gattClient = MeshGattClient(
             this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry, l2capTransport,
         )
@@ -259,9 +312,17 @@ class MeshService : Service() {
             gattClient.maybeConnect(device, rssi)
         }
 
+        // startForegroundNotification() runs unconditionally even when persisted offline
+        // (deliberate — see CR-17's own doc): a restarted foreground service still needs to satisfy
+        // Android's startForeground() contract within the platform's own time window, and getting
+        // that wrong risks a ForegroundServiceDidNotStartInTimeException crash on restart, a strictly
+        // worse outcome than the notification briefly reappearing while offline. Only the actual
+        // radios are gated on the persisted choice.
         startForegroundNotification()
-        beaconRadio.startAdvertising()
-        beaconRadio.startScanning()
+        if (meshActivePersisted) {
+            beaconRadio.startAdvertising()
+            beaconRadio.startScanning()
+        }
         startPruning()
         startRadarTickLoop()
         // Once per process start, not periodic — see GroupRepository.sweepOrphanKeys' doc for why
@@ -289,6 +350,10 @@ class MeshService : Service() {
                 val activeGroupIds = repo.groupDao.getActiveGroups().map { it.id }.toSet()
                 positionTracker.pruneOrphaned(activeGroupIds)
                 broadcastSosPreview.pruneOrphaned(activeGroupIds)
+                // CR-6 (PLAN-v2.md Part 10) — hopTracker was missed by decision 30's own pass; same
+                // orphan-sweep-plus-staleness-prune shape as its two siblings above.
+                hopTracker.pruneOrphaned(activeGroupIds)
+                hopTracker.pruneStale()
                 delay(30 * 60 * 1000L) // every 30 min — this is housekeeping, not latency-sensitive
             }
         }

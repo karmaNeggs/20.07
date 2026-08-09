@@ -26,6 +26,11 @@ class GroupRepository(context: Context) {
     private val evidenceSymbolDao = db.evidenceSymbolDao()
     private val nicknameDao = db.nicknameDao()
     val peerKeyDao = db.peerKeyDao()
+    // CR-2 (PLAN-v2.md Part 10, 2026-08-09 review pass) — dismantleGroup needs this to actually
+    // delete a group's own courier envelopes; see that function's own doc for the gap this closes
+    // (found: a dismantled group's courier rows kept a non-null groupId and kept being relayed for
+    // up to COURIER_MAX_AGE_MILLIS after the user believed the group was destroyed).
+    private val courierEnvelopeDao = db.courierEnvelopeDao()
 
     /** deviceId identifies this phone within groups; random per-install, never tied to real identity. */
     val deviceId: String by lazy {
@@ -222,6 +227,10 @@ class GroupRepository(context: Context) {
         sosDao.deleteForGroup(groupId)
         nicknameDao.deleteForGroup(groupId)
         peerKeyDao.deleteForGroup(groupId)
+        // CR-2 (PLAN-v2.md Part 10) — was missing entirely; a dismantled group's own courier
+        // envelopes (groupId still set) survived here and kept being offered to peers via
+        // RelayEngine.relayableCourierEnvelopes for up to the full 24h COURIER_MAX_AGE_MILLIS.
+        courierEnvelopeDao.deleteForGroup(groupId)
         groupDao.delete(groupId)
         keyStore.removeKey(groupId)
         keyStore.removeSigningKeyPair(groupId)
@@ -250,7 +259,20 @@ class GroupRepository(context: Context) {
     suspend fun sweepOrphanKeys() {
         val liveIds = groupDao.allGroupIds().toSet()
         for (groupId in keyStore.allGroupIds()) {
-            if (groupId !in liveIds) keyStore.removeKey(groupId)
+            if (groupId !in liveIds) {
+                keyStore.removeKey(groupId)
+                // CR-18 (PLAN-v2.md Part 10, 2026-08-09) — removeKey alone left this group's
+                // Ed25519 signing keypair (private key material) behind forever; dismantleGroup
+                // already removes both together, this sweep was the one place that didn't.
+                keyStore.removeSigningKeyPair(groupId)
+            }
+        }
+        // Separate pass, not folded into the loop above: covers a signing keypair with no matching
+        // symmetric-key entry at all (e.g. one this same sweep itself left behind before the fix
+        // above existed) — GroupKeyStore.allGroupIds() only ever enumerates the symmetric-key
+        // namespace, so that entry would never be visited otherwise.
+        for (groupId in keyStore.signingKeyGroupIds()) {
+            if (groupId !in liveIds) keyStore.removeSigningKeyPair(groupId)
         }
     }
 }
