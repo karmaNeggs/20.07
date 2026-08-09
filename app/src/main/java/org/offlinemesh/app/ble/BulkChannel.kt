@@ -23,8 +23,10 @@ interface BulkChannel {
  * [L2capBulkTransport] needs, kept free of any `BluetoothSocket`/Android dependency so it's
  * directly unit-testable against ordinary `java.io` streams (a `PipedInputStream`/
  * `PipedOutputStream` pair, or a `ByteArrayOutputStream`), the same "decouple the mechanism from
- * the real radio" split [WifiDirectAccelerator.handshakeToken]/`receiveChunks` already used for
- * their own now-deleted socket parsing.
+ * the real radio" split the retired `WifiDirectAccelerator.handshakeToken`/`receiveChunks` already
+ * used for their own now-deleted socket parsing. (CR-26, `PLAN-v2.md` Part 10, 2026-08-09: this was
+ * previously a KDoc `[...]` link to a deleted class — a dangling reference, since it never resolves
+ * — fixed to plain backticks, matching every other reference to a retired class in this same file.)
  *
  * **Deliberately NOT [MeshFrameCodec.padGattFrame]/`unpadGattFrame`** — that wrapper's bucket-
  * rounded padding was designed for, and only ever used by, MESSAGE-ORIENTED GATT writes, where the

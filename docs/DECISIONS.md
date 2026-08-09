@@ -3646,3 +3646,89 @@ live confirmation that 3-phone discovery stays exactly as fast as before and tha
 silently stops delivering results once the filter is added (decision 3's own failure mode — silent,
 not an exception this code could catch and fall back from). The 10 Tracked items (CR-21..CR-30)
 remain deliberately deferred to after the round, per `PLAN-v2.md` Part 10's own sequencing.
+
+## 57. Tracked tier (CR-21..30) closed out; shake-to-panic-delete cut; plaintext evidence closed as intended
+
+Second pass over `PLAN-v2.md` Part 10, per the user's explicit instruction: dispose of everything
+left in the Tracked tier ("whatever can be done, do it"), plus two direct product calls that had
+been sitting as open questions since decision 56.
+
+**Cut, not built: shake-to-panic-delete (CR-28).** The user's decision was to remove the requirement
+from scope entirely, not scope-and-defer it — so it's deleted from `PLAN-v2.md` Part 10 rather than
+left as a tracked gap. No code ever implemented any part of it (confirmed by grep before removal:
+nothing in `app/src/main` beyond incidental uses of the English words "shake"/"panic"/"wipe"), so
+there was no stale code to remove alongside it. The original product brief (`20072026.md`, which
+predates and sits outside this repo's own `20.07/` engineering docs) was deliberately left
+untouched — it's the historical record of what was originally asked for, not "the plan," and
+rewriting a stated original requirement out of someone's own brief is a different kind of edit than
+cleaning up a living engineering doc; flagged to the user rather than assumed.
+
+**Closed, not a bug: reassembled evidence stored plaintext at rest (CR-29).** User's own framing:
+this app's actual threat model is loss of a single device, not confidentiality of evidence content
+at rest — redundancy across every phone that has relayed or received a copy is the explicit
+anti-single-point-of-failure design (the same reasoning that already has content flood to every
+relay, not just the origin), and the content itself isn't illegal to hold, so there's nothing to
+hide from a legal standpoint, only something to keep from being lost. Encrypting the reassembled
+file would work against the actual design goal for no compensating benefit. No code change; this
+closes the finding rather than acting on either option it originally proposed (encrypt-on-write, or
+document the exposure).
+
+**Fixed: CR-22, CR-23, CR-25, CR-26, CR-27.**
+- CR-22: `MeshFrameCodec.MAX_EVIDENCE_CHUNKS` 4096 → 1024 — the ceiling was sized against memory only
+  (`4096 × 400B = 1.6MB`), never against `FountainDecoder`'s O(k² · symbolSize) decode cost
+  (~6.7GB of XOR work at the old ceiling, all under one instance-wide `decoderMutex`, directly
+  reachable by a hostile or buggy `totalChunks` claim). 1024 cuts that worst case over 16× while
+  staying ~5× above `EvidenceCapture`'s realistic 640px/quality-45 JPEGs (~200 chunks).
+- CR-23: turned out to be a **corrected finding**, not a real gap — `SosDao.getRelayable()`/
+  `EvidenceDao.getRelayable()` already carry `WHERE ttl > 0` in their own `@Query` (`Daos.kt:79,192`);
+  `RelayEngine`'s `.filter { it.ttl > 0 }` was a harmless but pointless re-filter on an
+  already-filtered result. Removed the redundant Kotlin-side filter, not a missing SQL one.
+- CR-25: `JoinCode.expiresAtEpochSec` widened from a 4-byte `Int` to an 8-byte `Long` (Y2038 fix),
+  `JoinCode.VERSION` bumped 2 → 3 — deliberately not wire-compatible with v2, the same "acceptable
+  given zero deployed users" precedent v2 itself set when it broke v1.
+- CR-26: three stale/contradictory doc comments corrected — `RelayResponder.checkSenderKeyPin`'s
+  KDoc named a two-value `OK`/`MISMATCH` result that hasn't existed since the re-pin-and-continue
+  fix 20 lines below it (now names the real `FIRST_SIGHT`/`UNCHANGED`/`CHANGED` enum);
+  `BulkChannel.kt`'s dangling KDoc `[...]` link to the deleted `WifiDirectAccelerator` class fixed
+  to plain backticks; `RelayResponder.kt`'s "WFD cap" mislabel corrected to "L2CAP cap".
+- CR-27: trimmed standalone "X lived here, deleted by decision N" tombstone comments with no other
+  content (`HomeScreen.kt`, `RelayEngine.kt`, two in `RelayResponder.kt`) and WFD-specific footnotes
+  out of two still-otherwise-valid `MeshService.kt` comments and one in `GroupRepository.kt`.
+  Deliberately left alone: `MeshFrameCodec.kt`'s frame-byte retirement notes and `VERSION`
+  changelog (load-bearing — "never reuse this wire byte" needs to live where someone might reuse
+  it), and every comparative-design-reasoning mention of a retired class (`L2capBulkTransport.kt`/
+  `BulkChannel.kt`'s `WifiDirectAccelerator` comparisons, `RelayEngine.kt`/`RelayResponder.kt`'s
+  `PeerDeliveryTracker` comparisons, the manifest's WFD-permission-removal note) — these explain
+  *why* the current design looks the way it does, not just that something used to exist; removing
+  them would delete real reasoning, not just noise.
+
+**Partially done: CR-24.** Shipped the measurement groundwork this finding asked for —
+`MeshService.startDegreeLogging()`, a new periodic job (60s cadence) logging
+`connectionRegistry.openLinkCount()` to `DiagnosticsLog` under tag `degree` for the whole session,
+wired into `onCreate`/`onDestroy` alongside the existing prune/radar-tick loops. Purely additive,
+no behavior change (`DiagnosticsLog.event` is a no-op outside debug builds). What's still open is
+the actual question this data answers — whether `ForwardingPolicy`'s degree thresholds (5-6) are
+ever reached given a 3-outbound/unenforced-4-inbound connection cap — which genuinely needs the
+round's own numbers, not a guess; correctly left for it.
+
+**Deliberately left unchanged: CR-21.** `DedupCache` stays unwired. Re-checked decision 18's own
+reasoning before touching this: it was left unwired on purpose, with an explicit trigger condition
+("if DB-query latency on the flood path ever proves to matter on real hardware") that this pass's
+own excluded scope (no hardware testing) cannot supply evidence for. Wiring it now would mean
+reversing a considered decision on a guess, exactly the thing decision 18's own trigger condition
+exists to prevent. This is the one Tracked item where "do it" correctly meant "don't, not yet" —
+recorded explicitly in `PLAN-v2.md` Part 10 rather than silently skipped.
+
+**CR-30** is a meta-observation about doc-versus-code drift with nothing separately actionable —
+already self-demonstrated twice this session (CR-26's own corrections, and CR-23 turning into a
+corrected finding once re-verified against source instead of assumed).
+
+525 tests (unchanged from decision 56 — no new tests this pass; every fix here was a low-risk
+mechanical change already covered by the existing suite, confirmed by re-running it after each
+change). detekt clean, both variants green (`assembleDebug`/`assembleRelease`/`lintVitalRelease`),
+no `missing_rules.txt`. Version bumped to v0.7.22-dev (versionCode 33), fresh debug APK built and
+`aapt`-confirmed.
+
+Full detail in `PLAN-v2.md` Part 10, each `CR-n` entry updated in place with its own resolution
+rather than moved or deleted (except CR-28, removed per the user's explicit "obliviate this from
+plan" instruction).

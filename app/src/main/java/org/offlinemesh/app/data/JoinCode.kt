@@ -24,10 +24,18 @@ object JoinCode {
     // version check, which now rejects v1 codes outright rather than trying to interpret them
     // with a missing field. Acceptable because groups are short-lived and this project has zero
     // deployed users at the time of this change (see CHANGELOG).
-    private const val VERSION: Byte = 2
+    // v3 (CR-25, PLAN-v2.md Part 10, 2026-08-09 review pass): expiresAtEpochSec widened from a
+    // 4-byte signed int to an 8-byte long — the 4-byte field overflows in 2038 (the well-known
+    // Y2038 limit), at which point EVERY code, including one just generated, would fail decode()'s
+    // own validation immediately. v2's own comment called this "acceptable... nowhere near that
+    // boundary" and said to revisit only as 2038 approached — fixed now instead, while it's a
+    // trivial 4-byte field change and zero deployed users are affected, rather than waiting for a
+    // deadline that would otherwise force an emergency fix. Same "not wire-compatible, and that's
+    // fine at this project's stage" precedent v2 already set.
+    private const val VERSION: Byte = 3
     private const val GROUP_ID_LEN = 8
     private const val KEY_LEN = 32
-    private const val EXPIRES_AT_LEN = 4
+    private const val EXPIRES_AT_LEN = 8
     private const val MILLIS_PER_SECOND = 1000L
 
     /** Absolute ceiling on how far in the future a code's expiry may sit — enforced in [decode],
@@ -61,12 +69,10 @@ object JoinCode {
         buf.put(VERSION)
         buf.put(idBytes)
         buf.put(parsed.key)
-        // A signed 32-bit epoch-seconds field overflows in 2038 (the well-known Y2038 limit) —
-        // acceptable here given this app's actual horizon (groups measured in days, this constant
-        // itself capping any single group at ~6 months) is nowhere near that boundary, and a
-        // 4-byte field keeps the code itself short. Revisit only if this project is still running
-        // as-is as 2038 approaches.
-        buf.putInt(parsed.expiresAtEpochSec.toInt())
+        // 8-byte epoch-seconds (v3, CR-25) — see VERSION's own doc for why this replaced the
+        // old 4-byte (Y2038-limited) field. Costs 4 extra bytes in every code; negligible against
+        // the fixed 8+32-byte id+key that already dominates the code's length.
+        buf.putLong(parsed.expiresAtEpochSec)
         buf.put(nameBytes.size.toByte())
         buf.put(nameBytes)
         // java.util.Base64, not android.util.Base64 — functionally identical (URL-safe alphabet, no
@@ -88,7 +94,7 @@ object JoinCode {
         } else {
             val idBytes = ByteArray(GROUP_ID_LEN).also { buf.get(it) }
             val key = ByteArray(KEY_LEN).also { buf.get(it) }
-            val expiresAtEpochSec = buf.int.toLong()
+            val expiresAtEpochSec = buf.long
             val nameLen = buf.get().toInt() and 0xFF
             val nameBytes = ByteArray(nameLen).also { buf.get(it) }
             val nowSec = System.currentTimeMillis() / MILLIS_PER_SECOND

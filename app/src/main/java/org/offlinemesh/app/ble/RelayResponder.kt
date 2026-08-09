@@ -415,9 +415,10 @@ class RelayResponder(
      *  once as part of that (connection start) AND periodically thereafter on an already-open
      *  link (see [refreshFramesToPush] / `MeshGattClient`'s periodic-refresh loop, PLAN-v2.md P3 /
      *  docs/DECISIONS.md decision 20): everything else `framesToPushOnConnect` sends (the catalog
-     *  filter, WFD cap, evidence symbol requests) either doesn't need this cadence of refreshing or is
-     *  already handled by P1's event-driven flood-forward — only presence/position go stale purely
-     *  from TIME passing on a link that's no longer cycling every ~45-60s the way v1's did. */
+     *  filter, L2CAP cap, evidence symbol requests — the L2CAP cap replaced the retired WFD cap in
+     *  decision 49) either doesn't need this cadence of refreshing or is already handled by P1's
+     *  event-driven flood-forward — only presence/position go stale purely from TIME passing on a
+     *  link that's no longer cycling every ~45-60s the way v1's did. */
     private suspend fun presenceAndPositionFrames(toPeer: String?): List<ByteArray> {
         val frames = mutableListOf<ByteArray>()
         for (g in repo.groupDao.getActiveGroups()) {
@@ -551,11 +552,6 @@ class RelayResponder(
         }
         return frames
     }
-
-    // maybeAccelerateOverWifiDirect/handleWifiDirectCap/handleWifiDirectHandoff/
-    // handleWifiDirectAccept and the whole Wi-Fi Direct accelerator subsystem lived here through
-    // v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), PLAN-v2.md §4.3 item 3's own
-    // already-planned removal, once decision 48 shipped BLE L2CAP CoC as its replacement.
 
     // ---------- per-frame handlers ----------
     // One private handler per frame type, dispatched from handleIncoming below. Each handler's own
@@ -1445,9 +1441,6 @@ class RelayResponder(
         }
     }
 
-    // handleWifiDirectCap/handleWifiDirectHandoff/handleWifiDirectAccept lived here through
-    // v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's removal.
-
     /** May call [respond] zero, one, or many times (a `SymbolRequest` can trigger a whole run of
      *  symbol frames) — the caller supplies how a response frame actually reaches the peer. */
     suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -> Unit) {
@@ -1542,8 +1535,14 @@ class RelayResponder(
             kotlin.math.abs(now - timestamp) <=
                 PRESENCE_MAX_SKEW_MS + hop.coerceIn(0, MAX_SLACK_HOPS) * PRESENCE_PER_HOP_SLACK_MS
 
-        /** Pure decision behind [pinOrCheckSenderKey] — given whatever's already pinned
-         *  for a (groupId, senderId) and the key this frame just carried, decide OK vs. MISMATCH.
+        /** Pure decision behind [pinOrCheckSenderKey] — given whatever's already pinned for a
+         *  (groupId, senderId) and the key this frame just carried, decide
+         *  [SenderKeyPinResult.FIRST_SIGHT]/[SenderKeyPinResult.UNCHANGED]/
+         *  [SenderKeyPinResult.CHANGED] (CR-26, `PLAN-v2.md` Part 10, 2026-08-09 — this doc
+         *  previously named a two-value `OK`/`MISMATCH` result that hasn't existed since the
+         *  live-testing fix [pinOrCheckSenderKey]'s own doc describes: a `CHANGED` key re-pins and
+         *  warns rather than hard-rejecting, since a stale pin outliving its own keypair — Keystore
+         *  reset, reinstall — used to silently kill every signed frame from that peer forever).
          *  `internal`, no DAO/repo access, so directly unit-testable (this class's other tests need
          *  a `Context`/Robolectric only because [RelayEngine]/[GroupRepository] do; this function
          *  needs neither — see [RelayResponderTest]'s class doc for that constraint, which doesn't
@@ -1551,13 +1550,11 @@ class RelayResponder(
          *
          *  [incomingPublicKey] null (a peer not yet carrying one, or intentionally omitted after
          *  the first heartbeat — see [MeshFrameCodec.encodePresence]'s doc) is always tolerated:
-         *  nothing to check, so [SenderKeyPinResult.OK]. [existingPublicKey] null means first
-         *  sight — also OK (the caller persists the new pin). Both present is the real check: equal
-         *  is OK, different is [SenderKeyPinResult.MISMATCH] — a legitimate sender's identity never
-         *  changes mid-group by design (see [org.offlinemesh.app.data.GroupRepository.
-         *  ensureSenderIdentity]'s doc for why), so a changed key is either device-swap-without-
-         *  rejoin (out of scope) or impersonation, and this app's threat model treats both the same
-         *  way: don't silently trust the new key. */
+         *  nothing to check, so [SenderKeyPinResult.UNCHANGED]. [existingPublicKey] null means first
+         *  sight, [SenderKeyPinResult.FIRST_SIGHT] (the caller persists the new pin). Both present is
+         *  the real check: equal is [SenderKeyPinResult.UNCHANGED], different is
+         *  [SenderKeyPinResult.CHANGED] — see [pinOrCheckSenderKey]'s own doc for what the caller
+         *  does with that result and why it's a re-pin, not a rejection. */
         internal fun checkSenderKeyPin(
             existingPublicKey: ByteArray?,
             incomingPublicKey: ByteArray?,

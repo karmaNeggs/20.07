@@ -380,10 +380,6 @@ private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-// WifiDirectRow/handleWifiDirectToggle (the WiFi Direct evidence accelerator's opt-in switch)
-// lived here through v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's
-// removal (PLAN-v2.md §4.3 item 3).
-
 /** Debug-only "export the mesh event log" affordance — invisible in release builds, where
  *  [DiagnosticsLog] is a no-op and writes nothing (see its class doc: a durable log on disk would
  *  undercut this app's "nothing persisted to find on a seized phone" property, so it exists only

@@ -71,12 +71,22 @@ object MeshFrameCodec {
      *  so the crash recurs until the 48h prune. A blind relay (one that can't resolve this frame's
      *  `handle` to a group key — see `GroupRepository.resolveGroupKeyByHandle`, decision 38) stores
      *  this header regardless, so this frame type has no authentication gate at all for that path —
-     *  the length cap here is the only line of defense. 4096 chunks * 400 bytes/chunk
-     *  (`RelayEngine.CHUNK_SIZE`) = 1.6MB, generous against `EvidenceCapture`'s 640px/quality-45
-     *  JPEGs (typically ~200 chunks). Through v0.7.13-dev this also bounded [MeshProtocol]'s
-     *  now-removed `encodeBitset`/`decodeBitset`; decision 47 repurposed it as the esi/k ceiling for
-     *  [FountainCode]/[FountainDecoder] instead — same number, same resource-exhaustion role. */
-    const val MAX_EVIDENCE_CHUNKS = 4096
+     *  the length cap here is the only line of defense.
+     *
+     *  **1024, not 4096 (CR-22, `PLAN-v2.md` Part 10, 2026-08-09 review pass)** — the original 4096
+     *  was sized purely against MEMORY (`4096 * 400 bytes/chunk = 1.6MB`), never checked against
+     *  [FountainDecoder]'s own TIME cost. `FountainDecoder.clearPivotFromOtherRows` is O(k) per
+     *  inserted symbol, each step XOR-ing a full `symbolSize` (400-byte) row, so a full decode is
+     *  O(k² · symbolSize) — at the OLD ceiling that's ~6.7 GB of byte-XOR work, all under one
+     *  instance-wide `decoderMutex` (`RelayEngine.kt`), directly reachable by a hostile or buggy
+     *  `totalChunks` claim: a cheap way to stall this device's entire evidence-decode path for every
+     *  item it's asked to reassemble. 1024 keeps that worst case to ~419 MB of XOR work — still real,
+     *  but over 16× smaller — while staying ~5× above `EvidenceCapture`'s own realistic 640px/
+     *  quality-45 JPEGs (typically ~200 chunks, 1024 chunks ≈ 400 KB). Through v0.7.13-dev this also
+     *  bounded [MeshProtocol]'s now-removed `encodeBitset`/`decodeBitset`; decision 47 repurposed it
+     *  as the esi/k ceiling for [FountainCode]/[FountainDecoder] instead — same role, now sized
+     *  against both memory AND decode time. */
+    const val MAX_EVIDENCE_CHUNKS = 1024
 
     /** Absolute ceiling on an SOS message's UTF-8 byte length. [writeStr16]/[readStr16] can
      *  represent up to 65535 bytes, but nothing upstream ever intends a message that large — this

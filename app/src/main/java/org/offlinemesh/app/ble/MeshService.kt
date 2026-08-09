@@ -106,8 +106,7 @@ class MeshService : Service() {
     // setMeshActive(false) can reach it — a bulk transfer that happens to be mid-flight the moment
     // "Offline" is flipped on would otherwise keep running in the background, silently breaking
     // that toggle's "no radio activity" promise. P5 item 3 (docs/DECISIONS.md's own entry for this
-    // slice) — through v0.7.15-dev this same reasoning also covered a WifiDirectAccelerator field
-    // here, removed by decision 49 (Wi-Fi Direct's outright removal).
+    // slice).
     private lateinit var l2capTransport: L2capBulkTransport
 
     // Power tier: ACTIVE while the app is actually on-screen (favors responsiveness — you're
@@ -230,6 +229,27 @@ class MeshService : Service() {
 
     private var pruneJob: Job? = null
 
+    /** CR-24 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — periodic `connectionRegistry
+     *  .openLinkCount()` logging, prep for the next device-test round's own measurement: `§9.2 item
+     *  7`'s degree thresholds (`ForwardingPolicy.HIGH_DEGREE_TTL_CLAMP_FLOOR`/`JITTER_WIDE_FLOOR`,
+     *  `BeaconRadio.BROADCAST_TIER_DEGREE_BATCHING_FLOOR`, all 5-6) were derived from §5.3's stated
+     *  bullets, never from a measured real degree — if a real crowd session never actually reaches
+     *  them, the entire §5.4 adaptation layer is silently the identity function at every density,
+     *  and nobody would know without this number on record. Purely additive logging, no behavior
+     *  change — `DiagnosticsLog.event` is a debug-build-only no-op in release (see its own class
+     *  doc), so this costs nothing outside a debug session either way. 60s cadence: frequent enough
+     *  to see a trend across a session, far under the 512KB rotating log's own cap even over hours. */
+    private var degreeLogJob: Job? = null
+
+    private fun startDegreeLogging() {
+        degreeLogJob = serviceScope.launch {
+            while (isActive) {
+                DiagnosticsLog.event("degree", "openLinkCount=${connectionRegistry.openLinkCount()}")
+                delay(DEGREE_LOG_INTERVAL_MS)
+            }
+        }
+    }
+
     // Radars must never keep showing peer dots as if the mesh were live once the radio that feeds
     // them is off — cached positions/hops would otherwise sit on screen looking current when
     // nothing could possibly be arriving. All three radar screens read this one flow, so they go
@@ -325,6 +345,7 @@ class MeshService : Service() {
         }
         startPruning()
         startRadarTickLoop()
+        startDegreeLogging()
         // Once per process start, not periodic — see GroupRepository.sweepOrphanKeys' doc for why
         // that's sufficient (new orphans can only appear via a destructive schema migration, which
         // only happens across an app update, i.e. already a fresh start).
@@ -365,6 +386,7 @@ class MeshService : Service() {
     override fun onDestroy() {
         pruneJob?.cancel()
         radarTickJob?.cancel()
+        degreeLogJob?.cancel()
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
         beaconRadio.stop()
         // Same reasoning as the bulk-transport close two lines down, and the same gap it was
@@ -378,9 +400,9 @@ class MeshService : Service() {
         compassTracker.stop()
         // A bulk channel/listening socket left open is a real cost beyond just this service —
         // setMeshActive(false) already closes this on the "go offline" path, but process teardown
-        // (onDestroy) previously didn't for the WFD accelerator this once covered too, so a
-        // transfer mid-flight at the exact moment the service is destroyed could leave a radio
-        // resource open past the service's own lifetime.
+        // (onDestroy) needs its own explicit close too, or a transfer mid-flight at the exact
+        // moment the service is destroyed could leave a radio resource open past the service's
+        // own lifetime.
         l2capTransport.closeAll()
         serviceScope.cancel()
         super.onDestroy()
@@ -560,5 +582,8 @@ class MeshService : Service() {
         // PositionTracker check age against wall-clock "now") — see RadarTick's own doc for why a
         // periodic tick, not just reacting to location/heading changes, is necessary here.
         private const val RADAR_TICK_INTERVAL_MS = 1000L
+
+        // See startDegreeLogging's own doc (CR-24, PLAN-v2.md Part 10).
+        private const val DEGREE_LOG_INTERVAL_MS = 60_000L
     }
 }

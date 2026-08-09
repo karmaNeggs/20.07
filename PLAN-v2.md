@@ -6,6 +6,34 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09 — TRACKED TIER (CR-21..30) CLOSED OUT + PANIC-DELETE CUT FROM SCOPE. Committed as
+  v0.7.22-dev, compile-verified. This is the current top-of-file status; everything below is older.**
+  Second pass over Part 10, user-directed: "whatever can be done, do it" for the 10 items left in
+  the Tracked tier after Gate A/B shipped (decision 56), plus two explicit product calls.
+  - **CR-28 (shake-to-panic-delete) removed from this plan entirely** — the user's decision was to
+    cut it, not build it, so it's gone from Part 10 rather than left as a tracked gap. No code ever
+    existed for it (confirmed by grep before removal), so nothing to delete there; the original
+    product brief (`20072026.md`, outside this repo's own docs) was deliberately left untouched as
+    the historical record of what was originally asked for — flag if you also want that file edited,
+    it wasn't assumed.
+  - **CR-29 (plaintext evidence at rest) closed as working-as-intended, not a bug** — user's own
+    framing: the design goal is redundancy against single-device loss/seizure, not confidentiality
+    of evidence content (which isn't illegal to hold), so encrypting the reassembled file would work
+    against the actual goal. See CR-29's own entry.
+  - **CR-22/23/25/26/27 fixed**, **CR-24 partially** (its logging half shipped — `MeshService
+    .startDegreeLogging()`, 60s cadence, `DiagnosticsLog` tag `degree` — its threshold-re-derivation
+    half genuinely needs the round's own data and was correctly left for it), **CR-21 checked and
+    deliberately left unchanged** (already gated on real-hardware evidence per decision 18 that this
+    pass's own scope excludes — see CR-21's own entry for why "do it" meant "don't" here), **CR-30
+    is a meta-note with nothing separately actionable**. CR-23 turned out to be a corrected finding,
+    not a real gap — the DAO's own `@Query` already filtered `ttl > 0`; only a redundant Kotlin-side
+    re-filter was removed.
+  - 525 tests (unchanged — no new tests added this pass; all fixes were low-risk mechanical changes
+    already covered by the existing suite), 0 failures, detekt clean, both variants green
+    (`assembleDebug`/`assembleRelease`/`lintVitalRelease`), no `missing_rules.txt`. Version bumped to
+    v0.7.22-dev (versionCode 33), fresh debug APK built and `aapt`-confirmed. Full detail in
+    decision 57, `docs/DECISIONS.md`.
+
 - **2026-08-09 — FULL-CODEBASE REVIEW PASS. THE NEXT HARDWARE ROUND IS BLOCKED UNTIL PART 10's
   GATE A IS CLEAR. Read `Part 10` before doing anything else.** A read-through of all ~13.4k LOC of
   `app/src/main` (no code changed, nothing committed) found **30 issues**, of which **12 would
@@ -38,8 +66,10 @@ what's stale.
   degree signal that is corrupted (CR-4), a link-diversity mechanism that is switched off (CR-8),
   and a broadcast feature that cannot transmit (CR-1).
 
-- **2026-08-09 — GATE A + GATE B APPLIED AND COMPILE-VERIFIED (all 20 of CR-1..CR-20). NOT
-  COMMITTED.** Corrected same day: initially reported "not compile-verified" — no JDK was found on
+- **2026-08-09 — GATE A + GATE B APPLIED AND COMPILE-VERIFIED (all 20 of CR-1..CR-20). Committed as
+  v0.7.21-dev (decision 56, `docs/DECISIONS.md`) — see the newer bullet above this one for the
+  follow-up pass that closed out the Tracked tier too.** Corrected same day: initially reported
+  "not compile-verified" — no JDK was found on
   the standard `java_home` search path, but a Homebrew-installed JDK 17 (`/opt/homebrew/opt/openjdk@17`,
   matching this project's own `sourceCompatibility`) was actually present and just not on the
   non-interactive shell's PATH. With it: `./gradlew testDebugUnitTest detekt` found one real issue
@@ -2031,10 +2061,19 @@ the wrong statement is what stopped anyone looking.
 **Gates.**
 - **Gate A — blocks the device-test round.** Each of these either makes the round measure something
   that isn't real, degrades or crashes the session mid-run, or would send the next debugging session
-  chasing a phantom. 12 items.
-- **Gate B — fix in the same pass if cheap; each is small and low-risk.** 7 items.
-- **Tracked — after the round.** 11 items, including two genuine product decisions that are the
-  user's call, not an engineering one.
+  chasing a phantom. 13 items — all fixed and compile-verified 2026-08-09.
+- **Gate B — fix in the same pass if cheap; each is small and low-risk.** 7 items — all fixed and
+  compile-verified 2026-08-09.
+- **Tracked — after the round.** Originally 10 items, including two genuine product decisions that
+  were the user's call, not an engineering one. **Both decided and this whole tier closed out
+  2026-08-09** (a second pass, "whatever can be done, do it"): CR-28 (shake-to-panic-delete) was
+  never scoped and is now cut — removed from this plan entirely, not tracked as a gap; CR-29
+  (plaintext evidence at rest) is working as intended, not a bug — see its own entry. Of the
+  remaining 8, 6 were fixed (CR-22/23/25/26/27 code fixes, CR-24 partially — its logging half
+  shipped, its threshold-re-derivation half still needs the round's own data), 1 (CR-21) was checked
+  and deliberately left alone (already gated on hardware evidence that doesn't exist yet, per
+  decision 18 — see its own entry for why "do it" meant "don't" here), and 1 (CR-30) is a
+  meta-observation with nothing to separately action. **29 total findings, all dispositioned.**
 
 Suggested execution: land Gate A as one commit per logical cluster (they group naturally into
 crypto/wire, connection lifecycle, and trackers), Gate B as one cleanup commit, then rebuild the
@@ -2565,102 +2604,104 @@ leftover is caught at the gate rather than by inspection.
 
 ### Tracked — after the round
 
-#### CR-21 — `DedupCache` has zero production call sites
+#### CR-21 — `DedupCache` has zero production call sites — ⏸️ DELIBERATELY LEFT UNCHANGED 2026-08-09
 
-`DedupCache.kt` (50 LOC) plus `DedupCacheTest` are referenced only by the simulator
-(`sim/ForwardingPlaneEngine`, `sim/PersistentForwardingEngine`). `RelayResponder.kt:649` documents it
-as deliberately unwired (decision 18), so the hot flood-dedup path goes to Room's `seenDao` on every
-relayed SOS — the opposite of §9.2 item 6's intent ("the fast, size-bounded, in-memory layer
-flood-forwarding needs on the hot receive path"). This is a real open design item, not just dead
-code: either wire it and derive the LRU size per §9.2 item 6, or record that the Room path is
-sufficient at this scale and delete the class. The round's own SOS timing data is the right input to
-that decision, which is why it's tracked rather than Gate A.
+**Checked, not fixed, on purpose.** During the 2026-08-09 second pass ("whatever can be done, do it"
+for CR-21..30) this was the one item where "doing it" would mean reversing a considered decision
+without the evidence that decision was itself waiting on. Decision 18 (`docs/DECISIONS.md`) left
+`DedupCache` deliberately unwired for a stated reason: `seenDao` (Room-backed) is already
+authoritative, wiring a second in-memory layer on top would be "genuinely redundant for THIS gate,
+not wrong, just unneeded complexity," and the trigger condition for wiring it in was explicit —
+*"if DB-query latency on the flood path ever proves to matter on real hardware."* That evidence
+doesn't exist yet (hardware testing is this pass's own excluded scope), so wiring it now would be
+guessing at exactly the thing decision 18 said to wait for. Left as-is: real, tested, ready to drop
+in the moment the round's own data calls for it — see decision 18's full reasoning before touching
+this.
 
-#### CR-22 — `FountainDecoder`'s cost is not consistent with `MAX_EVIDENCE_CHUNKS = 4096`
+#### CR-22 — `FountainDecoder`'s cost is not consistent with `MAX_EVIDENCE_CHUNKS = 4096` — ✅ FIXED 2026-08-09
 
-`FountainCode.kt` uses a dense construction (~k/2 source symbols per repair symbol) with Gaussian
-elimination: `clearPivotFromOtherRows` is O(k) per insert, each step XOR-ing `symbolSize` bytes, so a
-full decode is O(k² · symbolSize). At the realistic k≈200 that's ~16 MB of XOR — fine, and matches
-the class doc's own measured justification for dense-over-sparse. At the *permitted* ceiling of
-`MAX_EVIDENCE_CHUNKS = 4096` it is ~6.7 GB of byte operations, all under the single instance-wide
-`decoderMutex` (`RelayEngine.kt:125`), on the GATT receive path. That ceiling was sized as a **memory**
-guard (its doc reasons in bytes: "4096 chunks × 400 bytes = 1.6MB"); it was never checked against the
-decoder's **time** cost. A hostile or buggy header claiming `totalChunks = 4096` is a cheap way to
-stall all evidence decode on every device that relays it. **Fix candidates:** lower
-`MAX_EVIDENCE_CHUNKS` to something the decoder can actually handle (k≈1024 → ~400 KB items, still
-comfortably above `EvidenceCapture`'s 640px JPEGs), or make `decoderMutex` per-evidence-id, or both.
+`MAX_EVIDENCE_CHUNKS` lowered 4096 → 1024 (`MeshFrameCodec.kt`). Worst-case decode cost drops from
+~6.7 GB to ~419 MB of XOR work — over 16× smaller — while staying ~5× above `EvidenceCapture`'s
+realistic 640px/quality-45 JPEGs (~200 chunks; 1024 chunks ≈ 400 KB). Chose lowering the ceiling over
+making `decoderMutex` per-evidence-id (the other fix candidate) — smaller diff, no new lock
+granularity to reason about, and the ceiling itself was never justified against decode time in the
+first place, only memory. `FountainCodeTest`'s own k=1000 smoke test comment updated to match. Not
+compile-verified against hardware timing (no device to measure real XOR throughput on), but the
+arithmetic itself is a straight multiplication, not something a device can disagree with.
 
-#### CR-23 — `relayableSos`/`relayableEvidenceMeta` filter in Kotlin, not SQL
+#### CR-23 — `relayableSos`/`relayableEvidenceMeta` filter in Kotlin, not SQL — ✅ FIXED 2026-08-09 (corrected finding)
 
-`RelayEngine.kt:529-531` — `dao.getRelayable().filter { it.ttl > 0 }`. Belongs in the `@Query`.
-Trivial, but it runs per catalog-filter exchange per connection.
+**Correction:** the original finding assumed the DAO returned unfiltered rows. It doesn't —
+`SosDao.getRelayable()`/`EvidenceDao.getRelayable()` (`Daos.kt:79,192`) already carry
+`WHERE ttl > 0` in their own `@Query`. `RelayEngine.kt`'s `.filter { it.ttl > 0 }` was a harmless
+but pointless *re*-filter on an already-filtered result, not a missing SQL optimization. Removed the
+redundant Kotlin-side filter; the DAO's own SQL is now the sole authority.
 
-#### CR-24 — `ForwardingPolicy`'s degree thresholds may never be reached
+#### CR-24 — `ForwardingPolicy`'s degree thresholds may never be reached — 🔶 PARTIALLY DONE (logging shipped 2026-08-09; threshold re-derivation still needs the round)
 
-`JITTER_WIDE_FLOOR = 5` and `HIGH_DEGREE_TTL_CLAMP_FLOOR = 6` (`ForwardingPolicy.kt:38-39`), against
-`maxConcurrentClientConnections = 3` (`MeshGattClient.kt:61`) and a **soft, unenforced**
-`maxConcurrentServerConnections = 4` (`MeshGattServer.kt:78`, enforcement disabled by decision 4). TTL
-clamping therefore needs ≥3 simultaneous inbound links on top of a full outbound set. **Action: this
-is a measurement the round should produce, not a fix to guess at now.** Log
-`connectionRegistry.openLinkCount()` periodically to `DiagnosticsLog` during the round. If it sits at
-3-4 in a real crowd, the entire §5.4 adaptation layer is the identity function at all densities —
-a plausible-looking silent non-implementation — and the thresholds need re-deriving from measured
-degree rather than from §5.3's stated bullets. Note CR-4 corrupts this signal upward, so it must be
-fixed first for the measurement to mean anything.
+The measurement groundwork is done: `MeshService.startDegreeLogging()` logs
+`connectionRegistry.openLinkCount()` to `DiagnosticsLog` every 60s for the whole session, tagged
+`degree` — ready for the round without any further action. **What genuinely still needs the round's
+own data, and was correctly left alone:** whether `JITTER_WIDE_FLOOR = 5`/`HIGH_DEGREE_TTL_CLAMP_FLOOR
+= 6` (`ForwardingPolicy.kt:38-39`) are ever actually reached given `maxConcurrentClientConnections = 3`
++ an unenforced server cap of 4 (`MeshGattServer.kt:78`). Re-deriving those thresholds now, with no
+measured degree to derive them from, would be exactly the "guess at now" this entry originally warned
+against — the logging exists so the NEXT session can answer this from real numbers instead. CR-4's
+fix (this same pass) already removed the corruption that would have made this signal meaningless.
 
-#### CR-25 — `JoinCode` expiry is a 4-byte int (Y2038)
+#### CR-25 — `JoinCode` expiry is a 4-byte int (Y2038) — ✅ FIXED 2026-08-09
 
-`JoinCode.encode` writes `buf.putInt(expiresAtEpochSec.toInt())` and `decode` reads
-`buf.int.toLong()`. After 2038-01-19 the value goes negative and every code fails the
-`expiresAtEpochSec <= nowSec` check — all group creation and joining stops working. `VERSION` is
-already a wire field, so a v3 with a wider expiry is cheap now and expensive later.
+`expiresAtEpochSec` widened from a 4-byte `Int` to an 8-byte `Long` (`putInt`/`buf.int` →
+`putLong`/`buf.long`), `JoinCode.VERSION` bumped 2 → 3 (deliberately not wire-compatible with v2,
+same "acceptable given zero deployed users" precedent v2 itself already set when it broke v1
+compatibility). Existing `JoinCodeTest` round-trip/rejection tests pass unchanged — none hardcoded
+the old 4-byte layout in a way sensitive to the width change.
 
-#### CR-26 — Stale docs that contradict the code next to them
+#### CR-26 — Stale docs that contradict the code next to them — ✅ FIXED 2026-08-09
 
-These are worse than tombstones, because each states a property the code does not have:
-- `RelayResponder.checkSenderKeyPin`'s KDoc (`:1472-1487`) still describes
-  `SenderKeyPinResult.OK` / `MISMATCH` — neither exists — and asserts the app does not "silently
-  trust the new key". The enum is `FIRST_SIGHT/UNCHANGED/CHANGED` and the behaviour has been
-  *re-pin and continue* since the live-testing fix documented 20 lines above it. The doc and the
-  function directly contradict each other.
-- `BulkChannel.kt:26` has a dangling KDoc link `[WifiDirectAccelerator.handshakeToken]` to a class
-  deleted by decision 49.
-- `RelayResponder.kt:395` describes a live code path as pushing "the WFD cap" — it pushes the L2CAP
-  cap.
+All three corrected:
+- `RelayResponder.checkSenderKeyPin`'s KDoc rewritten to name the real
+  `FIRST_SIGHT`/`UNCHANGED`/`CHANGED` enum and describe the actual *re-pin and continue* behaviour,
+  instead of a two-value `OK`/`MISMATCH` result that hasn't existed since the live-testing fix this
+  same doc block sits 20 lines below.
+- `BulkChannel.kt:26`'s dangling KDoc `[...]` link to the deleted `WifiDirectAccelerator` class
+  changed to plain backticks, matching every other reference to a retired class in that same file.
+- `RelayResponder.kt`'s "WFD cap" mislabel corrected to "L2CAP cap" (the field it actually describes
+  since decision 49).
 
-#### CR-27 — Tombstone-comment volume
+#### CR-27 — Tombstone-comment volume — ✅ TRIMMED 2026-08-09 (partial, by design)
 
-~40 grep hits across `app/src` reference removed subsystems (`WifiDirect*`, `PeerDeliveryTracker`,
-`Manifest.totalChunks`, `EvidChunk`, `encodeBitset`, `chunksByIndexes`). The convention earns its
-keep for **wire-byte retirements** — "never reuse `0x19`/`0x1A`/`0x1B`" in `MeshFrameCodec` is
-load-bearing and must stay. For deleted Kotlin classes it does not: git already has that history, and
-the KDoc links now dangle (CR-26). Proposal: keep the `MeshFrameCodec` frame-byte tombstones and the
-`VERSION` changelog, delete the rest.
+Removed standalone "X lived here through vN — deleted by decision M" tombstone blocks with no other
+content: `HomeScreen.kt` (`WifiDirectRow`), `RelayEngine.kt` (`symbolsByEsi`, plus a parenthetical in
+`evidenceMeta`'s doc), `RelayResponder.kt` (two blocks — the WFD accelerator subsystem note and the
+`handleWifiDirectCap`/etc. note), and trimmed WFD-specific footnotes out of two otherwise-still-valid
+`MeshService.kt` comments (`l2capTransport`'s field-placement reasoning, `onDestroy`'s bulk-channel
+close reasoning) and one `GroupRepository.kt` comment (the lazy-`keyStore` reasoning). **Deliberately
+NOT touched:** `MeshFrameCodec.kt`'s frame-byte retirement notes and `VERSION` changelog (load-bearing
+— "never reuse this wire byte" genuinely needs to live at the point someone might reuse it);
+`L2capBulkTransport.kt`'s and `BulkChannel.kt`'s comparative-design-reasoning mentions of the retired
+`WifiDirectAccelerator` (these explain *why* the current class is shaped the way it is, not just that
+something used to exist — removing them would delete real reasoning, not just noise); the manifest's
+own WFD-permission-removal comment (explains an absence, preventing someone from re-adding permissions
+unnecessarily); `RelayEngine.kt`/`RelayResponder.kt`'s `PeerDeliveryTracker` mentions (comparative
+design reasoning, same category). The distinction applied throughout: delete a tombstone that is
+*only* a tombstone; keep a comment that happens to mention a deleted class while doing real
+explanatory work.
 
-#### CR-28 — Shake-to-hide / panic-delete is not implemented
+#### CR-29 — Reassembled evidence is stored as plaintext at rest — ✅ RESOLVED 2026-08-09, not a bug
 
-`20072026.md`, the original brief, lists *"tool is hidden or can be deleted when phone shakes"* as a
-headline requirement. A grep for shake/panic/wipe/duress across `app/src/main` returns nothing but
-incidental prose. What exists is `AppIdentity`'s decoy launcher-alias switching (good) and
-`FLAG_SECURE` on the Activity (good, and correctly reasoned in `MainActivity.kt:160-169`). The panic
-gesture itself is absent from both the code and Part 7's roadmap — it was never scoped, not
-deliberately dropped. **This is a product decision to make explicitly:** build it as its own phase,
-or record in §9.1 that it's cut and why. Leaving it silently missing is the only bad option.
+**Decision (2026-08-09, user): working as intended, closed.** The threat model this app actually
+optimizes for is loss of a single device, not confidentiality of evidence at rest — redundancy
+across every phone that has relayed or received a copy is the anti-single-point-of-failure design
+(the same reason content floods to every relay, not just the origin), and encrypting the
+reassembled file would work against that goal for no compensating benefit: the content itself isn't
+illegal to hold, so there's nothing to hide from a legal standpoint, only something to keep from
+being lost if one phone is seized or destroyed. `PositionTracker`'s "nothing durable to find"
+property was never meant to extend to evidence — that class's own doc already scopes the claim to
+positions specifically. No code change; this closes the original finding rather than acting on
+either option it proposed.
 
-#### CR-29 — Reassembled evidence is stored as plaintext at rest
-
-`RelayEngine.createEvidence` (`:219-221`) and `maybeCompleteFromSymbol` (`:461-463`) both write raw
-plaintext to `filesDir/evidence/`. `decryptedThumbnail`'s own doc (`:566-573`) reasons explicitly
-about not adding *"a second at-rest-plaintext surface"* — acknowledging the first one exists.
-`PositionTracker`'s class doc advertises "nothing to wipe if seized, because there's nothing durable
-to find"; that property does not extend here, and the full-resolution photos are the most
-incriminating artifact the app can hold. **Product decision:** either encrypt at rest and decrypt on
-view (costs a re-decrypt per view and complicates the `FileProvider` hand-off to an external viewer),
-or document the exposure honestly in the README's security model alongside the decoy/FLAG_SECURE
-claims. Related to CR-28 — a panic-delete is much less useful if the evidence directory is readable
-without it.
-
-#### CR-30 — On doc-versus-code drift generally
+#### CR-30 — On doc-versus-code drift generally — ↔️ APPLIED, NOT SEPARATELY ACTIONABLE
 
 CR-1, CR-2, CR-8 and CR-11 share a shape: **prose next to the code asserts a property the code does
 not have, and the prose is why nobody looked.** In three of those four the drift was introduced by the
@@ -2672,6 +2713,12 @@ test that fails when it stops being true over a paragraph that says it is. `§6.
 assertions framing already argues exactly this for the simulator; the same argument applies to the
 production code's own stated invariants.
 
+**Note (2026-08-09):** this is a meta-observation, not a standalone fix — nothing to check off on its
+own. It was already acted on twice this same session: CR-26 corrected exactly this class of drift
+where found, and this lesson is the reason CR-23's "fix" turned into a correction of the original
+finding instead (re-verified against source rather than assumed) once the DAO's own `@Query` turned
+out to already do the filtering the finding claimed was missing.
+
 ---
 
 ### Resume checklist
@@ -2679,30 +2726,31 @@ production code's own stated invariants.
 Tick these in order; each is independently committable.
 
 - [x] **CR-1** `MAC_LEN` → `CryptoUtils.MAC_TAG_LEN` (single source of truth), tests that asserted the
-      bug corrected — 2026-08-09, compile-verified 2026-08-09. No `VERSION` bump: Tier B's beacon has no
+      bug corrected — compile-verified 2026-08-09. No `VERSION` bump: Tier B's beacon has no
       version byte at all (checked before assuming decision 47/48's precedent applied here).
-- [x] **CR-2** `dismantleGroup` deletes courier envelopes — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-3** MTU-aware padding + padded-size budget check — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-2** `dismantleGroup` deletes courier envelopes — compile-verified 2026-08-09.
+- [x] **CR-3** MTU-aware padding + padded-size budget check — compile-verified 2026-08-09.
       *Low-MTU test setup still not run on real hardware* — unit tests cover the arithmetic, not a
       real constrained radio.
-- [x] **CR-4** `MeshGattServer.stop()` symmetric teardown — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-5** `handledGatts.remove(gatt)` on both cleanup paths — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-6** `HopTracker` pruning + `clearForGroup`/`pruneOrphaned` — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-7** `TrickleTimer` synchronisation — 2026-08-09, compile-verified 2026-08-09.
+- [x] **CR-4** `MeshGattServer.stop()` symmetric teardown — compile-verified 2026-08-09.
+- [x] **CR-5** `handledGatts.remove(gatt)` on both cleanup paths — compile-verified 2026-08-09.
+- [x] **CR-6** `HopTracker` pruning + `clearForGroup`/`pruneOrphaned` — compile-verified 2026-08-09.
+- [x] **CR-7** `TrickleTimer` synchronisation — compile-verified 2026-08-09.
 - [x] **CR-8** seed `heldRssi` at `attemptStarted` (plus a follow-up leak in the connect-timeout
-      watchdog, found while fixing this one) — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-9** `CoroutineExceptionHandler` on `serviceScope` — 2026-08-09, compile-verified 2026-08-09.
+      watchdog, found while fixing this one) — compile-verified 2026-08-09.
+- [x] **CR-9** `CoroutineExceptionHandler` on `serviceScope` — compile-verified 2026-08-09.
       Chose option (b) from the original entry (general hardening) over (a) (nullable `senderIdFor`),
       since (a) would have rippled through 13 call sites for a narrower fix.
-- [x] **CR-10** bound `sizeBits` in `decode` — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-11** key `subscribedDevices` by address — 2026-08-09, compile-verified 2026-08-09.
-- [x] **CR-12** clamp hop-derived staleness/skew slack — 2026-08-09, compile-verified 2026-08-09. Applied to
+- [x] **CR-10** bound `sizeBits` in `decode` — compile-verified 2026-08-09.
+- [x] **CR-11** key `subscribedDevices` by address — compile-verified 2026-08-09.
+- [x] **CR-12** clamp hop-derived staleness/skew slack — compile-verified 2026-08-09. Applied to
       all THREE shape-alike functions (added `HopTracker.effectiveStaleMs`, missed in the original
       finding), not just the two named originally.
-- [x] **CR-13** legacy-scan `ScanFilter` + degree-gated report delay — 2026-08-09, not compile-
-      verified. **Decision: landed it** (not scoped around) — still explicitly flagged in its own
-      Part 10 entry as the one item needing a dedicated live round before being trusted, same as this
-      whole pass needing `./gradlew test detekt` before the device-test round can start at all.
+- [x] **CR-13** legacy-scan `ScanFilter` + degree-gated report delay — compile-verified 2026-08-09.
+      **Decision: landed it** (not scoped around) — compiles and passes the full suite, but still
+      explicitly flagged in its own Part 10 entry as the one item needing a dedicated LIVE round
+      (real chipsets, real discovery latency) before being trusted, since that's a property no
+      compiler can confirm.
 - [x] Gate B: **CR-14** … **CR-20** — all 7 applied 2026-08-09, compile-verified 2026-08-09. CR-15 was
       corrected (overstated finding, only the trivial half was real) before being applied — see its
       own Part 10 entry.
@@ -2711,6 +2759,12 @@ Tick these in order; each is independently committable.
       `missing_rules.txt`).
 - [x] Version bump (v0.7.21-dev, versionCode 32) + fresh debug APK `aapt`-confirmed + committed
       (decision 56, `docs/DECISIONS.md`) — 2026-08-09
-- [ ] Add `openLinkCount` periodic logging for **CR-24**'s measurement before the round starts
-- [ ] Run the device-test round
-- [ ] Post-round: **CR-21** … **CR-30**, then P7
+- [x] `openLinkCount` periodic logging for **CR-24**'s measurement — shipped as part of the
+      CR-21..30 pass (decision 57), `MeshService.startDegreeLogging()`, ready before the round starts.
+- [x] **CR-21..CR-30 dispositioned** (decision 57, 2026-08-09) — CR-22/23/25/26/27 fixed, CR-24
+      partial (logging shipped, threshold re-derivation still needs round data), CR-21 deliberately
+      left alone (gated on decision 18's own hardware-evidence condition), CR-28 cut from scope,
+      CR-29 closed as intended, CR-30 meta-only.
+- [x] Version bump (v0.7.22-dev, versionCode 33) + fresh debug APK `aapt`-confirmed + committed
+      (decision 57, `docs/DECISIONS.md`) — 2026-08-09
+- [ ] Run the device-test round, then P7

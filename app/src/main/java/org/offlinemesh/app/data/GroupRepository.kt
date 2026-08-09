@@ -10,10 +10,10 @@ class GroupRepository(context: Context) {
     private val db = AppDatabase.get(context)
     // Lazy, not eager: building this touches the Android Keystore (via GroupKeyStore's
     // EncryptedSharedPreferences/MasterKey), real work that's wasted if a GroupRepository is ever
-    // constructed without actually reading/writing a key this session — and, found while testing
-    // WifiDirectHandoffCoordinator, the Keystore provider isn't available under Robolectric at
-    // all (NoSuchAlgorithmException), so eager construction made GroupRepository impossible to
-    // construct in that test environment even though none of its exercised code paths ever touch
+    // constructed without actually reading/writing a key this session — and the Keystore provider
+    // isn't available under Robolectric at all (NoSuchAlgorithmException), so eager construction
+    // made GroupRepository impossible to construct in that test environment even though none of
+    // its exercised code paths ever touch
     // key storage.
     private val keyStore by lazy { GroupKeyStore(context) }
     val groupDao = db.groupDao()

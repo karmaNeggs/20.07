@@ -247,11 +247,14 @@ class FountainCodeTest {
 
     @Test
     fun `bounded-time smoke test at a moderately large k does not blow up quadratically`() {
-        // Not the full MAX_EVIDENCE_CHUNKS=4096 ceiling (kept out of the regular suite to avoid a
-        // slow/flaky CI run) -- see FountainCode's own class doc: full-4096 decode cost is real but
+        // MeshFrameCodec.MAX_EVIDENCE_CHUNKS was 4096 through CR-22 (PLAN-v2.md Part 10,
+        // 2026-08-09), lowered to 1024 once its O(k^2 * symbolSize) decode cost was checked against
+        // real hardware time, not just memory -- see that constant's own doc. k=1000 here sits right
+        // at the new ceiling (close enough to be informative without needing the full literal value,
+        // and short of it to keep this test from becoming the exact boundary case another test
+        // already owns) -- see FountainCode's own class doc: decode cost at this scale is real but
         // explicitly NOT hardware-confirmed yet, same as every other unconfirmed slice in this
-        // project. This just catches an outright algorithmic blowup early, at a size close enough
-        // to be informative.
+        // project. This just catches an outright algorithmic blowup early.
         val symbolSize = 64
         val k = 1000
         val data = randomBytes(k * symbolSize, seed = 77)

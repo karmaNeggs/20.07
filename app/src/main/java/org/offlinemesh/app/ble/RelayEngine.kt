@@ -542,9 +542,13 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
 
     // ---------- what to offer a peer we just connected to ----------
 
-    suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable().filter { it.ttl > 0 }
+    // CR-23 (PLAN-v2.md Part 10, 2026-08-09) — the `.filter { it.ttl > 0 }` here used to duplicate
+    // a predicate SosDao.getRelayable()/EvidenceDao.getRelayable() already apply in their own
+    // `@Query`s (`WHERE ttl > 0`, see Daos.kt) — harmless (both sides agree), but dead weight re-run
+    // on every catalog-filter exchange per connection. Removed; the DAO's own SQL is authoritative.
+    suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable()
 
-    suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable().filter { it.ttl > 0 }
+    suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable()
 
     /** P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3's "thumbnail-first, full-res
      *  pull-on-demand") — the narrower set actually eligible to have its FULL chunk set solicited,
@@ -607,14 +611,8 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun heldEvidenceIds(): List<String> = evidenceDao.allIds()
 
     /** Looks up one evidence item's header by id — used by `RelayResponder.pushFullResRequestNow`
-     *  to re-derive a `groupId` from just an `evidenceId`. (Through v0.7.15-dev this doc also named
-     *  `WifiDirectHandoffCoordinator` as a caller; decision 49, docs/DECISIONS.md, removed Wi-Fi
-     *  Direct outright, so this is now this function's only caller.) */
+     *  to re-derive a `groupId` from just an `evidenceId`. */
     suspend fun evidenceMeta(id: String): EvidenceEntity? = evidenceDao.get(id)
-
-    // symbolsByEsi (mirrored the retired chunksByIndexes' shape) lived here through v0.7.15-dev —
-    // deleted by decision 49 (docs/DECISIONS.md) alongside its only caller,
-    // WifiDirectHandoffCoordinator's own positional-index handoff path.
 
     suspend fun nicknamesForGroup(groupId: String): List<NicknameEntity> = nicknameDao.getForGroup(groupId)
 
