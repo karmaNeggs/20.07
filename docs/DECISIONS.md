@@ -3401,3 +3401,63 @@ documented; this wiring can't be exercised without a real `BluetoothSocket`.
 variants green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`), no `missing_rules.txt`.
 Version bumped to v0.7.18-dev (versionCode 29), fresh debug APK built and `aapt`-confirmed. This is
 the build that should carry padded bulk-pipe traffic into the next hardware round. Not pushed.
+
+## 53. Scoping pass (no code): senderId is global, not per-group — a real privacy gap in P0b
+
+Found this session, from the user directly asking whether the fallback display id shown for a
+message sender ("default device id") was a security concern. It is, and worse than a display-label
+issue.
+
+**The finding.** `senderId` — used everywhere (`SosEntity`/`EvidenceEntity`/`NicknameEntity`,
+`Frame.Presence`/`Frame.Position`'s equivalent, hop-tracking, `PeerIdentityResolver`'s stable key)
+— is `GroupRepository.deviceId`, a single random UUID generated once per app install and reused
+identically across every group a device joins. `PeerIdentityResolver`'s own class doc already
+stated this plainly, in passing, without flagging it as a problem: "a random-per-install id...
+global across a device's groups, and already sent in cleartext on presence heartbeats." Confirmed
+by reading `encodePresenceFrame`/`encodePosition` directly: `senderId` is written into the
+CLEARTEXT frame envelope (needed so a non-member relay can hop-track/dedup without a key) — meaning
+any passive BLE scanner in range, group member or not, can read and track this exact ID with zero
+decryption.
+
+**Why this matters, precisely.** §5.2 (`PLAN-v2.md`) and decision 15 (P0b) both describe the design
+goal as "keys on the per-group Ed25519 pubkey... scoped per-group so it cannot correlate a device
+across groups." The per-group Ed25519 SIGNING key genuinely is scoped correctly
+(`ensureSenderIdentity` generates one per (device, group)). But `senderId` — the value it travels
+alongside, used for display, hop-tracking, and hop/hop pinning — is not; it's the flat global
+`deviceId`. Two real consequences: cross-group correlation by any member of two overlapping groups
+(comparing the same `senderId` in both), and passive tracking by non-members entirely, since it's
+broadcast in the clear regardless of group membership.
+
+**Corrects something said earlier in this same session**: resolving `PLAN-v2.md` §9.3 item 3, I
+described the per-group identity work as already fully closing the "cannot correlate a device
+across groups" goal. That was wrong — I'd verified the signing key's scope but not `senderId`'s own
+value, and conflated the two. Caught this turn by actually reading `GroupRepository.deviceId`'s
+definition and `encodePresenceFrame`'s wire encoding before answering the user's question, rather
+than reasoning from memory of the earlier (correct, but incomplete) P0b review.
+
+**The user's own first proposed fix (a single global, once-set nickname instead of per-group) was
+weighed and rejected**: nicknames are a cosmetic display label, unrelated to the actual leaking
+field, and a global nickname would make cross-group correlation *easier* for human members (compare
+names directly, no decryption needed) without touching the cleartext broadcast problem at all.
+
+**Scoped fix (not yet implemented, this decision is scoping only):** new
+`GroupRepository.senderIdFor(groupId): String`, derived from the existing per-group Ed25519 public
+key (`sha256Hex(publicKey).take(16)`) — no new key generation or storage, purely computed. Keeps
+the actual property `PeerIdentityResolver`/`HopTracker` need (stability across BLE address rotation
+within a group) while finally matching what §5.2 always specified. 12 known call sites across
+`RelayEngine.kt`/`RelayResponder.kt`/`BeaconRadio.kt` need `repo.deviceId` replaced with
+`repo.senderIdFor(groupId)` — full list in `PLAN-v2.md`'s P0b-correction write-up.
+`BeaconRadio.advertiseJitterMs`'s own `deviceId` use is explicitly NOT in scope — a purely local,
+never-transmitted radio-timing offset, no correlation risk.
+
+**No `MeshFrameCodec.VERSION` bump needed** — `senderId`'s wire byte layout doesn't change, only
+its value, same category as decision 39.
+
+**Real, one-time transition cost, stated honestly**: every existing group membership's `senderId`
+changes on upgrade, so existing peers see what looks like a brand-new sender once — hop-tracking
+resets, a previously-set nickname stops resolving until re-broadcast. Same class of harmless
+discontinuity as a fresh reinstall/rejoin, which this session's own hardware round (decision 52)
+already exercised without incident (eg3's mid-test rejoin).
+
+No code changed this decision — scoping only, per the user's own "scope it" request, ahead of an
+explicit go-ahead to implement. `PLAN-v2.md`'s P0b section carries the full write-up.
