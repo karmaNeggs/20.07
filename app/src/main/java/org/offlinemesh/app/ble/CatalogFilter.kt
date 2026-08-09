@@ -16,9 +16,10 @@ import java.util.BitSet
  * other side computes the deficit live, right then — so there's nothing to evict and nothing that
  * gets stale.
  *
- * The [MeshFrameCodec.encodeManifest]/[MeshProtocol.encodeBitset] bitset already used for evidence
- * chunks doesn't generalize to this problem, because a chunk count is a small, fixed, mutually-known
- * number — the SOS+evidence-header+nickname catalog has no such bound. A Bloom filter is the
+ * The old have-bitset this app used for evidence chunks through v0.7.13-dev (retired by decision 47,
+ * `docs/DECISIONS.md`, when fountain coding replaced it) never generalized to this problem anyway,
+ * because a chunk count is a small, fixed, mutually-known number — the SOS+evidence-header+nickname
+ * catalog has no such bound. A Bloom filter is the
  * standard tool for compactly advertising an unbounded, evolving set; bitchat's own protocol
  * (github.com/permissionlesstech/bitchat, WHITEPAPER.md §6.3) assigns the same role to a Golomb-Coded
  * Set for its analogous public-history gossip sync. A plain Bloom filter is used here instead of a

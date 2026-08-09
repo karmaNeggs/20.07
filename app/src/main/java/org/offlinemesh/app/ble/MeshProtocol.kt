@@ -333,33 +333,9 @@ object MeshProtocol {
     // Relay frame-type constants live in MeshFrameCodec (the one place that encodes/decodes them) —
     // deliberately not duplicated here, where they used to drift out of sync.
 
-    /** 1 bit per chunk index, 1 = have it. Compact even for thousands of chunks (~650B for 5000).
-     *  Coerced against [MeshFrameCodec.MAX_EVIDENCE_CHUNKS] as defence in depth — the primary guard
-     *  is at [MeshFrameCodec.decode], which every wire-sourced totalChunks value must pass through,
-     *  but this is also reachable directly from RelayEngine using a locally-persisted value, so the
-     *  allocation itself stays bounded regardless of caller. */
-    fun encodeBitset(haveIndexes: Set<Int>, totalChunks: Int): ByteArray {
-        val bounded = totalChunks.coerceIn(0, MeshFrameCodec.MAX_EVIDENCE_CHUNKS)
-        val bytes = ByteArray((bounded + 7) / 8)
-        for (i in haveIndexes) {
-            if (i < 0 || i >= bounded) continue
-            bytes[i / 8] = (bytes[i / 8].toInt() or (1 shl (i % 8))).toByte()
-        }
-        return bytes
-    }
-
-    /** Same bound as [encodeBitset] — a negative [totalChunks] would otherwise silently "succeed"
-     *  with an empty result (`0 until totalChunks` is an empty range for negative values) instead
-     *  of being treated as malformed. */
-    fun decodeBitset(bytes: ByteArray, totalChunks: Int): Set<Int> {
-        val bounded = totalChunks.coerceIn(0, MeshFrameCodec.MAX_EVIDENCE_CHUNKS)
-        val result = mutableSetOf<Int>()
-        for (i in 0 until bounded) {
-            if (i / 8 >= bytes.size) break
-            if ((bytes[i / 8].toInt() shr (i % 8)) and 1 == 1) result.add(i)
-        }
-        return result
-    }
+    // encodeBitset/decodeBitset (the FRAME_MANIFEST have-bitset) lived here through v0.7.13-dev —
+    // removed by decision 47 (docs/DECISIONS.md), which replaces indexed chunks + manifest +
+    // have-bitset + per-peer deficit computation with FountainCode.kt's own encode/decode.
 }
 
 /** Live, in-memory distance-vector table: how many relay-hops away is my nearest group member / an

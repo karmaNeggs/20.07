@@ -216,24 +216,25 @@ interface EvidenceDao {
     suspend fun getFullResRelayable(): List<EvidenceEntity>
 }
 
+// P5 item 2 slice 2 (docs/DECISIONS.md decision 47): renamed from EvidenceChunkDao, chunkIndex ->
+// esi, table evidence_chunks -> evidence_symbols. receivedIndexes/receivedCount dropped — no longer
+// meaningful once completion is driven by FountainDecoder rank, not a positional count.
 @Dao
-interface EvidenceChunkDao {
+interface EvidenceSymbolDao {
+    // Long, not Unit — same reasoning as EvidenceDao.insert above: -1 means IGNORE dropped the row
+    // because this (evidenceId, esi) pair was already stored, which RelayEngine.ingestSymbol uses
+    // to decide whether this symbol is genuinely new STORAGE (worth relaying onward to a different
+    // peer) independent of whether it was also new RANK to this device's own decoder.
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    suspend fun insert(chunk: EvidenceChunkEntity)
+    suspend fun insert(symbol: EvidenceSymbolEntity): Long
 
-    @Query("SELECT chunkIndex FROM evidence_chunks WHERE evidenceId = :evidenceId ORDER BY chunkIndex ASC")
-    suspend fun receivedIndexes(evidenceId: String): List<Int>
+    @Query("SELECT * FROM evidence_symbols WHERE evidenceId = :evidenceId ORDER BY esi ASC")
+    suspend fun allSymbols(evidenceId: String): List<EvidenceSymbolEntity>
 
-    @Query("SELECT COUNT(*) FROM evidence_chunks WHERE evidenceId = :evidenceId")
-    suspend fun receivedCount(evidenceId: String): Int
+    @Query("SELECT * FROM evidence_symbols WHERE evidenceId = :evidenceId AND esi = :esi LIMIT 1")
+    suspend fun getSymbol(evidenceId: String, esi: Int): EvidenceSymbolEntity?
 
-    @Query("SELECT * FROM evidence_chunks WHERE evidenceId = :evidenceId ORDER BY chunkIndex ASC")
-    suspend fun allChunks(evidenceId: String): List<EvidenceChunkEntity>
-
-    @Query("SELECT * FROM evidence_chunks WHERE evidenceId = :evidenceId AND chunkIndex = :index LIMIT 1")
-    suspend fun getChunk(evidenceId: String, index: Int): EvidenceChunkEntity?
-
-    @Query("DELETE FROM evidence_chunks WHERE evidenceId = :evidenceId")
+    @Query("DELETE FROM evidence_symbols WHERE evidenceId = :evidenceId")
     suspend fun deleteForEvidence(evidenceId: String)
 }
 

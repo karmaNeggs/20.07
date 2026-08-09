@@ -6,7 +6,6 @@ import kotlinx.coroutines.launch
 import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.ble.RelayEngine
 import org.offlinemesh.app.crypto.CryptoUtils
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import java.security.SecureRandom
 
 /**
@@ -118,7 +117,7 @@ class WifiDirectHandoffCoordinator(
         armTimeout()
         serviceScope.launch {
             accelerator.beginAsResponder(peerAddress, token = acceptMac, readyAtEpochMs = readyAt) { chunk ->
-                relay.ingestChunk(chunk)
+                relay.ingestSymbol(chunk.evidenceId, chunk.esi, chunk.data)
             }
             active = null
         }
@@ -143,7 +142,8 @@ class WifiDirectHandoffCoordinator(
             return
         }
         serviceScope.launch {
-            val chunks = relay.chunksByIndexes(transfer.evidenceId, transfer.deficitIndexes)
+            val chunks = relay.symbolsByEsi(transfer.evidenceId, transfer.deficitIndexes)
+                .map { MeshFrameCodec.Frame.EvidSymbol(transfer.evidenceId, it.esi, it.data) }
             accelerator.beginAsInitiator(
                 peerAddress, token = expected, readyAtEpochMs = frame.readyAtEpochMs, chunks = chunks
             )

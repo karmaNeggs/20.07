@@ -11,7 +11,7 @@ import androidx.room.RoomDatabase
         SeenMessageEntity::class,
         SosEntity::class,
         EvidenceEntity::class,
-        EvidenceChunkEntity::class,
+        EvidenceSymbolEntity::class,
         NicknameEntity::class,
         PeerKeyEntity::class,
         CourierEnvelopeEntity::class
@@ -34,7 +34,11 @@ import androidx.room.RoomDatabase
     // v12: EvidenceEntity gains `thumbnail` (ByteArray, default empty) and `wantsFullRes` (Boolean,
     // default false) — P5 slice 1 (docs/DECISIONS.md decision 45, PLAN-v2.md §4.3's thumbnail-first
     // item).
-    version = 12,
+    // v13: EvidenceEntity gains `contentLength` (Int, default 0); EvidenceChunkEntity renamed to
+    // EvidenceSymbolEntity, `chunkIndex` renamed to `esi` (now unbounded, systematic or repair) —
+    // P5 item 2 slice 2 (docs/DECISIONS.md decision 47, PLAN-v2.md §4.3 item 2's fountain coding,
+    // replacing indexed chunks/manifest/have-bitset/deficit computation with FountainCode.kt).
+    version = 13,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -42,7 +46,7 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun seenMessageDao(): SeenMessageDao
     abstract fun sosDao(): SosDao
     abstract fun evidenceDao(): EvidenceDao
-    abstract fun evidenceChunkDao(): EvidenceChunkDao
+    abstract fun evidenceSymbolDao(): EvidenceSymbolDao
     abstract fun nicknameDao(): NicknameDao
     abstract fun peerKeyDao(): PeerKeyDao
     abstract fun courierEnvelopeDao(): CourierEnvelopeDao

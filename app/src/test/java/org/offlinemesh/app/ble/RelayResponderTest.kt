@@ -150,44 +150,47 @@ class RelayResponderTest {
     // ---------- thumbnail-first, pull-on-demand (P5 slice 1, docs/DECISIONS.md decision 45) ----------
     // The core regression coverage: automatic full-chunk solicitation is gone. The header (with its
     // thumbnail) still floods to everyone via the test above, completely unchanged — these instead
-    // exercise framesToPushOnConnect's own manifest loop, the actual pull-gate.
+    // exercise framesToPushOnConnect's own SymbolRequest loop (decision 47's replacement for the
+    // retired Manifest mechanism), the actual pull-gate.
 
     @Test
-    fun `framesToPushOnConnect sends no manifest for a freshly-ingested, unrequested evidence item`() = runTest {
-        // The header itself flooding to everyone regardless (thumbnail-first, unaffected by this
-        // slice) is already covered by "an evidence header not in the peer's filter is pushed the
-        // same way as SOS" above, via the actual CatalogFilter round trip — framesToPushOnConnect's
-        // OWN default return here is a CatalogFilter frame, not individual EvidMeta frames, so this
-        // test only exercises the always-unconditional manifest loop, the actual pull-gate.
-        relay.ingestEvidenceMeta(evidenceFixture("evid-fr-1"))
-        val frames = responder.framesToPushOnConnect().mapNotNull { MeshFrameCodec.decode(it) }
-        assertTrue(
-            "an unrequested item must not have its own manifest sent (that's what used to solicit chunks)",
-            frames.filterIsInstance<MeshFrameCodec.Frame.Manifest>().none { it.evidenceId == "evid-fr-1" },
-        )
-        AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
-    }
+    fun `framesToPushOnConnect sends no symbol request for a freshly-ingested, unrequested evidence item`() =
+        runTest {
+            // The header itself flooding to everyone regardless (thumbnail-first, unaffected by this
+            // slice) is already covered by "an evidence header not in the peer's filter is pushed
+            // the same way as SOS" above, via the actual CatalogFilter round trip —
+            // framesToPushOnConnect's OWN default return here is a CatalogFilter frame, not
+            // individual EvidMeta frames, so this test only exercises the always-unconditional
+            // SymbolRequest loop, the actual pull-gate.
+            relay.ingestEvidenceMeta(evidenceFixture("evid-fr-1"))
+            val frames = responder.framesToPushOnConnect().mapNotNull { MeshFrameCodec.decode(it) }
+            assertTrue(
+                "an unrequested item must not have its own SymbolRequest sent (that's what solicits symbols)",
+                frames.filterIsInstance<MeshFrameCodec.Frame.SymbolRequest>().none { it.evidenceId == "evid-fr-1" },
+            )
+            AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
+        }
 
     @Test
-    fun `framesToPushOnConnect sends a manifest once full resolution has been requested`() = runTest {
+    fun `framesToPushOnConnect sends a symbol request once full resolution has been requested`() = runTest {
         relay.ingestEvidenceMeta(evidenceFixture("evid-fr-2"))
         relay.requestFullResolution("evid-fr-2")
         val frames = responder.framesToPushOnConnect().mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue(
-            frames.filterIsInstance<MeshFrameCodec.Frame.Manifest>().any { it.evidenceId == "evid-fr-2" },
+            frames.filterIsInstance<MeshFrameCodec.Frame.SymbolRequest>().any { it.evidenceId == "evid-fr-2" },
         )
         AppDatabase.get(context).evidenceDao().deleteForGroup("group-1")
     }
 
     @Test
-    fun `framesToPushOnConnect never sends a manifest for a blind-carried evidence item`() = runTest {
+    fun `framesToPushOnConnect never sends a symbol request for a blind-carried evidence item`() = runTest {
         // groupId = null — the shape handleEvidMeta stores when a header's handle doesn't resolve
-        // to any group we're a member of. A blind carrier never solicits chunks for it.
+        // to any group we're a member of. A blind carrier never solicits symbols for it.
         relay.ingestEvidenceMeta(evidenceFixture("evid-fr-blind").copy(groupId = null))
         val frames = responder.framesToPushOnConnect().mapNotNull { MeshFrameCodec.decode(it) }
         assertTrue(
-            "a blind-carried item must never have its own manifest sent",
-            frames.filterIsInstance<MeshFrameCodec.Frame.Manifest>().none { it.evidenceId == "evid-fr-blind" },
+            "a blind-carried item must never have its own SymbolRequest sent",
+            frames.filterIsInstance<MeshFrameCodec.Frame.SymbolRequest>().none { it.evidenceId == "evid-fr-blind" },
         )
         AppDatabase.get(context).evidenceDao().pruneOlderThan(Long.MAX_VALUE)
     }

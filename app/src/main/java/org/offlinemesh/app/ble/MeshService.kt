@@ -363,6 +363,10 @@ class MeshService : Service() {
      *  own doc. Null for anything not renderable (blind-carried, absent, or a decrypt failure). */
     suspend fun decryptedThumbnail(evidence: EvidenceEntity): ByteArray? = relay.decryptedThumbnail(evidence)
 
+    /** [GroupChatScreen]'s "receiving file: X / Y" progress display — see
+     *  [RelayEngine.decodeRank]'s own doc (decision 47, docs/DECISIONS.md). */
+    suspend fun decodeRank(evidenceId: String): Int = relay.decodeRank(evidenceId)
+
     fun hopToGroupPresence(groupId: String): Int = hopTracker.myHop(groupId, "PRESENCE")
 
     /** Group-level, not global: the same device can carry a different display name per group. */

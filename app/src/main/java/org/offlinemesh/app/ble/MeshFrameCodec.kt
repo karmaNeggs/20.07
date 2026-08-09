@@ -2,7 +2,6 @@ package org.offlinemesh.app.ble
 
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
@@ -28,10 +27,12 @@ import java.util.concurrent.atomic.AtomicInteger
  *    owns the key and does the actual seal/open/verify, so decode() stays keyless and pure.
  */
 object MeshFrameCodec {
-    const val FRAME_MANIFEST: Byte = 0x10   // "here's exactly which chunks I already have" (bitset)
+    // 0x10 and 0x14 are RETIRED (were FRAME_MANIFEST/FRAME_EVID_CHUNK through v0.7.13-dev) — never
+    // reuse these byte values. Decision 47 (docs/DECISIONS.md) replaced the indexed-chunk/manifest/
+    // have-bitset/deficit mechanism with FountainCode.kt's fountain code; see FRAME_SYMBOL_REQUEST/
+    // FRAME_EVID_SYMBOL below.
     const val FRAME_SOS: Byte = 0x12        // SOS item + auth tag
     const val FRAME_EVID_META: Byte = 0x13  // evidence header + auth tag
-    const val FRAME_EVID_CHUNK: Byte = 0x14 // one evidence chunk
     const val FRAME_POSITION: Byte = 0x15   // AES-GCM-sealed live position — latest-wins, never persisted
     const val FRAME_NICKNAME: Byte = 0x16   // per-group display name + auth tag, latest-updatedAt-wins
     const val FRAME_PRESENCE: Byte = 0x17   // "an authenticated member of this group is on this connection"
@@ -47,22 +48,30 @@ object MeshFrameCodec {
     // wait store-and-carry delivery for a partition flood-relay alone can't bridge in time.
     const val FRAME_COURIER: Byte = 0x1C
 
+    // P5 item 2 slice 2 (docs/DECISIONS.md decision 47, PLAN-v2.md §4.3) — fountain-coded evidence
+    // transfer, replacing FRAME_MANIFEST/FRAME_EVID_CHUNK (0x10/0x14, retired above).
+    const val FRAME_SYMBOL_REQUEST: Byte = 0x1D // "I still need N more distinct symbols for X"
+    const val FRAME_EVID_SYMBOL: Byte = 0x1E    // one fountain-coded symbol: esi + payload
+
     /** Display names are a small courtesy label, not an identity — kept short so it stays a
      *  one-line, cheap-to-relay addition rather than a second chat field. */
     const val MAX_USERNAME_CHARS = 20
 
-    /** Absolute ceiling on any wire-carried `totalChunks` (evidence-meta headers AND manifests —
-     *  two independent frame types that both feed [MeshProtocol.encodeBitset]/`decodeBitset`,
-     *  whose cost is O(totalChunks)). Without this, an unauthenticated, non-member relay can send
-     *  one ~120-byte evidence-meta frame claiming e.g. `totalChunks = Int.MAX_VALUE` and force a
-     *  ~268MB allocation on every device that relays it — worse, that header is persisted to Room
-     *  and re-encoded into a manifest on every future connection (see
-     *  [org.offlinemesh.app.ble.RelayResponder.framesToPushOnConnect]), so the crash recurs until
-     *  the 48h prune. A blind relay (one that can't resolve this frame's `handle` to a group key —
-     *  see `GroupRepository.resolveGroupKeyByHandle`, decision 38) stores this header regardless,
-     *  so this frame type has no authentication gate at all for that path — the length cap here is
-     *  the only line of defense. 4096 chunks * 400 bytes/chunk (`RelayEngine.CHUNK_SIZE`) = 1.6MB,
-     *  generous against `EvidenceCapture`'s 640px/quality-45 JPEGs (typically ~200 chunks). */
+    /** Absolute ceiling on any wire-carried `totalChunks` (= a [FountainCode] `k`) AND on any
+     *  wire-carried symbol `esi` (`Frame.EvidSymbol.esi`, `RelayEngine.ingestSymbol`'s own decode-
+     *  time bound — the [FountainDecoder] instance it's fed into allocates state proportional to
+     *  esi/k). Without this, an unauthenticated, non-member relay can send one ~120-byte
+     *  evidence-meta frame claiming e.g. `totalChunks = Int.MAX_VALUE` and force a huge allocation
+     *  on every device that relays it — worse, that header is persisted to Room and re-offered on
+     *  every future connection (see [org.offlinemesh.app.ble.RelayResponder.framesToPushOnConnect]),
+     *  so the crash recurs until the 48h prune. A blind relay (one that can't resolve this frame's
+     *  `handle` to a group key — see `GroupRepository.resolveGroupKeyByHandle`, decision 38) stores
+     *  this header regardless, so this frame type has no authentication gate at all for that path —
+     *  the length cap here is the only line of defense. 4096 chunks * 400 bytes/chunk
+     *  (`RelayEngine.CHUNK_SIZE`) = 1.6MB, generous against `EvidenceCapture`'s 640px/quality-45
+     *  JPEGs (typically ~200 chunks). Through v0.7.13-dev this also bounded [MeshProtocol]'s
+     *  now-removed `encodeBitset`/`decodeBitset`; decision 47 repurposed it as the esi/k ceiling for
+     *  [FountainCode]/[FountainDecoder] instead — same number, same resource-exhaustion role. */
     const val MAX_EVIDENCE_CHUNKS = 4096
 
     /** Absolute ceiling on an SOS message's UTF-8 byte length. [writeStr16]/[readStr16] can
@@ -83,7 +92,7 @@ object MeshFrameCodec {
      *  by working backward from this app's own proven-reliable write budget, not a "looks nice"
      *  number: a single ATT characteristic write is capped at 512 bytes regardless of negotiated
      *  MTU, [PAD_BUCKETS]' own `512` bucket is the largest size class the rest of this app's
-     *  traffic already relies on (`FRAME_EVID_CHUNK`'s 400-byte chunks + overhead land there), and
+     *  traffic already relies on (`FRAME_EVID_SYMBOL`'s 400-byte symbols + overhead land there), and
      *  an `EvidMeta` frame's own fixed fields already consume roughly ~221 bytes before the
      *  thumbnail — 256 more keeps the whole padded frame inside that same 512 bucket rather than
      *  pushing it into the 1024/2048 zone this codebase already treats as higher-risk (see
@@ -150,7 +159,15 @@ object MeshFrameCodec {
     // thumbnail-first item) — a genuine field-shape change on an existing frame type (unlike v9's
     // new-byte-type addition), so an old build parsing a new-shape frame would misread every field
     // after the new one. This IS load-bearing for safety, not just discoverability.
-    const val VERSION: Int = 10
+    // v11: two independent load-bearing changes (docs/DECISIONS.md decision 47, PLAN-v2.md §4.3
+    // item 2 — fountain coding replaces indexed chunks/manifest/have-bitset/deficit computation).
+    // (1) FRAME_MANIFEST/FRAME_EVID_CHUNK (0x10/0x14) retired, replaced by FRAME_SYMBOL_REQUEST/
+    // FRAME_EVID_SYMBOL (0x1D/0x1E) — an old build's decode() would misread the new types as
+    // unrecognized bytes and safely drop them (same as v9's new-byte case), but the retired bytes
+    // themselves must never be reused while any pre-v11 build might still be reachable. (2)
+    // FRAME_EVID_META gains `contentLength` — a genuine field-shape change, same load-bearing
+    // reasoning as v10's own thumbnail addition.
+    const val VERSION: Int = 11
 
     private const val PAD_BUCKET_1 = 256
     private const val PAD_BUCKET_2 = 512
@@ -186,8 +203,8 @@ object MeshFrameCodec {
      *  Wire shape: `[realLen: UShort BE][frame: realLen bytes][padding: random bytes]`. The
      *  length prefix (not a sentinel/terminator inside the padding) is what lets [unpadGattFrame]
      *  recover the exact frame boundary regardless of frame contents — needed because
-     *  `FRAME_EVID_CHUNK`'s own decode branch reads its chunk payload via `buf.remaining()` (no
-     *  internal length field of its own) and would otherwise swallow trailing padding as chunk data.
+     *  `FRAME_EVID_SYMBOL`'s own decode branch reads its symbol payload via `buf.remaining()` (no
+     *  internal length field of its own) and would otherwise swallow trailing padding as symbol data.
      *  Padding bytes are drawn from [CryptoUtils.randomBytes], not zero-filled, so the padded region
      *  isn't visually distinguishable from the ciphertext/MAC bytes that usually precede it.
      *
@@ -262,7 +279,14 @@ object MeshFrameCodec {
          *  sealed blob to this specific header's other fields, so a relay can't splice a
          *  validly-sealed thumbnail from a DIFFERENT evidence item onto this one; the two checks
          *  cover different substitution attacks, not the same one twice. Every other field here is
-         *  unchanged from what [EvidenceEntity] itself carries. */
+         *  unchanged from what [EvidenceEntity] itself carries.
+         *
+         *  [contentLength] (P5 item 2 slice 2, `docs/DECISIONS.md` decision 47) — the exact
+         *  ciphertext byte length, appended at v11. [totalChunks] already equals a [FountainCode]
+         *  `k` (`ceil(contentLength / RelayEngine.CHUNK_SIZE)`, unchanged in meaning from the old
+         *  chunk-count field it always was), but `k` alone only bounds a RANGE of possible content
+         *  lengths — [FountainDecoder] needs the exact byte count to strip the final symbol's zero
+         *  padding at `decode()` time, which `k` cannot supply on its own. */
         data class EvidMeta(
             val id: String,
             val handle: ByteArray,
@@ -275,8 +299,31 @@ object MeshFrameCodec {
             val mac: ByteArray?,
             val signature: ByteArray?,
             val thumbnail: ByteArray,
+            val contentLength: Int,
         ) : Frame()
-        data class EvidChunk(val chunk: EvidenceChunkEntity) : Frame()
+        /** One fountain-coded symbol for [evidenceId] — verbatim source data if `esi < k`
+         *  (systematic) or an XOR combination if `esi >= k` (repair); see [FountainCode]'s own class
+         *  doc. Not bound-checked here (matches the retired `EvidChunk`'s identical choice not to
+         *  bound-check `chunkIndex` in `decode()`) — [RelayEngine.ingestSymbol] is where esi gets
+         *  checked against [MAX_EVIDENCE_CHUNKS], the same architectural split `decode()` stays dumb/
+         *  keyless, domain logic owns the bound check that this whole file's other frames follow.
+         *  [ByteArray] equality is referential (same as every other `data class` here carrying one —
+         *  [SosSealed]/[PositionSealed]/etc. — tests use `.contentEquals` directly rather than a
+         *  per-class override). */
+        data class EvidSymbol(val evidenceId: String, val esi: Int, val data: ByteArray) : Frame()
+        /** "I still need [stillNeed] more distinct symbols for [evidenceId]" — replaces the retired
+         *  `Manifest`'s bitset with a single scalar, matching what fountain coding actually needs to
+         *  ask for (see [FountainDecoder.deficit]'s own doc: any [stillNeed] distinct symbols close
+         *  the gap, not a specific positional set). No `handle`/mac, same as `Manifest` never carried
+         *  either — [evidenceId] is already cleartext on every [EvidMeta] this app floods, so it is
+         *  not new information; the only thing protecting content is that the requested symbols are
+         *  still ciphertext the requester can't decrypt without the group key. [stillNeed] is
+         *  intentionally NOT bound-checked in [decode] (matches [Frame.WifiDirectHandoff.
+         *  deficitCount]'s own precedent, unlike [EvidMeta.totalChunks] which feeds directly into an
+         *  O(totalChunks) allocation inside decode() itself) — the existing per-connection symbol
+         *  budget (`RelayResponder.consumeSymbolBudget`) is what actually bounds the cost of an
+         *  inflated value, downstream in `RelayResponder.handleSymbolRequest`, not here. */
+        data class SymbolRequest(val evidenceId: String, val stillNeed: Int) : Frame()
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
          *
          *  [hop] lives out here in the cleartext envelope, NOT inside [sealed], specifically so a
@@ -291,7 +338,6 @@ object MeshFrameCodec {
          *  tradeoff `SosEntity.ttl` already makes. [handle] replaced this envelope's own cleartext
          *  `groupId` in decision 38 — see [groupHandle]'s doc. */
         data class PositionSealed(val handle: ByteArray, val hop: Int, val sealed: ByteArray) : Frame()
-        data class Manifest(val evidenceId: String, val totalChunks: Int, val peerHave: Set<Int>) : Frame()
         /** Envelope only, since decision 38 (`docs/DECISIONS.md`) — same shape [EvidMeta] gained:
          *  [handle] replaces the cleartext `groupId` this used to decode directly into a ready
          *  [NicknameEntity] with. Unlike [EvidMeta], a nickname a receiver can't resolve [handle]
@@ -469,14 +515,20 @@ object MeshFrameCodec {
     // this, a relay could swap the thumbnail for different content while sha256/mac (computed over
     // the full-res ciphertext, never touching the thumbnail) stayed valid, exactly the class of gap
     // decision 37 already fixed once for SOS's own writeStr16-vs-writeStr mac-input mismatch.
+    // P5 item 2 slice 2 (decision 47): contentLength added to the covered bytes for the identical
+    // reason -- an uncovered contentLength would otherwise be a field a relay could tamper with
+    // while every other mac'd field stayed valid (in practice self-defeating once sha256 is checked
+    // post-decode, but cheap defense-in-depth matching this project's own repeated closing of
+    // exactly this class of gap).
     @Suppress("LongParameterList") // wire-protocol scalars — see sealSos's identical suppress
     fun evidMacInput(
         id: String, groupId: String, senderId: String, timestamp: Long,
         sha256Hex: String, totalChunks: Int, mimeType: String, thumbnail: ByteArray,
+        contentLength: Int,
     ): ByteArray = build { d ->
         d.writeStr(id); d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp)
         d.write(hexToBytes(sha256Hex)); d.writeInt(totalChunks); d.writeStr(mimeType)
-        d.writeStr16Bytes(thumbnail)
+        d.writeStr16Bytes(thumbnail); d.writeInt(contentLength)
     }
 
     fun nicknameMacInput(groupId: String, senderId: String, username: String, updatedAt: Long): ByteArray =
@@ -621,7 +673,7 @@ object MeshFrameCodec {
         d.writeStr(e.id); d.writeBlob(e.handle); d.writeStr(e.senderId); d.writeLong(e.timestamp)
         d.write(hexToBytes(e.sha256)); d.writeInt(e.totalChunks); d.writeStr(e.mimeType)
         d.writeByte(e.ttl.coerceIn(0, 255)); d.writeBlob(e.mac); d.writeBlob(e.signature)
-        d.writeStr16Bytes(e.thumbnail)
+        d.writeStr16Bytes(e.thumbnail); d.writeInt(e.contentLength)
     }
 
     /** Domain-separated from [sosNonce]/[courierNonce] by a fixed label prefix, not just by
@@ -651,9 +703,12 @@ object MeshFrameCodec {
     fun openThumbnail(sealed: ByteArray, contentKey: ByteArray): ByteArray? =
         if (sealed.isEmpty()) sealed else CryptoUtils.decrypt(contentKey, sealed)
 
-    fun encodeChunk(c: EvidenceChunkEntity): ByteArray = frame(FRAME_EVID_CHUNK) { d ->
-        d.writeStr(c.evidenceId); d.writeInt(c.chunkIndex); d.write(c.data)
+    fun encodeEvidSymbol(s: Frame.EvidSymbol): ByteArray = frame(FRAME_EVID_SYMBOL) { d ->
+        d.writeStr(s.evidenceId); d.writeInt(s.esi); d.write(s.data)
     }
+
+    fun encodeSymbolRequest(evidenceId: String, stillNeed: Int): ByteArray =
+        frame(FRAME_SYMBOL_REQUEST) { d -> d.writeStr(evidenceId); d.writeInt(stillNeed) }
 
     // Position frames are the one place in this app that repeatedly encrypts under a SINGLE key
     // shared by every member of a group, for as long as that group exists (days, potentially —
@@ -850,11 +905,6 @@ object MeshFrameCodec {
         d.writeLong(readyAtEpochMs); d.writeBlob(mac)
     }
 
-    fun encodeManifest(evidenceId: String, totalChunks: Int, have: Set<Int>): ByteArray {
-        val bitset = MeshProtocol.encodeBitset(have, totalChunks)
-        return frame(FRAME_MANIFEST) { d -> d.writeStr(evidenceId); d.writeInt(totalChunks); d.write(bitset) }
-    }
-
     /** Frames an already-stored/sealed courier envelope for the wire — one function suffices here
      *  (unlike SOS's `sealSos` vs. `sealSosBody`+`reframeSosForRelay` split) since a courier envelope
      *  is never sealed-and-sent in one call the way a freshly-authored SOS is: `RelayEngine.
@@ -1035,12 +1085,13 @@ object MeshFrameCodec {
                     val timestamp = buf.long
                     val sha = ByteArray(32).also { buf.get(it) }
                     val totalChunks = buf.int
-                    // Guards MeshProtocol.encodeBitset's O(totalChunks) allocation, which this
-                    // persisted header later feeds via RelayResponder.framesToPushOnConnect — see
-                    // MAX_EVIDENCE_CHUNKS's doc. Not gated behind any auth check here (a receiver
-                    // that can't resolve `handle` to a group key still stores this header — see
-                    // EvidenceEntity.groupId's doc), so this is the only check standing between a
-                    // hostile 120-byte frame and a repeating ~268MB allocation.
+                    // Guards RelayEngine's FountainDecoder allocation (proportional to totalChunks =
+                    // k), which this persisted header later feeds via
+                    // RelayResponder.framesToPushOnConnect — see MAX_EVIDENCE_CHUNKS's doc. Not
+                    // gated behind any auth check here (a receiver that can't resolve `handle` to a
+                    // group key still stores this header — see EvidenceEntity.groupId's doc), so
+                    // this is the only check standing between a hostile 120-byte frame and a
+                    // repeating oversized allocation.
                     if (totalChunks !in 1..MAX_EVIDENCE_CHUNKS) return null
                     val mimeType = buf.readStr()
                     val ttl = buf.get().toInt() and 0xFF
@@ -1050,16 +1101,22 @@ object MeshFrameCodec {
                     // regardless — this length cap is a resource-exhaustion guard, not an auth check.
                     val thumbnail = buf.readStr16Bytes()
                     if (thumbnail.size > MAX_THUMBNAIL_BYTES) return null
+                    val contentLength = buf.int
+                    if (contentLength < 0) return null
                     Frame.EvidMeta(
                         id = id, handle = handle, senderId = senderId, timestamp = timestamp,
                         sha256 = bytesToHex(sha), totalChunks = totalChunks, mimeType = mimeType,
                         ttl = ttl, mac = mac, signature = signature, thumbnail = thumbnail,
+                        contentLength = contentLength,
                     )
                 }
-                FRAME_EVID_CHUNK -> {
-                    val evidenceId = buf.readStr(); val index = buf.int
+                FRAME_EVID_SYMBOL -> {
+                    // Not bound-checked here — same architectural split the retired FRAME_EVID_CHUNK
+                    // always used: decode() stays dumb/keyless, RelayEngine.ingestSymbol is where esi
+                    // gets checked against MAX_EVIDENCE_CHUNKS (see Frame.EvidSymbol's own doc).
+                    val evidenceId = buf.readStr(); val esi = buf.int
                     val data = ByteArray(buf.remaining()).also { buf.get(it) }
-                    Frame.EvidChunk(EvidenceChunkEntity(evidenceId, index, data))
+                    Frame.EvidSymbol(evidenceId, esi, data)
                 }
                 FRAME_POSITION -> {
                     val handle = buf.readBlob() ?: return null
@@ -1067,16 +1124,13 @@ object MeshFrameCodec {
                     val sealed = buf.readStr16Bytes()
                     Frame.PositionSealed(handle, hop, sealed)
                 }
-                FRAME_MANIFEST -> {
-                    val evidenceId = buf.readStr(); val totalChunks = buf.int
-                    // Same MAX_EVIDENCE_CHUNKS guard as FRAME_EVID_META above — decodeBitset's loop
-                    // is O(totalChunks), and a negative value silently "succeeds" with an empty
-                    // peerHave (0 until totalChunks is an empty range) rather than being rejected,
-                    // which would otherwise let a nonsensical manifest reach RelayEngine's deficit
-                    // calculation downstream.
-                    if (totalChunks !in 1..MAX_EVIDENCE_CHUNKS) return null
-                    val bitset = ByteArray(buf.remaining()).also { buf.get(it) }
-                    Frame.Manifest(evidenceId, totalChunks, MeshProtocol.decodeBitset(bitset, totalChunks))
+                FRAME_SYMBOL_REQUEST -> {
+                    // stillNeed is intentionally NOT bound-checked here — see Frame.SymbolRequest's
+                    // own doc: unlike the retired Manifest/totalChunks case, nothing in decode()
+                    // allocates proportional to this value; RelayResponder's existing per-connection
+                    // symbol budget is what actually bounds the cost downstream.
+                    val evidenceId = buf.readStr(); val stillNeed = buf.int
+                    Frame.SymbolRequest(evidenceId, stillNeed)
                 }
                 FRAME_NICKNAME -> {
                     // Envelope only, since decision 38 (docs/DECISIONS.md) — see Frame.Nickname's

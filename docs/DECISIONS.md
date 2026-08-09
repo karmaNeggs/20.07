@@ -2855,3 +2855,150 @@ which currently keys off a positional `deficit: List<Int>` that has no fountain-
 symbol-count trigger, or leave it inert until §4.3 item 3 removes Wi-Fi Direct outright as already
 planned). Full scoping detail — file-by-file, function-by-function — is in the Plan agent's own
 design write-up this session started from; not reproduced verbatim here.
+
+## 47. P5 item 2 slice 2 — wiring: deletes FRAME_MANIFEST/have-bitset/deficit computation, wires FountainCode into the live relay path
+
+Slice 2 (wiring) of §4.3 item 2, one clean cutover per a Plan agent's own design pass (comparable
+scope to decision 43's GATT-wiring slice — no live compatibility window to protect either, since
+nothing is hardware-confirmed yet, so a dual-path additive-then-delete design would have doubled
+this slice's own surface for no real benefit). The Plan agent re-verified everything against actual
+current source rather than trusting the prior session's summary — confirmed `MeshFrameCodec.VERSION`
+was 10 (not a guess), `AppDatabase.version` was 12, and — the one genuinely new finding —
+**this project has no real `Migration` objects anywhere**; `AppDatabase.get()` calls
+`.fallbackToDestructiveMigration()` unconditionally ("pre-release testing app, nothing worth
+preserving across a schema change yet"), so every entity rename/field addition below was free, no
+migration code written.
+
+**New wire frames, replacing the retired `FRAME_MANIFEST` (0x10, deleted)/`FRAME_EVID_CHUNK` (0x14,
+deleted) — both bytes retired outright, never reused:**
+`FRAME_SYMBOL_REQUEST = 0x1D` (`Frame.SymbolRequest(evidenceId, stillNeed: Int)`, no handle/mac,
+same as the retired `Manifest` never carried either — `evidenceId` is already cleartext on every
+flooded `EvidMeta`) and `FRAME_EVID_SYMBOL = 0x1E` (`Frame.EvidSymbol(evidenceId, esi, data)`, a
+genuinely new byte rather than reinterpreting `FRAME_EVID_CHUNK`'s old layout — the version bump this
+slice requires anyway makes the "old build misreads it" risk a non-issue either way, so the deciding
+factor was avoiding a byte whose retired name/types would permanently mislead future readers about
+what it now carries). Neither new frame bound-checks its own numeric field at `decode()` time
+(`stillNeed`, `esi`) — unlike the retired `Manifest.totalChunks`, nothing in `decode()` allocates
+proportional to either; `RelayResponder`'s existing per-connection budget and `RelayEngine.
+ingestSymbol`'s own bound check are where that responsibility actually lives now, mirroring
+`Frame.WifiDirectHandoff.deficitCount`'s pre-existing precedent for "not validated at the transport's
+keyless parsing layer." `Frame.EvidMeta` gains `contentLength: Int` (exact ciphertext byte length —
+`totalChunks` already equals a `FountainCode` `k`, but only bounds a *range* of possible lengths;
+`FountainDecoder` needs the exact value to strip the last symbol's zero padding at `decode()` time),
+covered by `evidMacInput` for the same tamper-binding reason decision 45 added `thumbnail` there.
+`MeshFrameCodec.VERSION` 10 → 11 (two independent load-bearing reasons: the retired/new frame bytes,
+and `EvidMeta`'s genuine field-shape change).
+
+**Storage**: `EvidenceChunkEntity`/`EvidenceChunkDao` renamed to `EvidenceSymbolEntity`/
+`EvidenceSymbolDao`, `chunkIndex` (bounded `[0, totalChunks)`) renamed to `esi` (unbounded —
+systematic or repair); `receivedIndexes`/`receivedCount` dropped (no longer meaningful once
+completion is driven by decoder rank, not a positional count). `EvidenceEntity` gains
+`contentLength: Int`. `AppDatabase.version` 12 → 13. A real, deliberate design call: **every directly-
+received symbol is persisted immediately, regardless of whether it advances this device's own decode
+rank** — a partial holder must still be able to usefully relay its partial symbol set to a THIRD
+peer, the actual "faster with more carriers instead of slower" value §4.3 item 2 names; a design that
+only persisted at completion would silently defeat that promise. `RelayEngine.ingestSymbol`'s return
+value reflects DAO-insert-new-storage, not decoder-rank-new — a symbol can be decoder-redundant
+(this device already has enough rank) while still being new, storable data worth relaying onward.
+
+**Sender side**: no per-peer state (matches `CatalogFilter`'s own "no memory of any specific peer"
+philosophy, quoted directly in `framesToPushOnConnect`'s doc) — but NOT the naive "always start at
+esi 0" a fully stateless reading of that philosophy would suggest, which the Plan agent identified as
+a genuine liveness bug (a peer that already holds most systematic symbols from a prior connection
+would receive the same low esi range again on every reconnect, its `stillNeed` never converging).
+Fixed with a single monotonically-increasing esi cursor **per evidence item** (`RelayEngine.
+symbolCursors`, `ConcurrentHashMap<String, AtomicInteger>`), shared across every requester and never
+reset except on process restart — state keyed on content, not on a peer's identity, so it doesn't
+reintroduce `PeerDeliveryTracker`'s old bounded-eviction problem.
+
+**Receiver side**: one live `FountainDecoder` per in-flight item (`RelayEngine.liveDecoders`), lazily
+created and rehydrated from every already-persisted row on first touch each process lifetime — the
+persisted rows are the source of truth, this map a derived, disposable cache (losing it on restart
+costs a rehydrate replay, never correctness). **A real bug caught by this slice's own new tests, not
+by review**: the first version fed a newly-ingested symbol into the decoder only via
+`getOrCreateDecoder`'s rehydrate-on-first-creation step — correct the FIRST time a decoder is built
+for an item, but silently wrong forever after, because a decoder created earlier by an unrelated read
+(`symbolDeficit`, called on every connection via `framesToPushOnConnect`, routinely runs BEFORE any
+symbol has arrived) stays cached and never re-scans Room. `RelayEngineTest`'s own progression test
+(`symbolDeficit` before and after two `ingestSymbol` calls) caught this immediately — rank never
+advanced past 0. Fixed by having `maybeCompleteFromSymbol` call `decoder.addSymbol(esi, data)`
+explicitly for the just-ingested symbol every time, not relying on rehydration alone;
+`FountainDecoder.addSymbol`'s own `seenEsi` dedup makes the redundant call safe when rehydration
+already included it. On completion: decrypt, sha256-verify, write `outputFile` (unchanged from the
+retired `maybeReassemble`'s own logic), then **collapse storage to the canonical `k` systematic rows**
+— the step that makes a device which just finished receiving something a fully-capable re-sharer
+through the exact same `symbolsToSend` path own-authored content uses, no separate "receiver-side
+serving" logic needed. A `Mutex` (`RelayEngine.decoderMutex`) guards the whole rehydrate-fetch-
+addSymbol-persist sequence — `FountainDecoder` has no internal synchronization, and decision 43
+already established `MeshGattClient`/`MeshGattServer` can feed `RelayEngine` concurrently from
+different peer connections.
+
+**Session budget: kept, renamed, NOT deleted — a deliberate re-reading of `PLAN-v2.md`'s own literal
+text, confirmed rather than assumed.** §4.3 item 2's own line says fountain coding "deletes... the
+session chunk budget," and Part 9's "what v2 deletes" list repeats it — but that passage describes
+the full Tier X target architecture (§5.1), which depends on §4.3 item 3's dedicated bulk pipe
+(BLE L2CAP CoC / Wi-Fi Aware) running OFF the shared GATT link entirely. This slice is not that:
+until item 3 lands, symbols still share the exact same connection carrying SOS/catalog-sync/
+presence/position traffic, and the budget's real purpose ("keeps one busy item from starving the
+rotation through other peers," `maxChunksPerSession`'s own pre-existing doc) doesn't evaporate just
+because chunks became symbols. Renamed `maxChunksPerSession`/`sessionBudget`/`consumeBudget` →
+`maxSymbolsPerSession`/`symbolSessionBudget`/`consumeSymbolBudget` (same value, 150), now also the
+sole backstop against a hostile/inflated `stillNeed` (no longer bound-checked at decode time, so this
+budget is what actually limits the cost downstream in `handleSymbolRequest`).
+
+**WiFi Direct: left inert, one call site removed, the other 5 `transport/wifidirect/` files
+mechanically adapted to compile, not redesigned.** `maybeAccelerateOverWifiDirect` (RelayResponder's
+own wrapper) is deleted outright — its one call site, inside the retired `handleManifest`, no longer
+exists, and there is no fountain-coding equivalent of "the peer is missing exactly these N indices"
+to hand `WifiDirectHandoffCoordinator.maybeProposeHandoff`, whose positional `deficit: List<Int>` API
+would need real redesign to accept a symbol count instead — throwaway work against `PLAN-v2.md` §4.3
+item 3's own already-planned wholesale removal of Wi-Fi Direct. `isWfdCapable` (the read side, its
+only caller) removed alongside it; `markWfdCapable` stays (still records a peer's own capability
+announcement, now write-only on this device's side). **Found late, not anticipated by the design
+pass**: `WifiDirectAccelerator`/`WifiDirectTransport`/`WifiDirectHandoffCoordinator` all reference
+`EvidenceChunkEntity`/`Frame.EvidChunk`/`encodeChunk`/`RelayEngine.ingestChunk`/`chunksByIndexes`
+directly in their own signatures and bodies (`WifiDirectAccelerator.sendChunks`/`receiveChunks`
+literally call `MeshFrameCodec.encodeChunk`) — deleting those types broke compilation regardless of
+whether the subsystem is reachable. Mechanically adapted (type/name substitution only — `List<
+EvidenceChunkEntity>` → `List<Frame.EvidSymbol>`, `ingestChunk` → `ingestSymbol`, new small
+`RelayEngine.symbolsByEsi` mirroring the retired `chunksByIndexes`' exact shape) rather than left
+broken; the actual handoff/deficit-selection logic inside `WifiDirectHandoffCoordinator` untouched
+and still effectively dead (nothing calls `maybeProposeHandoff` anymore, so its accept-side handlers
+are now asymmetrically unreachable from this device's own propose direction, per the class's own
+updated doc).
+
+**Testing**: `RelayEngineChunkBytesTest.kt` deleted outright (`chunkBytes` no longer exists).
+`MeshFrameCodecTest`/`RelayResponderTest`/the two WFD test files updated for the new types (manifest/
+bitset-specific tests removed, `SymbolRequest`/`EvidSymbol` round-trip and hostile-input coverage
+added, including a dedicated test proving `decode` does NOT reject a negative/huge `stillNeed` —
+documenting the deliberate decode-time-vs-downstream split so a future session doesn't "fix" it by
+accident). New coverage, not a port — the retired mechanism had none of this: `RelayEngineTest`
+gained `ingestSymbol`/`symbolDeficit`/`symbolsToSend`/`decodeRank` tests (esi-bound rejection, dedup,
+progression, a complete-item cursor-advancement test, and a decoder-rehydration-across-a-fresh-
+`RelayEngine`-instance test proving restart-survival) — all deliberately staying below full rank
+(`evidenceFixture`'s `totalChunks = 3`, tests ingest at most 2 distinct esi) to avoid
+`maybeCompleteFromSymbol`'s `repo.getGroupKey` call, the same pre-existing Keystore/Robolectric
+constraint this file already documents for `createSos`/`createEvidence`/`decryptedThumbnail` — a real
+completion+reassembly test needs hardware or an instrumented test, not covered here. New
+`EvidenceSymbolDaoTest.kt` (mirrors `PeerKeyDaoTest.kt`'s shape) covers the storage layer directly.
+`GroupChatScreen`'s "receiving file: X / Y" progress display moved from the retired `EvidenceChunkDao.
+receivedCount` to a new `RelayEngine.decodeRank`/`MeshService.decodeRank` passthrough — decoder rank
+is the more meaningful "progress toward decodable" number than a raw stored-row count, since a device
+can hold more rows than its rank once some turn out redundant.
+
+511 tests (up from 497, 14 new: `RelayEngineTest` +11, `EvidenceSymbolDaoTest` +8 minus the 5 deleted
+`RelayEngineChunkBytesTest`, `MeshFrameCodecTest` net +2 after removing 4 manifest-specific tests and
+adding 6). detekt clean (`UnusedPrivateMember` on `maybeAccelerateOverWifiDirect`/`isWfdCapable` after
+their call sites were removed — both deleted rather than suppressed, matching this project's own
+preference for deleting genuinely dead code over leaving inert wrappers; a few `MaxLineLength` wraps).
+Both variants compile/test/assemble green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`,
+R8-minified), no `missing_rules.txt`. Version bumped to v0.7.14-dev, fresh debug APK built and
+`aapt`-confirmed (`versionCode='25' versionName='0.7.14-dev'`). **NOT hardware-confirmed** — a real
+wire-format break (`VERSION` 11) on top of decision 46's own already-unconfirmed primitive; adds to
+the existing next-live-round backlog alongside every other unconfirmed slice.
+
+**What's left for P5 item 2 to be "done"**: nothing — item 2 (fountain coding) is now fully wired,
+end to end, deleting the old mechanism outright rather than running both in parallel. Next per
+`PLAN-v2.md` §4.3's own stated order is item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi Aware,
+replacing GATT's 400-byte-write-per-round-trip ceiling and finally removing Wi-Fi Direct outright,
+closing the loop on this decision's own "left inert" WFD work above).

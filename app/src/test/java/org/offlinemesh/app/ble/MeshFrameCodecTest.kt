@@ -9,11 +9,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.NicknameEntity
-import java.io.ByteArrayOutputStream
-import java.io.DataOutputStream
 import java.security.SecureRandom
 
 /**
@@ -463,11 +460,12 @@ class MeshFrameCodecTest {
     }
 
     @Test
-    fun `evidence meta frame round-trips including the sha256 digest`() {
+    fun `evidence meta frame round-trips including the sha256 digest and contentLength`() {
         val meta = EvidenceEntity(
             id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
             timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
             mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16) { it.toByte() }, handle = fakeHandle,
+            contentLength = 16_789,
         )
         val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta))
         check(decoded is MeshFrameCodec.Frame.EvidMeta)
@@ -476,7 +474,23 @@ class MeshFrameCodecTest {
         assertEquals(meta.sha256, decoded.sha256)
         assertEquals(meta.totalChunks, decoded.totalChunks)
         assertEquals(meta.mimeType, decoded.mimeType)
+        assertEquals(meta.contentLength, decoded.contentLength)
         assertNull(decoded.signature)
+    }
+
+    @Test
+    fun `decode rejects an evidence meta frame with a negative contentLength`() {
+        // contentLength (decision 47, docs/DECISIONS.md) needs the same "reject nonsensical" guard
+        // totalChunks already has -- FountainDecoder allocates an array of this size at decode()
+        // time downstream (RelayEngine.ingestSymbol/maybeCompleteFromSymbol), so a negative value
+        // is malformed, not just unusual.
+        val meta = EvidenceEntity(
+            id = "evid-1", groupId = "group-1", senderId = "sender-1", senderIsMe = true,
+            timestamp = 1_700_000_000_000L, sha256 = fakeSha256, totalChunks = 42,
+            mimeType = "image/jpeg", ttl = 8, mac = ByteArray(16), handle = fakeHandle,
+            contentLength = -1,
+        )
+        assertNull(MeshFrameCodec.decode(MeshFrameCodec.encodeEvidMeta(meta)))
     }
 
     @Test
@@ -555,11 +569,11 @@ class MeshFrameCodecTest {
         // while sha256/mac (over the untouched full-res ciphertext) stayed valid.
         val base = MeshFrameCodec.evidMacInput(
             "evid-1", "group-1", "sender-1", 1_700_000_000_000L, fakeSha256, 42, "image/jpeg",
-            byteArrayOf(1, 2, 3),
+            byteArrayOf(1, 2, 3), 16800,
         )
         val differentThumbnail = MeshFrameCodec.evidMacInput(
             "evid-1", "group-1", "sender-1", 1_700_000_000_000L, fakeSha256, 42, "image/jpeg",
-            byteArrayOf(9, 9, 9),
+            byteArrayOf(9, 9, 9), 16800,
         )
         assertFalse(base.contentEquals(differentThumbnail))
     }
@@ -615,14 +629,36 @@ class MeshFrameCodecTest {
     }
 
     @Test
-    fun `evidence chunk frame round-trips arbitrary binary data`() {
+    fun `evidence symbol frame round-trips arbitrary binary data`() {
         val data = ByteArray(400) { (it % 256).toByte() }
-        val chunk = EvidenceChunkEntity(evidenceId = "evid-1", chunkIndex = 7, data = data)
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeChunk(chunk))
-        check(decoded is MeshFrameCodec.Frame.EvidChunk)
-        assertEquals(chunk.evidenceId, decoded.chunk.evidenceId)
-        assertEquals(chunk.chunkIndex, decoded.chunk.chunkIndex)
-        assertArrayEquals(data, decoded.chunk.data)
+        val symbol = MeshFrameCodec.Frame.EvidSymbol(evidenceId = "evid-1", esi = 7, data = data)
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidSymbol(symbol))
+        check(decoded is MeshFrameCodec.Frame.EvidSymbol)
+        assertEquals(symbol.evidenceId, decoded.evidenceId)
+        assertEquals(symbol.esi, decoded.esi)
+        assertArrayEquals(data, decoded.data)
+    }
+
+    @Test
+    fun `evidence symbol frame round-trips a repair esi past totalChunks`() {
+        // esi >= k (a repair symbol) is a perfectly ordinary wire value -- FRAME_EVID_SYMBOL never
+        // bound-checks esi at decode() time (see Frame.EvidSymbol's own doc); RelayEngine.
+        // ingestSymbol is where that happens, not here.
+        val symbol = MeshFrameCodec.Frame.EvidSymbol(evidenceId = "evid-1", esi = 99999, data = ByteArray(400))
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeEvidSymbol(symbol))
+        check(decoded is MeshFrameCodec.Frame.EvidSymbol)
+        assertEquals(99999, decoded.esi)
+    }
+
+    @Test
+    fun `symbol request frame round-trips, including a zero stillNeed`() {
+        val frame = MeshFrameCodec.Frame.SymbolRequest(evidenceId = "evid-1", stillNeed = 12)
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeSymbolRequest(frame.evidenceId, frame.stillNeed))
+        assertEquals(frame, decoded)
+
+        val zero = MeshFrameCodec.decode(MeshFrameCodec.encodeSymbolRequest("evid-1", 0))
+        check(zero is MeshFrameCodec.Frame.SymbolRequest)
+        assertEquals(0, zero.stillNeed)
     }
 
     // Decision 39 (docs/DECISIONS.md): encodePosition now takes rootKey (for groupHandle) and
@@ -734,16 +770,6 @@ class MeshFrameCodecTest {
         val decoded = MeshFrameCodec.decode(frame) as MeshFrameCodec.Frame.PositionSealed
         assertNotNull(MeshFrameCodec.openPosition(decoded.sealed, contentKey))
         assertNull(MeshFrameCodec.openPosition(decoded.sealed, rootKey))
-    }
-
-    @Test
-    fun `manifest frame round-trips a bitset including boundary indexes`() {
-        val total = 17 // deliberately not a multiple of 8, to exercise the partial last byte
-        val have = setOf(0, 1, 7, 8, 16)
-        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeManifest("evid-1", total, have))
-        check(decoded is MeshFrameCodec.Frame.Manifest)
-        assertEquals(total, decoded.totalChunks)
-        assertEquals(have, decoded.peerHave)
     }
 
     @Test
@@ -911,12 +937,12 @@ class MeshFrameCodecTest {
         assertNull(MeshFrameCodec.decode(wrongVersion))
     }
 
-    // ---------- hostile totalChunks must never reach MeshProtocol.encodeBitset's allocation ----------
-    // A remote, unauthenticated, non-member relay can send an evidence header or manifest carrying
-    // an arbitrary totalChunks — encodeBitset allocates (totalChunks + 7) / 8 bytes downstream
-    // (RelayResponder.framesToPushOnConnect / handleIncoming's Manifest case), and the header is
-    // persisted to Room, so the crash recurs on every future connection until the 48h prune. decode()
-    // is the one choke point every such frame must pass through regardless of entry path.
+    // ---------- hostile totalChunks must never reach a FountainDecoder's allocation ----------
+    // A remote, unauthenticated, non-member relay can send an evidence header carrying an arbitrary
+    // totalChunks (= a FountainCode k) — RelayEngine.ingestSymbol/symbolDeficit allocate state
+    // proportional to it downstream, and the header is persisted to Room, so the cost recurs on
+    // every future connection until the 48h prune. decode() is the one choke point every such frame
+    // must pass through regardless of entry path.
 
     @Test
     fun `decode rejects an evidence meta frame with a hostile totalChunks`() {
@@ -952,42 +978,20 @@ class MeshFrameCodecTest {
         assertEquals(200, decoded.totalChunks)
     }
 
-    /** Hand-builds the raw manifest wire layout (rather than calling [MeshFrameCodec.encodeManifest],
-     *  which itself calls the vulnerable [MeshProtocol.encodeBitset] and would allocate on the
-     *  encode side too) — this is exactly what a hostile peer's raw bytes look like: a huge claimed
-     *  totalChunks paired with a tiny actual bitset payload. */
-    private fun rawManifestFrame(evidenceId: String, totalChunks: Int, bitsetBytes: ByteArray): ByteArray {
-        val bos = ByteArrayOutputStream()
-        val d = DataOutputStream(bos)
-        d.writeByte(MeshFrameCodec.FRAME_MANIFEST.toInt())
-        d.writeByte(MeshFrameCodec.VERSION)
-        val idBytes = evidenceId.toByteArray(Charsets.UTF_8)
-        d.writeByte(idBytes.size)
-        d.write(idBytes)
-        d.writeInt(totalChunks)
-        d.write(bitsetBytes)
-        return bos.toByteArray()
-    }
-
     @Test
-    fun `decode rejects a manifest frame with a hostile totalChunks`() {
-        val hostile = rawManifestFrame("evid-1", Int.MAX_VALUE, ByteArray(4))
-        assertNull(MeshFrameCodec.decode(hostile))
-    }
+    fun `decode does not reject a symbol request with a negative or huge stillNeed`() {
+        // Deliberately NOT bound-checked at decode time (see Frame.SymbolRequest's own doc, and
+        // decision 47's own entry, docs/DECISIONS.md) -- unlike the retired Manifest.totalChunks,
+        // nothing in decode() allocates proportional to stillNeed; RelayResponder's existing
+        // per-connection symbol budget (consumeSymbolBudget) is what actually bounds the cost,
+        // downstream, not here. This test documents that split so it isn't "fixed" by accident.
+        val negative = MeshFrameCodec.decode(MeshFrameCodec.encodeSymbolRequest("evid-1", -1))
+        check(negative is MeshFrameCodec.Frame.SymbolRequest)
+        assertEquals(-1, negative.stillNeed)
 
-    @Test
-    fun `decode rejects a manifest frame with a negative totalChunks`() {
-        val hostile = rawManifestFrame("evid-1", -1, ByteArray(4))
-        assertNull(MeshFrameCodec.decode(hostile))
-    }
-
-    @Test
-    fun `decode still accepts a legitimate manifest frame under the cap`() {
-        val bitset = MeshProtocol.encodeBitset(setOf(0, 1, 2), 17)
-        val legit = rawManifestFrame("evid-1", 17, bitset)
-        val decoded = MeshFrameCodec.decode(legit)
-        check(decoded is MeshFrameCodec.Frame.Manifest)
-        assertEquals(17, decoded.totalChunks)
+        val huge = MeshFrameCodec.decode(MeshFrameCodec.encodeSymbolRequest("evid-1", Int.MAX_VALUE))
+        check(huge is MeshFrameCodec.Frame.SymbolRequest)
+        assertEquals(Int.MAX_VALUE, huge.stillNeed)
     }
 
     // ---------- padGattFrame / unpadGattFrame (P6 item 4, PLAN-v2.md §4.4) ----------
@@ -1052,30 +1056,31 @@ class MeshFrameCodecTest {
 
     @Test
     fun `padGattFrame then unpadGattFrame then decode round-trips a real frame end to end`() {
-        val bitset = MeshProtocol.encodeBitset(setOf(0, 2), 5)
-        val real = rawManifestFrame("evid-1", 5, bitset)
+        val real = MeshFrameCodec.encodeSymbolRequest("evid-1", 5)
         val onWire = MeshFrameCodec.padGattFrame(real)
         assertTrue("padding should change the wire size for a small frame", onWire.size > real.size)
         val recovered = MeshFrameCodec.unpadGattFrame(onWire)
         assertArrayEquals(real, recovered)
         val decoded = MeshFrameCodec.decode(recovered!!)
-        check(decoded is MeshFrameCodec.Frame.Manifest)
-        assertEquals(5, decoded.totalChunks)
+        check(decoded is MeshFrameCodec.Frame.SymbolRequest)
+        assertEquals(5, decoded.stillNeed)
     }
 
     @Test
-    fun `padGattFrame padding does not leak into decode for FRAME_EVID_CHUNK, which reads via remaining()`() {
+    fun `padGattFrame padding does not leak into decode for FRAME_EVID_SYMBOL, which reads via remaining()`() {
         // The one frame type with no internal length field of its own — decode() takes
-        // buf.remaining() as the chunk payload verbatim. Padding MUST be stripped before decode()
+        // buf.remaining() as the symbol payload verbatim. Padding MUST be stripped before decode()
         // ever sees these bytes, or this frame type would silently absorb trailing pad bytes as
-        // chunk data. This exercises that specifically, not just round-tripping arbitrary bytes.
-        val chunk = MeshFrameCodec.encodeChunk(EvidenceChunkEntity("evid-1", 2, byteArrayOf(1, 2, 3, 4, 5)))
-        val onWire = MeshFrameCodec.padGattFrame(chunk)
-        assertTrue(onWire.size > chunk.size)
+        // symbol data. This exercises that specifically, not just round-tripping arbitrary bytes.
+        val symbol = MeshFrameCodec.encodeEvidSymbol(
+            MeshFrameCodec.Frame.EvidSymbol("evid-1", 2, byteArrayOf(1, 2, 3, 4, 5))
+        )
+        val onWire = MeshFrameCodec.padGattFrame(symbol)
+        assertTrue(onWire.size > symbol.size)
         val recovered = MeshFrameCodec.unpadGattFrame(onWire)
         val decoded = MeshFrameCodec.decode(recovered!!)
-        check(decoded is MeshFrameCodec.Frame.EvidChunk)
-        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), decoded.chunk.data)
+        check(decoded is MeshFrameCodec.Frame.EvidSymbol)
+        assertArrayEquals(byteArrayOf(1, 2, 3, 4, 5), decoded.data)
     }
 
     // ---------- MAX_SOS_MESSAGE_BYTES is enforced by openSos, not decode ----------

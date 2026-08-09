@@ -5,7 +5,6 @@ import kotlinx.coroutines.delay
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.CourierEnvelopeEntity
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
@@ -47,8 +46,11 @@ class RelayResponder(
     private val connectionRegistry: ConnectionRegistry,
     // Optional, default-null — so nothing that constructs a RelayResponder outside MeshService
     // (e.g. a future test) needs to change. See the WifiDirectCap/WifiDirectHandoff/
-    // WifiDirectAccept cases in handleIncoming and the Frame.Manifest case's WFD trigger for how
-    // this is used; entirely additive, never gates or modifies the existing BLE chunk-push path.
+    // WifiDirectAccept cases in handleIncoming — as of decision 47 (docs/DECISIONS.md), nothing
+    // proposes a handoff anymore (handleSymbolRequest doesn't call maybeAccelerateOverWifiDirect,
+    // see that function's own doc), so this field's only live effect now is advertising WFD
+    // capability and accepting/responding to a proposal from a hypothetical still-old-mechanism
+    // peer — asymmetrically inert, pending PLAN-v2.md §4.3 item 3's planned removal of WFD outright.
     // Placed before onSosReceived, not after, so onSosReceived stays the last constructor param —
     // MeshService's existing call site uses trailing-lambda syntax for it.
     private val wifiDirectCoordinator: WifiDirectHandoffCoordinator? = null,
@@ -120,12 +122,20 @@ class RelayResponder(
      *  [MeshGattClient]/[MeshGattServer], which only ever depend on [RelayResponder]. */
     val catalogEpoch: Int get() = relay.catalogEpoch + positionTracker.positionEpoch
 
-    // Per-connection cap on *responses* to a manifest (i.e. novel chunks actually pushed).
-    // Keeps one busy item from starving the rotation through other peers.
-    private val maxChunksPerSession = 150
-    private val sessionBudget = ConcurrentHashMap<String, Int>()
+    // Per-connection cap on *responses* to a SymbolRequest (i.e. novel symbols actually pushed) —
+    // renamed from maxChunksPerSession/sessionBudget (decision 47, docs/DECISIONS.md) when fountain
+    // coding replaced chunks with symbols, but NOT deleted: PLAN-v2.md §4.3's own "deletes... the
+    // session chunk budget" line describes the full Tier X target architecture (a dedicated bulk
+    // pipe off the shared GATT link, §4.3 item 3), which this slice is not — until item 3 lands,
+    // symbols still share this same connection with SOS/catalog-sync/presence/position traffic, and
+    // this budget's real purpose ("keeps one busy item from starving the rotation through other
+    // peers") doesn't evaporate just because chunks became symbols. Also now the sole backstop
+    // against a hostile/inflated `Frame.SymbolRequest.stillNeed` (see that field's own doc — it is
+    // deliberately NOT bound-checked at decode time, unlike the retired Manifest.totalChunks).
+    private val maxSymbolsPerSession = 150
+    private val symbolSessionBudget = ConcurrentHashMap<String, Int>()
 
-    // Same fairness reasoning as maxChunksPerSession/sessionBudget above, applied to the
+    // Same fairness reasoning as maxSymbolsPerSession/symbolSessionBudget above, applied to the
     // catalog-filter response path instead — caps how many sos/evidence-header/nickname
     // items get pushed to one peer in one connection, so a connection carrying an unusually large
     // catalog deficit can't monopolize the session; anything left over is simply offered again
@@ -146,13 +156,16 @@ class RelayResponder(
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > MAX_TRACKED_WFD_PEERS
     }
 
+    // isWfdCapable (the read side) lived here through v0.7.13-dev, used only by the now-deleted
+    // maybeAccelerateOverWifiDirect — removed by decision 47 (docs/DECISIONS.md). markWfdCapable
+    // itself stays: FRAME_WIFI_DIRECT_CAP is still received and recorded (a peer's own capability
+    // announcement is still part of the still-partially-alive advertise/accept side of this
+    // protocol — see the comment above handleSymbolRequest), it just has no reader anymore on this
+    // device's OWN propose side.
     @Synchronized
     private fun markWfdCapable(address: String) {
         peerWfdCapable[address] = true
     }
-
-    @Synchronized
-    private fun isWfdCapable(address: String): Boolean = peerWfdCapable[address] == true
 
     @Synchronized
     fun resetSessionBudget(address: String) {
@@ -160,9 +173,9 @@ class RelayResponder(
         // roles), so a set-to-0 entry accumulated one per address ever seen, forever — a real,
         // confirmed unbounded-growth bug (PLAN-v2.md §1.3, independent of address rotation:
         // even a re-key onto a stable identity wouldn't have bounded this on its own, since these
-        // two maps were never evicted at all). consumeBudget/consumeCatalogItemBudget already
+        // two maps were never evicted at all). consumeSymbolBudget/consumeCatalogItemBudget already
         // treat a missing entry as 0 via getOrDefault, so this changes memory footprint only.
-        sessionBudget.remove(address)
+        symbolSessionBudget.remove(address)
         catalogItemBudget.remove(address)
         peerWfdCapable.remove(address)
     }
@@ -236,12 +249,16 @@ class RelayResponder(
         )
     }
 
+    // want.coerceAtLeast(0): Frame.SymbolRequest.stillNeed is NOT bound-checked at decode time (see
+    // that field's own doc), unlike the retired Manifest.totalChunks which fed an O(totalChunks)
+    // allocation inside decode() itself — a negative value here has nothing analogous to guard
+    // against upstream, so this clamp is the actual defense.
     @Synchronized
-    private fun consumeBudget(address: String, want: Int): Int {
-        val used = sessionBudget.getOrDefault(address, 0)
-        val remaining = (maxChunksPerSession - used).coerceAtLeast(0)
-        val take = minOf(remaining, want)
-        sessionBudget[address] = used + take
+    private fun consumeSymbolBudget(address: String, want: Int): Int {
+        val used = symbolSessionBudget.getOrDefault(address, 0)
+        val remaining = (maxSymbolsPerSession - used).coerceAtLeast(0)
+        val take = minOf(remaining, want.coerceAtLeast(0))
+        symbolSessionBudget[address] = used + take
         return take
     }
 
@@ -283,14 +300,15 @@ class RelayResponder(
 
     /**
      * On connect we announce: a [CatalogFilter] of everything we hold (SOS/evidence-headers/
-     * nicknames), presence, position, and per-evidence-item have-bitsets. Actual SOS/evidence-
-     * header/nickname *content*, and evidence chunk bytes, only move in response to something the
-     * peer tells us — a received [CatalogFilter] (see `Frame.CatalogFilter` in [handleIncoming])
-     * or a received manifest (`FRAME_MANIFEST`) respectively — never eagerly here. This is the
-     * same "advertise state, then push only the deficit" shape the evidence-chunk manifest exchange
-     * already used, generalized to the whole catalog: once both sides have synced, a connection
-     * exchanges two compact filters and near-nothing else, instead of re-walking every SOS/header/
-     * nickname this device has ever seen on every single connection.
+     * nicknames), presence, position, and a per-evidence-item symbol deficit (`SymbolRequest` —
+     * decision 47, docs/DECISIONS.md, replacing the retired have-bitset `Manifest`). Actual
+     * SOS/evidence-header/nickname *content*, and evidence symbol bytes, only move in response to
+     * something the peer tells us — a received [CatalogFilter] (see `Frame.CatalogFilter` in
+     * [handleIncoming]) or a received `SymbolRequest` respectively — never eagerly here. This is
+     * the same "advertise state, then push only the deficit" shape the evidence-symbol request
+     * exchange already uses, generalized to the whole catalog: once both sides have synced, a
+     * connection exchanges two compact filters and near-nothing else, instead of re-walking every
+     * SOS/header/nickname this device has ever seen on every single connection.
      *
      * This replaced an earlier design (`PeerDeliveryTracker`) that instead remembered, per specific
      * peer address, which static items that peer had already been sent — correct at small scale,
@@ -363,13 +381,14 @@ class RelayResponder(
         }
         frames += presenceAndPositionFrames(toPeer)
         // P5 slice 1 (docs/DECISIONS.md decision 45): fullResRelayable, NOT relayableEvidenceMeta —
-        // sending our own manifest here IS what solicits chunks back (see RelayEngine.
-        // fullResRelayable's own doc for the full mechanism), so this is the actual pull-gate. Still
-        // always sent for every item in that narrower set — the bitset changes as chunks arrive, so
-        // it has to keep flowing every connection until the transfer completes on both ends, same as
-        // before this change for whichever items are actually eligible now.
+        // sending our own SymbolRequest here IS what solicits symbols back (see RelayEngine.
+        // fullResRelayable's own doc for the full mechanism), so this is the actual pull-gate.
+        // Decision 47's own small improvement over the retired Manifest mechanism: a COMPLETE item
+        // (stillNeed == 0) now sends nothing at all, rather than always re-sending a manifest every
+        // connection even at 100% — RelayEngine.symbolDeficit already returns 0 for that case.
         for (meta in relay.fullResRelayable()) {
-            frames += MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
+            val stillNeed = relay.symbolDeficit(meta.id)
+            if (stillNeed > 0) frames += MeshFrameCodec.encodeSymbolRequest(meta.id, stillNeed)
         }
         return frames
     }
@@ -379,7 +398,7 @@ class RelayResponder(
      *  once as part of that (connection start) AND periodically thereafter on an already-open
      *  link (see [refreshFramesToPush] / `MeshGattClient`'s periodic-refresh loop, PLAN-v2.md P3 /
      *  docs/DECISIONS.md decision 20): everything else `framesToPushOnConnect` sends (the catalog
-     *  filter, WFD cap, evidence manifests) either doesn't need this cadence of refreshing or is
+     *  filter, WFD cap, evidence symbol requests) either doesn't need this cadence of refreshing or is
      *  already handled by P1's event-driven flood-forward — only presence/position go stale purely
      *  from TIME passing on a link that's no longer cycling every ~45-60s the way v1's did. */
     private suspend fun presenceAndPositionFrames(toPeer: String?): List<ByteArray> {
@@ -516,30 +535,15 @@ class RelayResponder(
         return frames
     }
 
-    /** Proposes a WiFi Direct handoff for this evidence deficit if — and only if — the coordinator
-     *  is wired in, the peer has told us it supports WFD acceleration this connection, and the
-     *  deficit is large enough to be worth the overhead (see [WifiDirectTuning.
-     *  MIN_DEFICIT_BYTES_FOR_HANDOFF]). Silently no-ops otherwise; never affects the caller's own
-     *  BLE push either way. Only ever proposed for a group we hold the key to — a blind relay has
-     *  no key to authenticate the proposal with, so it structurally never reaches this far for a
-     *  group it isn't a member of (see [WifiDirectHandoffCoordinator]'s class doc). */
-    private suspend fun maybeAccelerateOverWifiDirect(
-        evidenceId: String,
-        deficit: List<Int>,
-        peerAddress: String,
-        respond: suspend (ByteArray) -> Unit,
-    ) {
-        val coordinator = wifiDirectCoordinator ?: return
-        if (!isWfdCapable(peerAddress)) return
-        if (deficit.size * RelayEngine.CHUNK_SIZE < WifiDirectTuning.MIN_DEFICIT_BYTES_FOR_HANDOFF) return
-        val meta = relay.evidenceMeta(evidenceId) ?: return
-        // Decision 38 (docs/DECISIONS.md): meta.groupId is null exactly when we're a blind carrier
-        // — no group resolved, so nothing to propose a WFD handoff for (same "stay a blind carrier"
-        // outcome the class doc above already describes, now reached via a null groupId).
-        val groupId = meta.groupId ?: return
-        val key = repo.getGroupKey(groupId) ?: return
-        coordinator.maybeProposeHandoff(peerAddress, evidenceId, groupId, deficit, key, respond)
-    }
+    // maybeAccelerateOverWifiDirect (proposed a WFD handoff for a chunk deficit) lived here through
+    // v0.7.13-dev — deleted by decision 47 (docs/DECISIONS.md): its one call site, inside the
+    // retired handleManifest, no longer exists, and fountain coding's SymbolRequest has no
+    // positional deficit list to hand it in the first place (see handleSymbolRequest's own doc for
+    // why adapting it would be throwaway work against PLAN-v2.md §4.3 item 3's already-planned
+    // removal of Wi-Fi Direct outright). WifiDirectHandoffCoordinator itself is NOT fully dead —
+    // onHandoffProposalReceived/onHandoffAccepted stay reachable via handleWifiDirectHandoff/
+    // handleWifiDirectAccept below, for a hypothetical still-old-mechanism peer proposing TO us;
+    // only the "propose a new handoff ourselves" direction is now unreachable.
 
     // ---------- per-frame handlers ----------
     // One private handler per frame type, dispatched from handleIncoming below. Each handler's own
@@ -804,18 +808,21 @@ class RelayResponder(
      *  here to a freshly-issued pull request: without this, a request made while a link to the
      *  holder is ALREADY open (common under P3's long-lived links, decision 19) would sit unsent
      *  until that link happens to reconnect. Unlike [floodForwardSos]'s degree-scaled fanout
-     *  subset, this goes to EVERY currently-open link, no jitter, no exclusion — a manifest is
-     *  small and cheap, we don't know which specific link (if any) holds the content, and there's
-     *  no "already seen this, don't re-flood" concern the way there is for SOS content (a manifest
-     *  is idempotent state, not a one-shot event). No-ops silently if [evidenceId] doesn't resolve
-     *  to a member row — mirrors [RelayEngine.requestFullResolution]'s own refusal for a blind-
-     *  carried item, since there would be nothing meaningful to solicit either way. */
+     *  subset, this goes to EVERY currently-open link, no jitter, no exclusion — a `SymbolRequest`
+     *  is small and cheap, we don't know which specific link (if any) holds the content, and
+     *  there's no "already seen this, don't re-flood" concern the way there is for SOS content (a
+     *  request is idempotent state, not a one-shot event). No-ops silently if [evidenceId] doesn't
+     *  resolve to a member row, or is already complete — mirrors [RelayEngine.requestFullResolution]
+     *  's own refusal for a blind-carried item, since there would be nothing meaningful to solicit
+     *  either way. */
     suspend fun pushFullResRequestNow(evidenceId: String) {
         val meta = relay.evidenceMeta(evidenceId) ?: return
         if (meta.groupId == null) return
-        val manifestFrame = MeshFrameCodec.encodeManifest(meta.id, meta.totalChunks, relay.haveIndexSet(meta.id))
+        val stillNeed = relay.symbolDeficit(evidenceId)
+        if (stillNeed <= 0) return
+        val requestFrame = MeshFrameCodec.encodeSymbolRequest(meta.id, stillNeed)
         for ((_, push) in connectionRegistry.others(excludePeerKey = null)) {
-            push.send(manifestFrame)
+            push.send(requestFrame)
         }
     }
 
@@ -824,12 +831,12 @@ class RelayResponder(
      *  resolution failure does NOT route to a separate in-memory opaque-custody path: this still
      *  stores a real (if `groupId = null`) [EvidenceEntity] row — but as of P5 slice 1 (decision
      *  45), a `groupId = null` row only ever holds this header (id/hash/size/mimeType/thumbnail).
-     *  It is never chunk-relayed: [RelayEngine.fullResRelayable] (what [framesToPushOnConnect]
-     *  reads to decide which items to send OUR OWN manifest for) excludes every blind-carried row
-     *  by construction — a manifest is the only thing that ever solicits chunks back (see
-     *  [handleManifest]'s own doc), and a blind carrier never sends one. This function itself needs
-     *  no gating of its own for that; the header still floods to everyone, blind relay included,
-     *  same as always. */
+     *  It is never symbol-relayed: [RelayEngine.fullResRelayable] (what [framesToPushOnConnect]
+     *  reads to decide which items to send OUR OWN `SymbolRequest` for) excludes every blind-carried
+     *  row by construction — a `SymbolRequest` is the only thing that ever solicits symbols back
+     *  (decision 47 replaced the manifest this doc originally described), and a blind carrier never
+     *  sends one. This function itself needs no gating of its own for that; the header still floods
+     *  to everyone, blind relay included, same as always. */
     private suspend fun handleEvidMeta(frame: MeshFrameCodec.Frame.EvidMeta) {
         val resolved = repo.resolveGroupKeyByHandle(frame.handle)
         if (resolved != null && !evidMetaIsAuthentic(frame, resolved.first, resolved.second)) return
@@ -840,7 +847,7 @@ class RelayResponder(
             id = frame.id, groupId = resolved?.first, senderId = frame.senderId, senderIsMe = false,
             timestamp = frame.timestamp, sha256 = frame.sha256, totalChunks = frame.totalChunks,
             mimeType = frame.mimeType, ttl = frame.ttl, mac = frame.mac, signature = frame.signature,
-            handle = frame.handle, thumbnail = frame.thumbnail,
+            handle = frame.handle, thumbnail = frame.thumbnail, contentLength = frame.contentLength,
         )
         // P5 slice 1 (docs/DECISIONS.md decision 45): no longer responds with our own manifest
         // here. A freshly-ingested row's wantsFullRes is always false (EvidenceEntity's own
@@ -859,7 +866,7 @@ class RelayResponder(
     ): Boolean {
         val macInput = MeshFrameCodec.evidMacInput(
             frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks,
-            frame.mimeType, frame.thumbnail,
+            frame.mimeType, frame.thumbnail, frame.contentLength,
         )
         // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — frame.timestamp
         // is already cleartext in the envelope, so the exact epoch is known directly.
@@ -879,8 +886,8 @@ class RelayResponder(
         return signatureOk
     }
 
-    private suspend fun handleEvidChunk(frame: MeshFrameCodec.Frame.EvidChunk) {
-        relay.ingestChunk(EvidenceChunkEntity(frame.chunk.evidenceId, frame.chunk.chunkIndex, frame.chunk.data))
+    private suspend fun handleEvidSymbol(frame: MeshFrameCodec.Frame.EvidSymbol) {
+        relay.ingestSymbol(frame.evidenceId, frame.esi, frame.data)
     }
 
     /** Carries a position for a group we hold no key for — see [OpaquePositionRelay]'s class doc.
@@ -1170,8 +1177,8 @@ class RelayResponder(
         val filterSkipped = sosSkipped + evidSkipped + nickSkipped + courierSkipped
 
         // Per-connection cap on how many of these we actually push this connection — mirrors
-        // consumeBudget's role for manifest chunk pushes (see maxChunksPerSession's doc), applied
-        // to this different push path. A typical short-lived group's catalog (tens of items)
+        // consumeSymbolBudget's role for SymbolRequest pushes (see maxSymbolsPerSession's doc),
+        // applied to this different push path. A typical short-lived group's catalog (tens of items)
         // rarely approaches this; the cap exists for the dense-crowd case where it could, so one
         // connection carrying an unusually large deficit can't monopolize the whole session
         // pushing it — anything left over is simply offered again next reconnect, same as a
@@ -1286,28 +1293,28 @@ class RelayResponder(
         return pushed
     }
 
-    private suspend fun handleManifest(
-        frame: MeshFrameCodec.Frame.Manifest,
+    /** Replaces the retired `handleManifest` (docs/DECISIONS.md decision 47, PLAN-v2.md §4.3 item 2)
+     *  — no positional deficit to compute anymore, [frame.stillNeed] already says exactly how many
+     *  more distinct symbols the peer wants. [RelayEngine.symbolsToSend] draws fresh repair symbols
+     *  from a shared, item-scoped esi cursor for a complete item, or whatever partial rows this
+     *  device itself holds for an incomplete one — see that function's own doc.
+     *
+     *  Does NOT call [maybeAccelerateOverWifiDirect] — that function, and the whole WFD accelerator
+     *  subsystem, is now unreachable dead code pending PLAN-v2.md §4.3 item 3's already-planned
+     *  removal of Wi-Fi Direct outright (adapting its positional `deficit: List<Int>` API to a
+     *  symbol-count world would be throwaway work against that already-scheduled deletion — see
+     *  decision 47's own entry). */
+    private suspend fun handleSymbolRequest(
+        frame: MeshFrameCodec.Frame.SymbolRequest,
         peerAddress: String,
         respond: suspend (ByteArray) -> Unit,
     ) {
-        val myHave = relay.haveIndexSet(frame.evidenceId)
-        val deficit = (myHave - frame.peerHave).sorted()
-        if (deficit.isNotEmpty()) {
-            // --- existing BLE push, completely unmodified ---
-            val take = consumeBudget(peerAddress, deficit.size)
-            if (take > 0) {
-                for (chunk in relay.chunksByIndexes(frame.evidenceId, deficit.take(take))) {
-                    respond(MeshFrameCodec.encodeChunk(chunk))
-                    delay(15)
-                }
-            }
-            // --- independent, fire-and-forget WiFi Direct accelerator attempt ---
-            // Races the BLE push above rather than replacing it: RelayEngine.ingestChunk's
-            // existing seenDao dedup already makes a chunk arriving twice (once via BLE, once via
-            // WFD) a harmless no-op, so this needs no coordination with the push just above it —
-            // see WifiDirectHandoffCoordinator's class doc.
-            maybeAccelerateOverWifiDirect(frame.evidenceId, deficit, peerAddress, respond)
+        val take = consumeSymbolBudget(peerAddress, frame.stillNeed)
+        if (take <= 0) return
+        for (symbol in relay.symbolsToSend(frame.evidenceId, take)) {
+            val evidSymbol = MeshFrameCodec.Frame.EvidSymbol(frame.evidenceId, symbol.esi, symbol.data)
+            respond(MeshFrameCodec.encodeEvidSymbol(evidSymbol))
+            delay(15)
         }
     }
 
@@ -1330,20 +1337,20 @@ class RelayResponder(
         wifiDirectCoordinator?.onHandoffAccepted(frame, peerAddress, key)
     }
 
-    /** May call [respond] zero, one, or many times (a manifest deficit can trigger a whole run of
-     *  chunk frames) — the caller supplies how a response frame actually reaches the peer. */
+    /** May call [respond] zero, one, or many times (a `SymbolRequest` can trigger a whole run of
+     *  symbol frames) — the caller supplies how a response frame actually reaches the peer. */
     suspend fun handleIncoming(bytes: ByteArray, peerAddress: String, respond: suspend (ByteArray) -> Unit) {
         val frame = MeshFrameCodec.decode(bytes) ?: return
         try {
             when (frame) {
                 is MeshFrameCodec.Frame.SosSealed -> handleSos(frame, peerAddress)
                 is MeshFrameCodec.Frame.EvidMeta -> handleEvidMeta(frame)
-                is MeshFrameCodec.Frame.EvidChunk -> handleEvidChunk(frame)
+                is MeshFrameCodec.Frame.EvidSymbol -> handleEvidSymbol(frame)
                 is MeshFrameCodec.Frame.PositionSealed -> handlePositionSealed(frame, peerAddress)
                 is MeshFrameCodec.Frame.Presence -> handlePresence(frame, peerAddress)
                 is MeshFrameCodec.Frame.Nickname -> handleNickname(frame, peerAddress)
                 is MeshFrameCodec.Frame.CatalogFilter -> handleCatalogFilter(frame, peerAddress, respond)
-                is MeshFrameCodec.Frame.Manifest -> handleManifest(frame, peerAddress, respond)
+                is MeshFrameCodec.Frame.SymbolRequest -> handleSymbolRequest(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.WifiDirectCap -> handleWifiDirectCap(peerAddress)
                 is MeshFrameCodec.Frame.WifiDirectHandoff -> handleWifiDirectHandoff(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.WifiDirectAccept -> handleWifiDirectAccept(frame, peerAddress)

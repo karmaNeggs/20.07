@@ -202,10 +202,16 @@ data class EvidenceEntity(
     // describes. Gates RelayEngine.fullResRelayable, which in turn gates whether this device ever
     // sends its own manifest for this item — see that function's own doc for the full mechanism.
     val wantsFullRes: Boolean = false,
+    // P5 item 2 slice 2 (docs/DECISIONS.md decision 47) — exact ciphertext byte length. totalChunks
+    // already equals a FountainCode `k` (ceil(contentLength / RelayEngine.CHUNK_SIZE)) but only
+    // bounds a RANGE of possible lengths; FountainDecoder needs the exact value to strip the final
+    // symbol's zero padding at decode() time. See MeshFrameCodec.Frame.EvidMeta.contentLength's own
+    // doc for the full reasoning.
+    val contentLength: Int = 0,
 ) {
     private fun scalars() = listOf(
         id, groupId, senderId, senderIsMe, timestamp, sha256, totalChunks, mimeType, ttl,
-        originalLocalPath, complete, wantsFullRes,
+        originalLocalPath, complete, wantsFullRes, contentLength,
     )
 
     override fun equals(other: Any?): Boolean {
@@ -226,19 +232,26 @@ data class EvidenceEntity(
     }
 }
 
-@Entity(tableName = "evidence_chunks", primaryKeys = ["evidenceId", "chunkIndex"])
-data class EvidenceChunkEntity(
+// P5 item 2 slice 2 (docs/DECISIONS.md decision 47): renamed from EvidenceChunkEntity, chunkIndex
+// (bounded [0, totalChunks)) renamed to esi (unbounded — systematic OR repair, see FountainCode.kt's
+// own class doc). One row per distinct symbol this device has directly received, persisted as soon
+// as received regardless of whether it's still redundant to this device's own decode progress — a
+// partial holder must be able to usefully relay its partial symbol set to a THIRD peer, the actual
+// "faster with more carriers" value §4.3 item 2 names. Collapsed to the canonical k systematic rows
+// once complete — see RelayEngine.ingestSymbol's own doc.
+@Entity(tableName = "evidence_symbols", primaryKeys = ["evidenceId", "esi"])
+data class EvidenceSymbolEntity(
     val evidenceId: String,
-    val chunkIndex: Int,
+    val esi: Int,
     val data: ByteArray
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
-        if (other !is EvidenceChunkEntity) return false
-        return evidenceId == other.evidenceId && chunkIndex == other.chunkIndex && data.contentEquals(other.data)
+        if (other !is EvidenceSymbolEntity) return false
+        return evidenceId == other.evidenceId && esi == other.esi && data.contentEquals(other.data)
     }
 
-    override fun hashCode(): Int = 31 * (31 * evidenceId.hashCode() + chunkIndex) + data.contentHashCode()
+    override fun hashCode(): Int = 31 * (31 * evidenceId.hashCode() + esi) + data.contentHashCode()
 }
 
 /** Pins one sender's Ed25519 public key within one group, on first sight of their presence

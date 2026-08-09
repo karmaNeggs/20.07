@@ -3,11 +3,13 @@ package org.offlinemesh.app.ble
 import android.content.Context
 import android.util.Log
 import androidx.room.withTransaction
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.crypto.SenderIdentity
 import org.offlinemesh.app.data.CourierEnvelopeEntity
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.EvidenceEntity
+import org.offlinemesh.app.data.EvidenceSymbolEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SeenMessageEntity
@@ -15,6 +17,7 @@ import org.offlinemesh.app.data.SosEntity
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
@@ -68,26 +71,6 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
             return if (bytes.size <= maxBytes) text else String(bytes, 0, maxBytes, Charsets.UTF_8)
         }
 
-        /** Splits [data] into chunks of at most [size] bytes via [ByteArray.copyOfRange] — NOT
-         *  `data.toList().chunked(size)`, which boxes every single byte into a `java.lang.Byte`. A
-         *  300KB image meant ~300,000 boxed objects plus ~750 throwaway `List<Byte>` sublists plus a
-         *  final copy back to `ByteArray`, on exactly the low-RAM phones this app targets — the same
-         *  class of unnecessary allocation `maybeReassemble` already avoided on the reassembly side
-         *  via pre-sized-array-plus-arraycopy, just not previously applied here on the way out.
-         *  `internal`, in the companion (not an instance method) — constructing a real [RelayEngine]
-         *  needs a [Context] (for its Room database), which a plain JVM test can't provide; this has
-         *  no such dependency, so it's kept directly, deterministically testable on its own. */
-        internal fun chunkBytes(data: ByteArray, size: Int): List<ByteArray> {
-            val chunks = ArrayList<ByteArray>((data.size + size - 1) / size)
-            var offset = 0
-            while (offset < data.size) {
-                val end = minOf(offset + size, data.size)
-                chunks.add(data.copyOfRange(offset, end))
-                offset = end
-            }
-            return chunks
-        }
-
         /** Where a reassembled evidence file lives on disk once [EvidenceEntity.complete] is true —
          *  the single place this naming convention is defined, shared with the UI layer
          *  (GroupChatScreen's "tap to view") so it can find the same file [maybeReassemble] wrote,
@@ -103,7 +86,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     private val seenDao = db.seenMessageDao()
     private val sosDao = db.sosDao()
     private val evidenceDao = db.evidenceDao()
-    private val chunkDao = db.evidenceChunkDao()
+    private val symbolDao = db.evidenceSymbolDao()
     private val nicknameDao = db.nicknameDao()
     private val courierEnvelopeDao = db.courierEnvelopeDao()
 
@@ -115,6 +98,30 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     // case), instead of only reconnecting on the old peer-agnostic timer.
     private val epoch = AtomicInteger(0)
     val catalogEpoch: Int get() = epoch.get()
+
+    // P5 item 2 slice 2 (docs/DECISIONS.md decision 47) — one live FountainDecoder per in-flight
+    // (not-yet-complete) evidence item, keyed on evidenceId, lazily created and rehydrated from
+    // persisted EvidenceSymbolEntity rows on first touch each process lifetime (see
+    // getOrCreateDecoder). The persisted rows are the source of truth; this map is a derived,
+    // disposable cache — losing it (process restart) costs nothing but a rehydrate replay, never
+    // correctness. Entries are removed once an item completes (ingestSymbol) or is pruned
+    // (pruneExpired).
+    private val liveDecoders = ConcurrentHashMap<String, FountainDecoder>()
+
+    // Shared, item-scoped (NOT peer-scoped) forward-only esi cursor for repair-symbol generation —
+    // see symbolsToSend's own doc for why this is the one piece of state a sender keeps, and why it
+    // doesn't reintroduce the per-peer-memory problem CatalogFilter's own class doc warns against
+    // (PeerDeliveryTracker's old bounded-eviction issue): this is keyed on content, not on who's
+    // asking, so there's nothing to evict and nothing that goes stale as peers come and go.
+    private val symbolCursors = ConcurrentHashMap<String, AtomicInteger>()
+
+    // Guards the rehydrate-or-fetch + addSymbol + persist sequence in ingestSymbol against two GATT
+    // connections concurrently feeding symbols for the SAME evidenceId — FountainDecoder itself has
+    // no internal synchronization. A single instance-wide mutex, not per-evidenceId, is sufficient
+    // at this app's realistic concurrency (a handful of simultaneous connections, not thousands) —
+    // same "no need for finer granularity at this scale" call admitCourierEnvelope's own
+    // db.withTransaction makes for the analogous DB-row-level race.
+    private val decoderMutex = Mutex()
 
     // ---------- creating local items ----------
 
@@ -173,7 +180,9 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val ciphertext = CryptoUtils.encrypt(contentKey, plaintext)
         val id = UUID.randomUUID().toString()
         val hash = CryptoUtils.sha256Hex(ciphertext)
-        val chunks = chunkBytes(ciphertext, CHUNK_SIZE)
+        // FountainCode.encoder does its own zero-padding internally (see its own doc) — no manual
+        // last-symbol handling needed here, a genuine simplification over the old chunkBytes shape.
+        val encoder = FountainCode.encoder(ciphertext, CHUNK_SIZE)
         val senderId = repo.deviceId
         // Sealed under the SAME contentKey the full-res ciphertext already uses — see
         // MeshFrameCodec.sealThumbnail's own doc for why this replaced this decision's original
@@ -182,7 +191,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // raw JPEG.
         val sealedThumbnail = MeshFrameCodec.sealThumbnail(contentKey, id, thumbnail)
         val macInput = MeshFrameCodec.evidMacInput(
-            id, groupId, senderId, timestamp, hash, chunks.size, mimeType, sealedThumbnail,
+            id, groupId, senderId, timestamp, hash, encoder.k, mimeType, sealedThumbnail, ciphertext.size,
         )
         val mac = CryptoUtils.authTag(contentKey, macInput)
         val signature = repo.getSenderKeyPair(groupId)?.let { SenderIdentity.sign(it.privateKey, macInput) }
@@ -191,16 +200,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val handle = MeshFrameCodec.groupHandle(rootKey, timestamp / MILLIS_PER_SECOND)
         val evidence = EvidenceEntity(
             id = id, groupId = groupId, senderId = senderId, senderIsMe = true,
-            timestamp = timestamp, sha256 = hash, totalChunks = chunks.size,
+            timestamp = timestamp, sha256 = hash, totalChunks = encoder.k,
             mimeType = mimeType, ttl = DEFAULT_TTL, originalLocalPath = originalLocalPath, complete = true,
             mac = mac, signature = signature, handle = handle, thumbnail = sealedThumbnail,
+            contentLength = ciphertext.size,
         )
         evidenceDao.insert(evidence)
         seenDao.insert(SeenMessageEntity(id, System.currentTimeMillis()))
-        chunks.forEachIndexed { idx, bytes ->
-            val chunkEntity = EvidenceChunkEntity(id, idx, bytes)
-            chunkDao.insert(chunkEntity)
-            seenDao.insert(SeenMessageEntity("$id:$idx", System.currentTimeMillis()))
+        for (esi in 0 until encoder.k) {
+            symbolDao.insert(EvidenceSymbolEntity(id, esi, encoder.symbol(esi).data))
+            seenDao.insert(SeenMessageEntity("$id:$esi", System.currentTimeMillis()))
         }
         // The sender's own "tap to view" reads from the exact same outputFile() location
         // maybeReassemble() writes to on the RECEIVING end — without this, only receivers ever get
@@ -370,58 +379,143 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         return true
     }
 
-    suspend fun ingestChunk(chunk: EvidenceChunkEntity): Boolean {
-        val seenId = "${chunk.evidenceId}:${chunk.chunkIndex}"
-        // FRAME_EVID_CHUNK carries no totalChunks field to validate chunkIndex against (chunks can
-        // legitimately arrive before the header), so this absolute cap — the same one
-        // MeshFrameCodec.decode enforces on evidence-meta/manifest totalChunks — is the only bound
-        // on this path. Without it, a flood of otherwise-valid ~400-byte chunk frames with huge,
-        // sparse chunkIndex values grows this table without limit. Combined with the seenDao check
-        // via `||` (rather than two separate early returns) to keep this at 2 return statements.
-        val outOfBounds = chunk.chunkIndex !in 0 until MeshFrameCodec.MAX_EVIDENCE_CHUNKS
-        if (outOfBounds || seenDao.find(seenId) != null) return false
-        seenDao.insert(SeenMessageEntity(seenId, System.currentTimeMillis()))
-        chunkDao.insert(chunk)
-        maybeReassemble(chunk.evidenceId)
-        return true
+    /** Lazily creates (or returns the already-live) [FountainDecoder] for [meta], rehydrated from
+     *  every already-persisted [EvidenceSymbolEntity] row for this id on first touch each process
+     *  lifetime — the persisted rows are the source of truth, this in-memory decoder is a derived,
+     *  disposable cache (see [liveDecoders]'s own doc: losing it costs a rehydrate replay, never
+     *  correctness). Caller must hold [decoderMutex]. */
+    private suspend fun getOrCreateDecoder(meta: EvidenceEntity): FountainDecoder {
+        liveDecoders[meta.id]?.let { return it }
+        val decoder = FountainDecoder(meta.totalChunks, CHUNK_SIZE, meta.contentLength)
+        for (row in symbolDao.allSymbols(meta.id)) decoder.addSymbol(Symbol(row.esi, row.data))
+        liveDecoders[meta.id] = decoder
+        return decoder
     }
 
-    private suspend fun maybeReassemble(evidenceId: String) {
-        val meta = evidenceDao.get(evidenceId) ?: return
-        if (meta.complete) return
-        val have = chunkDao.receivedCount(evidenceId)
-        if (have < meta.totalChunks) return
+    /** Folds one directly-received symbol into [evidenceId]'s decode state, ALWAYS persisting it
+     *  first (regardless of decoder outcome) — a partial holder must still be able to usefully
+     *  relay its partial symbol set to a THIRD peer, the actual "faster with more carriers" value
+     *  PLAN-v2.md §4.3 item 2 names; a design that only persisted at completion would silently
+     *  defeat that promise. Returns whether [esi] was genuinely new STORAGE (worth relaying to a
+     *  different peer that doesn't have it), independent of whether it also advanced THIS device's
+     *  own decode rank — those are different questions (a symbol can be decoder-redundant while
+     *  still being storage-new). */
+    suspend fun ingestSymbol(evidenceId: String, esi: Int, data: ByteArray): Boolean {
+        // No totalChunks/k to validate esi against yet if the header hasn't arrived (a symbol can
+        // legitimately arrive before its header, same as the retired chunk mechanism) — this
+        // absolute cap, the same one MeshFrameCodec.decode enforces on evidence-meta's totalChunks,
+        // is the only bound on this path.
+        if (esi !in 0 until MeshFrameCodec.MAX_EVIDENCE_CHUNKS) return false
+        val seenId = "$evidenceId:$esi"
+        if (seenDao.find(seenId) != null) return false
+        seenDao.insert(SeenMessageEntity(seenId, System.currentTimeMillis()))
+        val rowId = symbolDao.insert(EvidenceSymbolEntity(evidenceId, esi, data))
+        val isNew = rowId != -1L
+        // Checked regardless of isNew, not just when this exact symbol was new storage — a rare
+        // crash-recovery case (a prior session persisted enough rows to be complete but never ran
+        // this check) only self-heals via getOrCreateDecoder's own rehydrate-from-all-persisted-
+        // rows step. Cheap when nothing has changed: meta.complete short-circuits once genuinely
+        // done.
+        maybeCompleteFromSymbol(evidenceId, esi, data)
+        return isNew
+    }
+
+    /** [esi]/[data] are fed into the decoder EXPLICITLY here, not left to [getOrCreateDecoder]'s own
+     *  rehydrate-on-first-creation step alone — that step only re-scans Room when a decoder for this
+     *  id doesn't exist yet in [liveDecoders]. If an earlier call (e.g. a [symbolDeficit] read before
+     *  any symbols existed) already created and cached the decoder, rehydration never runs again, so
+     *  a symbol ingested afterward would otherwise never actually reach it. [FountainDecoder.
+     *  addSymbol]'s own `seenEsi` dedup makes a redundant call (this esi was already included via a
+     *  fresh rehydration moments earlier) a safe no-op either way. */
+    private suspend fun maybeCompleteFromSymbol(evidenceId: String, esi: Int, data: ByteArray) = decoderMutex.withLock {
+        val meta = evidenceDao.get(evidenceId) ?: return@withLock
+        if (meta.complete) return@withLock
+        val decoder = getOrCreateDecoder(meta)
+        decoder.addSymbol(Symbol(esi, data))
+        if (!decoder.isComplete) return@withLock
 
         // Decision 38 (docs/DECISIONS.md): meta.groupId is null exactly when we're a blind carrier
         // (never resolved which group this belongs to) — same "stay a blind carrier" outcome as
         // before, now reached via a null groupId instead of a failed getGroupKey lookup.
-        val rootKey = meta.groupId?.let { repo.getGroupKey(it) } ?: return
+        val rootKey = meta.groupId?.let { repo.getGroupKey(it) } ?: return@withLock
+        val ciphertext = decoder.decode() ?: return@withLock
+        val actualHash = CryptoUtils.sha256Hex(ciphertext)
+        if (actualHash != meta.sha256) {
+            Log.w(TAG, "evidence $evidenceId hash mismatch — corrupted or tampered, discarding reassembly")
+            liveDecoders.remove(evidenceId)
+            return@withLock
+        }
         // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — meta.timestamp
         // is the content's own authored time, already cleartext (round-tripped through the wire
         // envelope since decision 38), so the exact epoch is known directly, unlike SOS/position
         // whose timestamp lives inside the seal.
         val contentKey = CryptoUtils.contentEpochKey(rootKey, meta.timestamp / MILLIS_PER_SECOND)
-        val chunks = chunkDao.allChunks(evidenceId).sortedBy { it.chunkIndex }
-        // Pre-sized array + arraycopy, not repeated `+=` (O(n) instead of O(n^2) — matters once
-        // this is thousands of chunks, found during QC while checking the large-file path).
-        val ciphertext = ByteArray(chunks.sumOf { it.data.size })
-        var offset = 0
-        for (c in chunks) {
-            System.arraycopy(c.data, 0, ciphertext, offset, c.data.size)
-            offset += c.data.size
-        }
-        val actualHash = CryptoUtils.sha256Hex(ciphertext)
-        if (actualHash != meta.sha256) {
-            Log.w(TAG, "evidence $evidenceId hash mismatch — corrupted or tampered, discarding reassembly")
-            return
-        }
-        val plaintext = CryptoUtils.decrypt(contentKey, ciphertext) ?: return
+        val plaintext = CryptoUtils.decrypt(contentKey, ciphertext) ?: return@withLock
 
         val outFile = outputFile(context, evidenceId, meta.mimeType)
         outFile.parentFile?.mkdirs()
         FileOutputStream(outFile).use { it.write(plaintext) }
 
+        // Collapse storage to the canonical k systematic rows — the actual step that turns a
+        // device that just finished receiving something into a fully-capable re-sharer through the
+        // exact same code path own-authored content uses (symbolsToSend below), no separate
+        // "receiver-side serving" logic needed.
+        symbolDao.deleteForEvidence(evidenceId)
+        val encoder = FountainCode.encoder(ciphertext, CHUNK_SIZE)
+        for (i in 0 until encoder.k) symbolDao.insert(EvidenceSymbolEntity(evidenceId, i, encoder.symbol(i).data))
+
         evidenceDao.update(meta.copy(complete = true))
+        liveDecoders.remove(evidenceId)
+        symbolCursors.remove(evidenceId)
+    }
+
+    /** How many more distinct symbols THIS device still needs for [evidenceId] before it can
+     *  complete reassembly — 0 for a complete item, a blind-carried item ([EvidenceEntity.groupId]
+     *  null — pull-gating stays member-only, same as [fullResRelayable]'s own guarantee), or an
+     *  unknown id. Feeds [RelayResponder]'s replacement for the retired manifest-solicitation flow:
+     *  sending a `SymbolRequest` is what solicits symbols back, the same "sending IS what solicits"
+     *  mechanism the retired `Manifest` played for chunks. */
+    suspend fun symbolDeficit(evidenceId: String): Int {
+        val meta = evidenceDao.get(evidenceId) ?: return 0
+        if (meta.complete || meta.groupId == null) return 0
+        return decoderMutex.withLock { getOrCreateDecoder(meta).deficit }
+    }
+
+    /** [FountainDecoder.rank] for [evidenceId] — "how much decode progress has this device made,"
+     *  the UI-facing progress-bar counterpart to [symbolDeficit] (replaces the retired
+     *  `EvidenceChunkDao.receivedCount`'s role in `GroupChatScreen`'s own "receiving file: X / Y"
+     *  display, decision 47, docs/DECISIONS.md — a rank is the more meaningful "progress toward
+     *  decodable" number than a raw stored-row count, since a device can hold more rows than its
+     *  rank if some turned out redundant). [EvidenceEntity.totalChunks] for a complete item (rank
+     *  always equals k once done); 0 for an unknown id. */
+    suspend fun decodeRank(evidenceId: String): Int {
+        val meta = evidenceDao.get(evidenceId) ?: return 0
+        if (meta.complete) return meta.totalChunks
+        return decoderMutex.withLock { getOrCreateDecoder(meta).rank }
+    }
+
+    /** Symbols to push in response to a peer's [wantCount]-sized request for [evidenceId]. For a
+     *  COMPLETE item, generates fresh symbols from a shared, item-scoped (NOT peer-scoped)
+     *  forward-only esi cursor — see [symbolCursors]'s own doc for why this is the one piece of
+     *  state a sender keeps, and why it doesn't reintroduce per-peer memory. For an INCOMPLETE item
+     *  this device only partially holds, returns up to [wantCount] of its own currently-persisted
+     *  rows verbatim — no cursor needed, the row set is naturally small; a duplicate offered again
+     *  later is a cheap no-op on the far end (same "worst case is wasted bandwidth, never
+     *  incorrectness" framing [FountainCode]'s own class doc gives the primitive). Empty for an
+     *  unknown id. */
+    suspend fun symbolsToSend(evidenceId: String, wantCount: Int): List<Symbol> {
+        if (wantCount <= 0) return emptyList()
+        val meta = evidenceDao.get(evidenceId) ?: return emptyList()
+        if (!meta.complete) {
+            return symbolDao.allSymbols(evidenceId).take(wantCount).map { Symbol(it.esi, it.data) }
+        }
+        val canonical = symbolDao.allSymbols(evidenceId).sortedBy { it.esi }
+        if (canonical.size < meta.totalChunks) return emptyList() // defensive; shouldn't happen once complete
+        val padded = ByteArray(canonical.size * CHUNK_SIZE)
+        for ((i, row) in canonical.withIndex()) System.arraycopy(row.data, 0, padded, i * CHUNK_SIZE, CHUNK_SIZE)
+        val encoder = FountainCode.encoder(padded, CHUNK_SIZE)
+        val cursor = symbolCursors.getOrPut(evidenceId) { AtomicInteger(0) }
+        return List(wantCount) { encoder.symbol(cursor.getAndIncrement()) }
     }
 
     // ---------- what to offer a peer we just connected to ----------
@@ -442,10 +536,11 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
      *  full-resolution ciphertext for content it can't decrypt, only the small header+thumbnail.
      *
      *  [RelayResponder.framesToPushOnConnect] reads this (not [relayableEvidenceMeta]) to decide
-     *  which items to send OUR OWN manifest for — and sending our manifest is what actually
-     *  solicits chunks back (see [RelayResponder.handleManifest]'s doc), so narrowing this set is
-     *  the entire mechanism; nothing about [RelayResponder.handleManifest]'s own push-side logic
-     *  needed to change at all. */
+     *  which items to send OUR OWN `SymbolRequest` for — and sending one is what actually solicits
+     *  symbols back (decision 47 replaced the manifest this doc originally described with
+     *  [symbolDeficit]/[symbolsToSend] underneath, but this pull-gating decision itself — *whether*
+     *  to solicit full resolution — stayed conceptually unchanged; see decision 45's own closing
+     *  note), so narrowing this set remains the entire mechanism. */
     suspend fun fullResRelayable(): List<EvidenceEntity> = evidenceDao.getFullResRelayable()
 
     /** Marks [evidenceId] as wanted at full resolution — the user-facing "load full image" action.
@@ -490,13 +585,16 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun heldEvidenceIds(): List<String> = evidenceDao.allIds()
 
     /** Looks up one evidence item's header by id — used by [WifiDirectHandoffCoordinator] to
-     *  re-derive a `groupId`/`mimeType` from just the `evidenceId` a Manifest frame carries. */
+     *  re-derive a `groupId`/`mimeType` from just the `evidenceId` a Manifest frame used to carry
+     *  (that frame type is retired — see decision 47 — this lookup's own callers are unaffected). */
     suspend fun evidenceMeta(id: String): EvidenceEntity? = evidenceDao.get(id)
 
-    suspend fun haveIndexSet(evidenceId: String): Set<Int> = chunkDao.receivedIndexes(evidenceId).toSet()
-
-    suspend fun chunksByIndexes(evidenceId: String, indexes: List<Int>): List<EvidenceChunkEntity> =
-        indexes.mapNotNull { chunkDao.getChunk(evidenceId, it) }
+    /** Fetches whichever of [esiList] this device happens to hold, if any — mirrors the retired
+     *  `chunksByIndexes`' exact shape. Used only by [WifiDirectHandoffCoordinator]'s own positional-
+     *  index handoff path, which nothing calls into anymore as of decision 47 (see that class's own
+     *  doc) — kept purely so that dead-but-still-compiling path has something real to call. */
+    suspend fun symbolsByEsi(evidenceId: String, esiList: List<Int>): List<Symbol> =
+        esiList.mapNotNull { symbolDao.getSymbol(evidenceId, it) }.map { Symbol(it.esi, it.data) }
 
     suspend fun nicknamesForGroup(groupId: String): List<NicknameEntity> = nicknameDao.getForGroup(groupId)
 
@@ -527,7 +625,14 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun pruneExpired() {
         val cutoff = System.currentTimeMillis() - CONTENT_MAX_AGE_MILLIS
         val expiredIds = evidenceDao.idsOlderThan(cutoff)
-        for (id in expiredIds) chunkDao.deleteForEvidence(id)
+        for (id in expiredIds) {
+            symbolDao.deleteForEvidence(id)
+            // Bounds liveDecoders/symbolCursors growth to active items — without this they'd only
+            // ever shrink on completion (maybeCompleteFromSymbol), never on an item that expires
+            // still incomplete.
+            liveDecoders.remove(id)
+            symbolCursors.remove(id)
+        }
         evidenceDao.pruneOlderThan(cutoff)
         sosDao.pruneOlderThan(cutoff)
         seenDao.prune(System.currentTimeMillis() - SEEN_ID_MAX_AGE_MILLIS)

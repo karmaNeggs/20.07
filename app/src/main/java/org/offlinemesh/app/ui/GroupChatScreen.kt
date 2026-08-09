@@ -120,10 +120,14 @@ fun GroupChatScreen(
     val nicknameMap = remember(nicknames) { nicknames.associate { it.senderId to it.username } }
     var chunkCounts by remember { mutableStateOf<Map<String, Int>>(emptyMap()) }
 
-    LaunchedEffect(evidenceList) {
+    LaunchedEffect(evidenceList, meshService) {
+        val svc = meshService ?: return@LaunchedEffect
         while (true) {
+            // decision 47 (docs/DECISIONS.md): decodeRank, not the retired EvidenceChunkDao.
+            // receivedCount — a FountainDecoder's rank is the meaningful "progress toward
+            // decodable" number now, not a raw stored-row count (see that function's own doc).
             chunkCounts = evidenceList.filter { !it.complete }
-                .associate { it.id to db.evidenceChunkDao().receivedCount(it.id) }
+                .associate { it.id to svc.decodeRank(it.id) }
             if (evidenceList.all { it.complete }) break
             delay(2000)
         }

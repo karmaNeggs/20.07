@@ -219,6 +219,33 @@ class FountainCodeTest {
     }
 
     @Test
+    fun `rank and deficit track progress and only ever move toward completion`() {
+        val symbolSize = 10
+        val k = 20
+        val data = randomBytes(k * symbolSize, seed = 55)
+        val encoder = FountainCode.encoder(data, symbolSize)
+        val decoder = FountainDecoder(k, symbolSize, data.size)
+
+        assertEquals(0, decoder.rank)
+        assertEquals(k, decoder.deficit)
+
+        for (esi in 0 until k) {
+            val before = decoder.rank
+            val added = decoder.addSymbol(encoder.symbol(esi))
+            assertEquals(if (added) before + 1 else before, decoder.rank)
+            assertEquals(k - decoder.rank, decoder.deficit)
+        }
+        assertEquals(k, decoder.rank)
+        assertEquals(0, decoder.deficit)
+        assertTrue(decoder.isComplete)
+
+        // A redundant symbol past completion must not move rank/deficit at all.
+        decoder.addSymbol(encoder.symbol(0))
+        assertEquals(k, decoder.rank)
+        assertEquals(0, decoder.deficit)
+    }
+
+    @Test
     fun `bounded-time smoke test at a moderately large k does not blow up quadratically`() {
         // Not the full MAX_EVIDENCE_CHUNKS=4096 ceiling (kept out of the regular suite to avoid a
         // slow/flaky CI run) -- see FountainCode's own class doc: full-4096 decode cost is real but

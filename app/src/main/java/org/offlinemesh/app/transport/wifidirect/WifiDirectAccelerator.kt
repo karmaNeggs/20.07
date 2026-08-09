@@ -13,7 +13,6 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.crypto.CryptoUtils
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.EOFException
@@ -81,7 +80,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
         peerAddress: String,
         token: ByteArray,
         readyAtEpochMs: Long,
-        chunks: List<EvidenceChunkEntity>,
+        chunks: List<MeshFrameCodec.Frame.EvidSymbol>,
     ) {
         val m = manager ?: return
         val c = channel ?: return
@@ -107,7 +106,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
         peerAddress: String,
         token: ByteArray,
         readyAtEpochMs: Long,
-        onChunk: suspend (EvidenceChunkEntity) -> Unit,
+        onChunk: suspend (MeshFrameCodec.Frame.EvidSymbol) -> Unit,
     ) {
         val m = manager ?: return
         val c = channel ?: return
@@ -300,15 +299,17 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
     }
 
     // ---------------- chunk transfer ----------------
-    // Reuses MeshFrameCodec's existing FRAME_EVID_CHUNK encode/decode verbatim — the exact same
-    // frame format and RelayEngine.ingestChunk ingestion path as BLE, just a different transport
-    // underneath. Length-prefixed since a raw socket stream has no natural frame boundary the way
-    // a single BLE characteristic write does.
+    // Reuses MeshFrameCodec's existing FRAME_EVID_SYMBOL encode/decode verbatim (decision 47,
+    // docs/DECISIONS.md, superseding the retired FRAME_EVID_CHUNK this comment used to name) — the
+    // exact same frame format and RelayEngine.ingestSymbol ingestion path as BLE, just a different
+    // transport underneath (currently unreachable — see WifiDirectTransport's own class doc).
+    // Length-prefixed since a raw socket stream has no natural frame boundary the way a single BLE
+    // characteristic write does.
 
-    private fun sendChunks(socket: Socket, chunks: List<EvidenceChunkEntity>) {
+    private fun sendChunks(socket: Socket, chunks: List<MeshFrameCodec.Frame.EvidSymbol>) {
         val out = DataOutputStream(socket.getOutputStream())
         for (chunk in chunks) {
-            val bytes = MeshFrameCodec.encodeChunk(chunk)
+            val bytes = MeshFrameCodec.encodeEvidSymbol(chunk)
             out.writeInt(bytes.size)
             out.write(bytes)
         }
@@ -317,7 +318,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
 
     /** `internal`, same reasoning as [handshakeToken] — a real socket-stream parser, directly
      *  unit-testable over a loopback pair with no `WifiP2pManager`/Context dependency. */
-    internal suspend fun receiveChunks(socket: Socket, onChunk: suspend (EvidenceChunkEntity) -> Unit) {
+    internal suspend fun receiveChunks(socket: Socket, onChunk: suspend (MeshFrameCodec.Frame.EvidSymbol) -> Unit) {
         val din = DataInputStream(socket.getInputStream())
         // `return`, not `break` — there's nothing after this loop either way, and a function-level
         // return (rather than two `break`s exiting the same infinite loop) reads more directly as
@@ -333,7 +334,7 @@ class WifiDirectAccelerator(private val context: Context) : WifiDirectTransport 
             val bytes = ByteArray(len)
             din.readFully(bytes)
             val frame = MeshFrameCodec.decode(bytes)
-            if (frame is MeshFrameCodec.Frame.EvidChunk) onChunk(frame.chunk)
+            if (frame is MeshFrameCodec.Frame.EvidSymbol) onChunk(frame)
         }
     }
 

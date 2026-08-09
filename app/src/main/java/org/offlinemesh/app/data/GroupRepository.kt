@@ -23,7 +23,7 @@ class GroupRepository(context: Context) {
     // repository with a one-off wrapper per cross-class DAO need.
     val sosDao = db.sosDao()
     private val evidenceDao = db.evidenceDao()
-    private val evidenceChunkDao = db.evidenceChunkDao()
+    private val evidenceSymbolDao = db.evidenceSymbolDao()
     private val nicknameDao = db.nicknameDao()
     val peerKeyDao = db.peerKeyDao()
 
@@ -192,7 +192,7 @@ class GroupRepository(context: Context) {
     /** Actually deletes the group and everything relayed for it — not just hides it. */
     suspend fun dismantleGroup(groupId: String) {
         for (evidenceId in evidenceDao.idsForGroup(groupId)) {
-            evidenceChunkDao.deleteForEvidence(evidenceId)
+            evidenceSymbolDao.deleteForEvidence(evidenceId)
         }
         evidenceDao.deleteForGroup(groupId)
         sosDao.deleteForGroup(groupId)

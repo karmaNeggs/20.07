@@ -3,6 +3,7 @@ package org.offlinemesh.app.ble
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -13,6 +14,7 @@ import org.junit.runner.RunWith
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceEntity
+import org.offlinemesh.app.data.EvidenceSymbolEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.SosEntity
 import org.robolectric.RobolectricTestRunner
@@ -44,6 +46,7 @@ class RelayEngineTest {
         runBlocking {
             val db = AppDatabase.get(context)
             db.sosDao().deleteForGroup("group-1")
+            for (id in db.evidenceDao().allIds()) db.evidenceSymbolDao().deleteForEvidence(id)
             db.evidenceDao().deleteForGroup("group-1")
             db.seenMessageDao().prune(Long.MAX_VALUE)
             // pruneOlderThan(MAX_VALUE), not deleteForGroup — P4 slice 3's own pool/eviction tests
@@ -219,6 +222,144 @@ class RelayEngineTest {
     fun `decryptedThumbnail returns null for an empty thumbnail`() = runTest {
         val evidence = evidenceFixture("evid-thumb-empty").copy(thumbnail = ByteArray(0))
         assertEquals(null, relay.decryptedThumbnail(evidence))
+    }
+
+    // ---------- ingestSymbol / symbolDeficit / symbolsToSend / decodeRank (P5 item 2 slice 2, ----------
+    // ---------- docs/DECISIONS.md decision 47) ----------
+    // Kept deliberately BELOW full rank/completion: reaching FountainDecoder.isComplete inside
+    // ingestSymbol triggers maybeCompleteFromSymbol's repo.getGroupKey call, the same pre-existing
+    // Keystore/Robolectric constraint documented on this class for createSos/createEvidence/
+    // decryptedThumbnail. evidenceFixture's totalChunks=3, so every test here stays at 1-2 distinct
+    // esi values ingested, never all 3 — genuinely reaching completion needs hardware or an
+    // instrumented test, not covered here.
+
+    private fun symbolBytes(fill: Int) = ByteArray(RelayEngine.CHUNK_SIZE) { fill.toByte() }
+
+    @Test
+    fun `ingestSymbol rejects an esi outside MAX_EVIDENCE_CHUNKS`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-1"))
+        assertFalse(relay.ingestSymbol("evid-sym-1", -1, symbolBytes(1)))
+        assertFalse(relay.ingestSymbol("evid-sym-1", MeshFrameCodec.MAX_EVIDENCE_CHUNKS, symbolBytes(1)))
+        assertEquals(0, AppDatabase.get(context).evidenceSymbolDao().allSymbols("evid-sym-1").size)
+    }
+
+    @Test
+    fun `ingestSymbol stores a genuinely new esi and reports it as new`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-2"))
+        assertTrue(relay.ingestSymbol("evid-sym-2", 0, symbolBytes(7)))
+        val stored = AppDatabase.get(context).evidenceSymbolDao().getSymbol("evid-sym-2", 0)
+        assertNotNull(stored)
+        assertArrayEquals(symbolBytes(7), stored?.data)
+    }
+
+    @Test
+    fun `ingestSymbol reports a duplicate esi as not new, does not overwrite stored data`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-3"))
+        assertTrue(relay.ingestSymbol("evid-sym-3", 0, symbolBytes(7)))
+        assertFalse(
+            "re-ingesting the same esi must not be reported as new",
+            relay.ingestSymbol("evid-sym-3", 0, symbolBytes(9)),
+        )
+        val stored = AppDatabase.get(context).evidenceSymbolDao().getSymbol("evid-sym-3", 0)
+        assertArrayEquals("OnConflictStrategy.IGNORE must not overwrite the original row", symbolBytes(7), stored?.data)
+    }
+
+    @Test
+    fun `symbolDeficit is 0 for a blind-carried item, never touching the decoder`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-blind").copy(groupId = null))
+        assertEquals(0, relay.symbolDeficit("evid-sym-blind"))
+        AppDatabase.get(context).evidenceDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    @Test
+    fun `symbolDeficit is 0 for an unknown id`() = runTest {
+        assertEquals(0, relay.symbolDeficit("nope"))
+    }
+
+    @Test
+    fun `symbolDeficit starts at totalChunks and decreases as symbols are ingested, staying incomplete`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-4")) // totalChunks = 3
+        assertEquals(3, relay.symbolDeficit("evid-sym-4"))
+        assertEquals(0, relay.decodeRank("evid-sym-4"))
+
+        relay.ingestSymbol("evid-sym-4", 0, symbolBytes(1))
+        assertEquals(2, relay.symbolDeficit("evid-sym-4"))
+        assertEquals(1, relay.decodeRank("evid-sym-4"))
+
+        relay.ingestSymbol("evid-sym-4", 1, symbolBytes(2))
+        assertEquals(1, relay.symbolDeficit("evid-sym-4"))
+        assertEquals(2, relay.decodeRank("evid-sym-4"))
+    }
+
+    @Test
+    fun `decodeRank returns totalChunks immediately for an already-complete item, without touching the decoder`() =
+        runTest {
+            val db = AppDatabase.get(context)
+            db.evidenceDao().insert(evidenceFixture("evid-sym-done").copy(complete = true))
+            assertEquals(3, relay.decodeRank("evid-sym-done"))
+        }
+
+    @Test
+    fun `symbolsToSend for an incomplete item returns up to wantCount of its own held rows verbatim`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-5"))
+        relay.ingestSymbol("evid-sym-5", 0, symbolBytes(1))
+        relay.ingestSymbol("evid-sym-5", 1, symbolBytes(2))
+
+        val one = relay.symbolsToSend("evid-sym-5", 1)
+        assertEquals(1, one.size)
+
+        val all = relay.symbolsToSend("evid-sym-5", 10)
+        assertEquals(2, all.size)
+        assertEquals(setOf(0, 1), all.map { it.esi }.toSet())
+    }
+
+    @Test
+    fun `symbolsToSend returns empty for an unknown id and for a non-positive wantCount`() = runTest {
+        assertTrue(relay.symbolsToSend("nope", 5).isEmpty())
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-6"))
+        assertTrue(relay.symbolsToSend("evid-sym-6", 0).isEmpty())
+    }
+
+    @Test
+    fun `symbolsToSend for a complete item generates fresh symbols from an advancing cursor, never the decoder`() =
+        runTest {
+            // Hand-built complete+canonical state (bypassing maybeCompleteFromSymbol's own
+            // Keystore-touching path entirely) — exactly what a real completion collapses storage
+            // to (RelayEngine.ingestSymbol's own doc), so symbolsToSend must treat it identically
+            // whether it got there via a real transfer or, as here, direct seeding.
+            val db = AppDatabase.get(context)
+            val k = 2
+            db.evidenceDao().insert(evidenceFixture("evid-sym-done-2").copy(totalChunks = k, complete = true))
+            for (esi in 0 until k) {
+                db.evidenceSymbolDao().insert(EvidenceSymbolEntity("evid-sym-done-2", esi, symbolBytes(esi)))
+            }
+
+            val first = relay.symbolsToSend("evid-sym-done-2", 3)
+            assertEquals(3, first.size)
+            assertEquals(listOf(0, 1, 2), first.map { it.esi }) // cursor starts at esi 0
+
+            val second = relay.symbolsToSend("evid-sym-done-2", 2)
+            assertEquals(
+                "the shared cursor must keep advancing across calls, never repeat",
+                listOf(3, 4),
+                second.map { it.esi },
+            )
+        }
+
+    @Test
+    fun `symbolDeficit rehydrates correctly from persisted rows across a fresh RelayEngine instance`() = runTest {
+        // Simulates a process restart: RelayEngine.liveDecoders is purely in-memory (see its own
+        // doc), so a brand-new instance must reconstruct the same decode progress from Room alone.
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sym-restart"))
+        relay.ingestSymbol("evid-sym-restart", 0, symbolBytes(1))
+        assertEquals(2, relay.symbolDeficit("evid-sym-restart"))
+
+        val restarted = RelayEngine(context, repo)
+        assertEquals(
+            "a fresh instance must rehydrate rank from the persisted row, not start over at 0",
+            2,
+            restarted.symbolDeficit("evid-sym-restart"),
+        )
     }
 
     // ---------- couriers (P4 slice 2, docs/DECISIONS.md decision 41's own follow-up) ----------

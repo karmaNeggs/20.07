@@ -8,7 +8,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.offlinemesh.app.ble.MeshFrameCodec
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.robolectric.RobolectricTestRunner
 import java.io.DataOutputStream
 import java.net.ServerSocket
@@ -152,7 +151,7 @@ class WifiDirectAcceleratorSocketTest {
             writeInt(WifiDirectTuning.MAX_CHUNK_FRAME_BYTES + 10_000_000)
             flush()
         }
-        val received = mutableListOf<EvidenceChunkEntity>()
+        val received = mutableListOf<MeshFrameCodec.Frame.EvidSymbol>()
         callOnThread {
             runBlocking { accelerator.receiveChunks(victimSocket) { received.add(it) } }
         }
@@ -163,21 +162,22 @@ class WifiDirectAcceleratorSocketTest {
     @Test
     fun `receiveChunks still accepts a legitimate chunk frame under the cap`() {
         val (senderSocket, receiverSocket) = loopbackPair()
-        val chunk = EvidenceChunkEntity(evidenceId = "evid-1", chunkIndex = 3, data = ByteArray(400) { it.toByte() })
-        val encoded = MeshFrameCodec.encodeChunk(chunk)
+        val symbol =
+            MeshFrameCodec.Frame.EvidSymbol(evidenceId = "evid-1", esi = 3, data = ByteArray(400) { it.toByte() })
+        val encoded = MeshFrameCodec.encodeEvidSymbol(symbol)
         DataOutputStream(senderSocket.getOutputStream()).apply {
             writeInt(encoded.size)
             write(encoded)
             flush()
         }
         senderSocket.close() // EOF after one frame — receiveChunks' loop exits cleanly on EOFException
-        val received = mutableListOf<EvidenceChunkEntity>()
+        val received = mutableListOf<MeshFrameCodec.Frame.EvidSymbol>()
         callOnThread {
             runBlocking { accelerator.receiveChunks(receiverSocket) { received.add(it) } }
         }
         assertEquals(1, received.size)
         assertEquals("evid-1", received[0].evidenceId)
-        assertEquals(3, received[0].chunkIndex)
+        assertEquals(3, received[0].esi)
         receiverSocket.close()
     }
 }

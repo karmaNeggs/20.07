@@ -132,7 +132,18 @@ class FountainEncoder internal constructor(
 class FountainDecoder(val k: Int, val symbolSize: Int, private val originalLength: Int) {
     private val rows = arrayOfNulls<Row>(k)
     private val seenEsi = HashSet<Int>()
-    private var rank = 0
+
+    /** Number of source indices resolved so far — public so a caller (e.g. a later wiring slice
+     *  deciding how many more symbols to request from a peer) can ask "how much progress" without
+     *  the all-or-nothing [isComplete] test. Never decreases. */
+    var rank: Int = 0
+        private set
+
+    /** How many more genuinely new symbols this decoder needs at minimum — the information-
+     *  theoretic floor, not an estimate of how many will actually need to be OFFERED (a fountain
+     *  code's own randomness means some offered symbols turn out redundant; see [addSymbol]'s doc
+     *  and [FountainCode]'s own class doc on the measured real-world overhead past this floor). */
+    val deficit: Int get() = k - rank
 
     private class Row(val coeffs: BitSet, val data: ByteArray)
 

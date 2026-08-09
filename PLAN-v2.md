@@ -6,31 +6,53 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **2026-08-09, decision 46 (`docs/DECISIONS.md`): §4.3 item 2 (fountain coding)'s first slice —
-  encode/decode primitive, construction only — DONE, running in autonomous/"auto mode" continuation
-  of the session decision 45 paused.** New `ble/FountainCode.kt`: a systematic random-linear fountain
-  code with Gaussian-elimination (GF(2)) decoding — deliberately **not** literal RFC 6330 (checked
-  and rejected both real library options — OpenRQ dead since 2017/not on Maven Central, the one
-  Kotlin-native alternative single-author/unpublished — and full hand-rolled RFC 6330 as
-  disproportionate; same simplification-over-the-named-spec precedent `CatalogFilter` already set).
-  **A real mid-slice correction, caught by measurement**: the first version used the textbook robust
-  soliton distribution (correct for belief-propagation decoding, wrong for this class's GE decoding)
-  and measured 1.3-2.6x the true minimum repair-symbol overhead; switched to dense random
-  coefficients and re-measured at 1-2 extra symbols regardless of k. 497 tests (up from 482, all 15
-  new), detekt clean, both variants green, no `missing_rules.txt`. Version v0.7.13-dev, fresh debug
-  APK built and `aapt`-confirmed, committed locally — **not pushed** (no explicit ask this session
-  for that specific action). Zero production call sites; nothing to hardware-confirm yet. **Start
-  next here: slice 2 (wiring)** — delete `FRAME_MANIFEST`/`Frame.Manifest`/`encodeManifest`/
-  `MeshProtocol.encodeBitset`/`decodeBitset`; replace `RelayResponder.handleManifest`'s deficit
-  computation with a new minimal `Frame.SymbolRequest` (`stillNeed: Int`, no bitset); decide the
-  session chunk budget's fate (this project's own read: genuinely dropped, not replaced — confirm,
-  don't assume); rewire `RelayEngine.createEvidence`/`ingestChunk`/`maybeReassemble` around
-  `FountainCode`; `MeshFrameCodec.VERSION` bump to 11; decide `maybeAccelerateOverWifiDirect`'s fate
-  (its positional `deficit: List<Int>` has no fountain-coding equivalent — symbol-count trigger, or
-  leave inert until item 3 removes WFD as already planned). Full scoping in decision 46's own entry.
-  **Alternative next step, not yet started**: item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi
-  Aware) instead of slice 2, per §4.3's own stated order (fountain coding before bulk pipes) this
-  wasn't chosen, but is still a legitimate reordering if a future session judges it better.
+- **2026-08-09, decision 47 (`docs/DECISIONS.md`): §4.3 item 2 (fountain coding) slice 2 —
+  wiring, DONE. Item 2 is now fully code-complete end to end**, continuing the same autonomous
+  session decision 46 started. One clean cutover (a Plan agent designed it first, re-verifying
+  everything — `VERSION`, `AppDatabase.version`, migration policy — against actual current source
+  rather than trusting the prior session's summary): deletes `FRAME_MANIFEST`/`FRAME_EVID_CHUNK`
+  (0x10/0x14, retired) and `MeshProtocol.encodeBitset`/`decodeBitset` outright, replaces them with
+  `FRAME_SYMBOL_REQUEST`/`FRAME_EVID_SYMBOL` (0x1D/0x1E) wired through `RelayEngine.ingestSymbol`/
+  `symbolDeficit`/`symbolsToSend` and `RelayResponder.handleSymbolRequest`. `EvidenceChunkEntity`/
+  `EvidenceChunkDao` renamed to `EvidenceSymbolEntity`/`EvidenceSymbolDao` (`chunkIndex` → unbounded
+  `esi`); `EvidenceEntity`/`Frame.EvidMeta` gain `contentLength`. `MeshFrameCodec.VERSION` 10 → 11,
+  `AppDatabase.version` 12 → 13 (free — this project has no real `Migration` objects anywhere,
+  `fallbackToDestructiveMigration()` unconditionally, a genuinely new finding this slice confirmed).
+  **Session chunk budget kept, renamed to `maxSymbolsPerSession`/`consumeSymbolBudget` — deliberately
+  NOT deleted**, a considered re-reading of §4.3's own "deletes... the session chunk budget" line
+  (that describes the full Tier X target architecture depending on item 3's dedicated bulk pipe, not
+  this slice — until item 3 lands, symbols still share the one GATT connection with everything
+  else, and the budget's fairness purpose doesn't evaporate just because chunks became symbols; also
+  now the sole backstop against a hostile `stillNeed`, no longer bound-checked at decode time).
+  WiFi Direct: `maybeAccelerateOverWifiDirect`/`isWfdCapable` deleted (their one call site/reader
+  gone); the 5 `transport/wifidirect/` files needed real (if mechanical) fixes the design pass
+  hadn't anticipated — they call `MeshFrameCodec.encodeChunk`/`RelayEngine.ingestChunk` directly in
+  their own bodies, not just types, so deleting the old mechanism broke their compilation regardless
+  of reachability; adapted type-for-type, the actual handoff logic left untouched and still
+  effectively dead pending item 3's already-planned WFD removal.
+
+  **A real bug, caught by this slice's own new tests, not by review**: the first version of
+  `maybeCompleteFromSymbol` fed a newly-ingested symbol into the decoder only via
+  `getOrCreateDecoder`'s rehydrate-on-first-creation step — silently wrong once a decoder had
+  already been cached by an earlier read (`symbolDeficit`, called on every connection via
+  `framesToPushOnConnect`, routinely runs before any symbol arrives) — rank would never advance.
+  `RelayEngineTest`'s own progression test caught it immediately (rank stuck at 0); fixed by calling
+  `decoder.addSymbol` explicitly every time, not relying on rehydration alone.
+
+  511 tests (up from 497: 5 deleted with `chunkBytes`, 14 net new — `RelayEngineTest`/
+  `EvidenceSymbolDaoTest`/`MeshFrameCodecTest` additions, none of which the retired mechanism ever
+  had, including a decoder-rehydration-across-a-fresh-`RelayEngine`-instance restart-survival test).
+  detekt clean, both variants green, no `missing_rules.txt`. Version bumped to v0.7.14-dev, fresh
+  debug APK built and `aapt`-confirmed, committed locally — **not pushed** (no explicit ask this
+  session for that specific action). **NOT hardware-confirmed** — a real `VERSION` 11 wire break on
+  top of decision 46's own unconfirmed primitive; adds to the existing next-live-round backlog.
+
+  **§4.3 item 2 (fountain coding) is now fully done, old mechanism deleted, nothing parallel left
+  running. Start next here: §4.3 item 3 — a real bulk pipe (BLE L2CAP CoC / Wi-Fi Aware), replacing
+  GATT's 400-byte-write-per-round-trip ceiling and finally removing Wi-Fi Direct outright** (closing
+  the loop on decision 47's own "left inert" WFD work), neither designed yet. This is the last P5
+  item — P5 is complete once it lands, leaving only P7 (bitchat bridge) before the project's
+  sustained field-test milestone.
 
 - **SESSION PAUSED-THEN-RESUMED 2026-08-09**: decision 45 (P5 item 1, below) is fully shipped,
   tested, committed — see its own entry for the full story, including a real mid-slice correction:
@@ -1271,8 +1293,8 @@ unchanged from slice 3, only what value the already-existing `copiesRemaining` f
 **P5 — Media (§4.3).** Thumbnail-first + pull-on-demand **first** (§9.2 item 8 — it is what makes
 48 h retention viable at 400), then fountain coding, then L2CAP CoC and Wi-Fi Aware as bulk pipes.
 Wi-Fi Direct removed.
-**STATUS (2026-08-09): item 1 (thumbnail-first) done; item 2 (fountain coding) slice 1 of an
-unknown-total done — see `docs/DECISIONS.md` decisions 45-46.**
+**STATUS (2026-08-09): item 1 (thumbnail-first) done; item 2 (fountain coding) fully done, both
+slices — see `docs/DECISIONS.md` decisions 45-47. Item 3 (bulk pipe) not started, neither designed.**
 
 **Slice 1 (45) — thumbnail-first, full-res pull-on-demand.** `RelayEngine.fullResRelayable()`
 (own-authored, or explicitly `wantsFullRes`-requested) replaces `relayableEvidenceMeta()` as what
@@ -1304,9 +1326,28 @@ to dense random coefficients (random-linear-coding territory) and re-measured at
 regardless of k. 497 tests (up from 482, all 15 new). detekt clean, both variants green, no
 `missing_rules.txt`. Version bumped to v0.7.13-dev, fresh debug APK built and `aapt`-confirmed.
 **Zero production call sites** — no wire change, nothing in the running app calls this yet; nothing
-to hardware-confirm. Full detail, including the deferred slice-2-wiring scope (deleting
-`FRAME_MANIFEST`/have-bitset/deficit computation, the session-chunk-budget-fate question, the WFD
-handoff path's positional-deficit incompatibility), in decision 46's own entry.
+to hardware-confirm. Full detail in decision 46's own entry.
+
+**Slice 2 (47) — wiring, item 2 now fully code-complete.** One clean cutover: deletes
+`FRAME_MANIFEST`/`FRAME_EVID_CHUNK`/`MeshProtocol.encodeBitset`/`decodeBitset` outright, replaces
+with `FRAME_SYMBOL_REQUEST`/`FRAME_EVID_SYMBOL` wired through `RelayEngine.ingestSymbol`/
+`symbolDeficit`/`symbolsToSend` and `RelayResponder.handleSymbolRequest`.
+`EvidenceChunkEntity`/`Dao` renamed to `EvidenceSymbolEntity`/`Dao` (`chunkIndex` → unbounded `esi`);
+`EvidenceEntity`/`Frame.EvidMeta` gain `contentLength`. `MeshFrameCodec.VERSION` 10 → 11,
+`AppDatabase.version` 12 → 13 (free — no real `Migration` objects exist in this codebase, confirmed
+this slice). Session chunk budget kept (renamed `maxSymbolsPerSession`), deliberately NOT deleted —
+§4.3's "deletes... the session chunk budget" line describes the full Tier X architecture item 3
+builds, not this slice; the budget's fairness/anti-abuse purpose still holds on the shared GATT link
+until then. WFD's `maybeAccelerateOverWifiDirect`/`isWfdCapable` deleted (unreachable); the other 5
+WFD files needed real mechanical fixes (they called the retired mechanism directly, not just its
+types) but their actual handoff logic stays untouched and still dead, pending item 3's planned WFD
+removal. **A real bug caught by this slice's own new tests**: a newly-ingested symbol wasn't reaching
+an already-cached decoder (only rehydration-on-first-creation fed it), so rank could get stuck at 0
+after the first connection touched `symbolDeficit` before any symbol arrived — `RelayEngineTest`'s
+progression test caught it immediately. 511 tests (up from 497). detekt clean, both variants green,
+no `missing_rules.txt`. Version bumped to v0.7.14-dev, fresh debug APK built and `aapt`-confirmed.
+**NOT hardware-confirmed** — a real `VERSION` 11 wire break, adds to the next-live-round backlog.
+Full detail in decision 47's own entry.
 
 *Sim gate: at D = 400, per-node media storage stays bounded with 20 items circulating.*
 *Hardware gate: 3 phones — a 300 KB photo delivered member-to-member without entering the flood.*

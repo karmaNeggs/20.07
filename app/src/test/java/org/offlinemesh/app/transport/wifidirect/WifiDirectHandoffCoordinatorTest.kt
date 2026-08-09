@@ -13,7 +13,6 @@ import org.junit.runner.RunWith
 import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.ble.RelayEngine
 import org.offlinemesh.app.crypto.CryptoUtils
-import org.offlinemesh.app.data.EvidenceChunkEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.robolectric.RobolectricTestRunner
 import java.security.SecureRandom
@@ -46,7 +45,7 @@ class WifiDirectHandoffCoordinatorTest {
             peerAddress: String,
             token: ByteArray,
             readyAtEpochMs: Long,
-            chunks: List<EvidenceChunkEntity>,
+            chunks: List<MeshFrameCodec.Frame.EvidSymbol>,
         ) {
             initiatorCalls++
         }
@@ -55,7 +54,7 @@ class WifiDirectHandoffCoordinatorTest {
             peerAddress: String,
             token: ByteArray,
             readyAtEpochMs: Long,
-            onChunk: suspend (EvidenceChunkEntity) -> Unit,
+            onChunk: suspend (MeshFrameCodec.Frame.EvidSymbol) -> Unit,
         ) {
             responderCalls++
         }
