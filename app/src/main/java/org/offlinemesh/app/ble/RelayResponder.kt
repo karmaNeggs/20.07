@@ -411,7 +411,7 @@ class RelayResponder(
                 // authenticated.
                 val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / MILLIS_PER_SECOND)
                 frames += MeshFrameCodec.encodePresence(
-                    g.id, repo.deviceId, timestamp, rootKey, contentKey,
+                    g.id, repo.senderIdFor(g.id), timestamp, rootKey, contentKey,
                     senderPublicKey = identity?.publicKey, signingPrivateKey = identity?.privateKey
                 )
             }
@@ -480,7 +480,7 @@ class RelayResponder(
             val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
             frames.add(
                 MeshFrameCodec.encodePosition(
-                    rootKey, contentKey, repo.deviceId, myLoc.latitude, myLoc.longitude,
+                    rootKey, contentKey, repo.senderIdFor(groupId), myLoc.latitude, myLoc.longitude,
                     myLoc.accuracy.toInt(), nowSec, 0,
                     signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
                 )
@@ -497,7 +497,7 @@ class RelayResponder(
         // pin-on-first-sight check still applies to a DIRECT neighbor's own position frame either
         // way, which is this feature's primary target.
         val toRelay = selectPositionsToRelay(
-            positionTracker.forGroup(groupId), repo.deviceId, maxPositionRelayHops, toPeer
+            positionTracker.forGroup(groupId), repo.senderIdFor(groupId), maxPositionRelayHops, toPeer
         )
         for ((senderId, record) in toRelay) {
             // Forward the ORIGINAL ciphertext rather than re-sealing it. Re-encrypting produced a
@@ -624,7 +624,7 @@ class RelayResponder(
                     "${body.senderId.take(SENDER_ID_LOG_CHARS)} hop=$hopsFromOrigin"
             )
         }
-        // Sourced on senderId (stable, global per device — see PeerIdentityResolver's class doc),
+        // Sourced on senderId (stable per (device, group) — see PeerIdentityResolver's class doc),
         // not peerAddress (rotates ~every 15min and would strand HopTracker's route ownership on
         // an address that no longer exists — PLAN-v2.md §1.3 / P0b). body.senderId is already
         // authenticated by the successful decrypt-under-the-group-key above, so learning it here is
@@ -986,7 +986,7 @@ class RelayResponder(
             )
             return
         }
-        if (body.senderId != repo.deviceId) {
+        if (body.senderId != repo.senderIdFor(groupId)) {
             // Receiving an authenticated position over GATT is itself proof this member is
             // reachable — feed presence from it too (its hop, so a relayed position also extends
             // presence outward), not just from the beacon path.
@@ -1039,7 +1039,7 @@ class RelayResponder(
         }
         val (groupId, key) = resolved
         if (!presenceIsAuthentic(frame, groupId, key)) return
-        if (frame.senderId != repo.deviceId) {
+        if (frame.senderId != repo.senderIdFor(groupId)) {
             // frame.hop, not a hardcoded 0: a presence that crossed relays (including relays that
             // couldn't verify it) must report the distance it actually travelled, or a member two
             // hops out reads as a direct neighbour. Sourced on frame.senderId (stable), not

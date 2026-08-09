@@ -6,20 +6,23 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **2026-08-09, decision 53 (`docs/DECISIONS.md`): real privacy gap found and scoped (NOT YET
-  IMPLEMENTED) — `senderId` is `GroupRepository.deviceId`, a single random-per-install id reused
-  across every group, sent in CLEARTEXT on presence/position broadcasts.** Lets any member of two
-  overlapping groups correlate a device across them, AND lets any passive non-member BLE observer
-  track the id with no key at all — defeats §5.2's own stated "cannot correlate a device across
-  groups" goal, which decision 15/P0b never actually delivered on despite the per-group Ed25519
-  signing key itself being correctly scoped. **Corrects an inaccurate claim I made earlier this same
-  session** resolving §9.3 item 3 — said this was already closed; it wasn't, I'd checked the signing
-  key's scope but not `senderId`'s own value. Scoped fix: derive `senderId` per-group from the
-  already-existing per-group public key (`sha256Hex(publicKey).take(16)`, no new key/storage), ~12
-  call sites across `RelayEngine.kt`/`RelayResponder.kt`/`BeaconRadio.kt`, no `VERSION` bump needed
-  (value-only change, not byte-layout), a real but one-time "existing peers look new once" upgrade
-  cost (same class as a rejoin, already exercised harmlessly in decision 52's hardware round). See
-  P0b's own section below for the full write-up. **Awaiting go-ahead to implement — not started.**
+- **2026-08-09, decision 54 (`docs/DECISIONS.md`): senderId de-globalization SHIPPED — implements
+  decision 53's scoped fix.** `senderId` was `GroupRepository.deviceId`, a single random-per-install
+  id reused across every group and sent in CLEARTEXT on presence/position broadcasts — any member of
+  two overlapping groups could correlate a device across them, and any passive non-member BLE
+  observer could track the id with no key at all. New `GroupRepository.senderIdFor(groupId)`,
+  derived from the per-group Ed25519 public key already generated/persisted
+  (`sha256Hex(publicKey).take(16)`, no new key/storage). All 12 call sites across
+  `RelayEngine.kt`/`RelayResponder.kt`/`BeaconRadio.kt` updated (full list in decision 54).
+  `BeaconRadio.advertiseJitterMs`'s own `deviceId` use deliberately untouched — local-only, never
+  transmitted. No `MeshFrameCodec.VERSION` bump (byte layout unchanged, value-only). 505 tests,
+  detekt clean, both variants green, no `missing_rules.txt`. Version v0.7.19-dev, committed locally,
+  **not pushed**. **NOT hardware-confirmed** — real one-time transition cost on upgrade (every
+  existing group membership's `senderId` changes at once, peers see a "new" sender briefly, same
+  class as a rejoin already exercised harmlessly in decision 52) needs watching on the next live
+  round. See P0b's own section below for the full write-up, and decision 53 for the original
+  scoping (including the correction of an inaccurate claim made earlier this session about §9.3
+  item 3 already being closed — it wasn't).
 
 - **2026-08-09, decision 52 (`docs/DECISIONS.md`): first hardware round since v0.7.17-dev + 4
   follow-up decisions + L2CAP padding shipped.** Blind-relay pillar and L2CAP CoC both confirmed
@@ -1073,8 +1076,8 @@ Nothing new on the wire. Unblocks degree computation, fanout, and courier handov
 exports the `DiagnosticsLog` and sends it back — check for a stable peer count instead of the
 current 19-prefixes-for-3-phones. Not a precondition for starting P1.*
 
-**P0b correction — `senderId` is not actually per-group (found 2026-08-09, scoped, NOT YET
-IMPLEMENTED). §5.2 always specified "keys on the per-group Ed25519 pubkey," and decision 15's own
+**P0b correction — `senderId` is not actually per-group (found 2026-08-09, scoped in decision 53,
+IMPLEMENTED in decision 54). §5.2 always specified "keys on the per-group Ed25519 pubkey," and decision 15's own
 text says the same — but the actual `senderId` STRING value used everywhere (`SosEntity.senderId`,
 `Frame.Presence.senderId`, `Frame.Position`'s equivalent, `NicknameEntity.senderId`, hop-tracking,
 `PeerIdentityResolver`'s `stableKey`) is `GroupRepository.deviceId` — a single random UUID
@@ -1090,39 +1093,39 @@ group members — can track this ID over time with no key at all**, reintroducin
 "permanent linkable peer ID" weakness bitchat's own whitepaper names as its worst property and
 this project's own Part 1.7/§5.2 claims to avoid.
 
-**Scoped fix, not yet implemented.** Derive `senderId` per-group from the per-group Ed25519 public
-key that `GroupRepository.ensureSenderIdentity` already generates and persists — no new key
-generation or storage needed, purely a computed value: new `GroupRepository.senderIdFor(groupId):
-String`, e.g. `CryptoUtils.sha256Hex(publicKey).take(16)` (16 hex chars ≈ 64 bits, comfortably
-collision-resistant at this app's group sizes). Preserves the exact property `PeerIdentityResolver`/
-`HopTracker` actually need — stability for a given (device, group) across BLE address rotation —
-while finally matching what §5.2 always specified: no longer shared across groups, and derived from
-something that only ever reveals per-group participation, not a device-linking secret.
+**Fix shipped (decision 54).** New `GroupRepository.senderIdFor(groupId): String`, derived from the
+per-group Ed25519 public key `ensureSenderIdentity` already generates and persists — no new key
+generation or storage, purely a computed value: `CryptoUtils.sha256Hex(publicKey).take(16)` (16 hex
+chars ≈ 64 bits, comfortably collision-resistant at this app's group sizes). Preserves the exact
+property `PeerIdentityResolver`/`HopTracker` actually need — stability for a given (device, group)
+across BLE address rotation — while finally matching what §5.2 always specified: no longer shared
+across groups, and derived from something that only ever reveals per-group participation, not a
+device-linking secret.
 
-**Known call sites** (grepped, not yet changed): 4× `repo.deviceId` in `RelayEngine.kt`
-(`createSos`/position/evidence/courier authoring, plus `myNickname`'s DAO lookup), 5× in
-`RelayResponder.kt` (presence/position encode, position-relay self-exclusion, two self-detection
-checks), 3× in `BeaconRadio.kt` (Tier B position encode, Tier B position-relay self-exclusion,
-self-broadcast filter) — all need `repo.senderIdFor(groupId)` in place of the flat `repo.deviceId`.
-**`BeaconRadio.advertiseJitterMs`'s own `repo.deviceId` use is NOT part of this fix** — it derives a
-purely local radio-restart timing offset, never transmitted, no reason to be per-group.
+**All 12 call sites updated**: 5× in `RelayEngine.kt` (`createSos`/`createEvidence`/`setNickname`/
+`myNickname`/`createCourierEnvelope`), 5× in `RelayResponder.kt` (presence/position encode,
+position-relay self-exclusion, two self-detection checks), 3× in `BeaconRadio.kt` (Tier B position
+encode, Tier B position-relay self-exclusion, self-broadcast filter) — all now call
+`repo.senderIdFor(groupId)` instead of the flat `repo.deviceId`. `BeaconRadio.advertiseJitterMs`'s
+own `repo.deviceId` use deliberately left alone — a purely local, never-transmitted radio-restart
+timing offset, no reason to be per-group.
 
-**No `MeshFrameCodec.VERSION` bump needed** — `senderId`'s wire byte layout (a length-prefixed
-string field) is unchanged, only the string's value changes; same category as decision 39's
-"semantic change, not byte-layout change" precedent.
+**No `MeshFrameCodec.VERSION` bump needed** — confirmed: `senderId`'s wire byte layout (a
+length-prefixed string field) is unchanged, only the string's value changes; same category as
+decision 39's "semantic change, not byte-layout change" precedent.
 
 **Real, one-time transition cost on upgrade, stated honestly:** every device's `senderId` changes
-for every EXISTING group it's already in, the moment it upgrades. Existing peers see what looks
-like a brand-new, unrecognized sender — hop-tracking/route-ownership resets, and a previously-set
-nickname (keyed on the old `senderId`) stops resolving until the device re-broadcasts it under the
-new one (should self-heal within one connection cycle, but needs confirming nickname text itself
-is stored independent of the ID it's keyed under). Same class of harmless discontinuity as a fresh
+for every EXISTING group it's already in, the moment it upgrades to this build. Existing peers see
+what looks like a brand-new, unrecognized sender — hop-tracking/route-ownership resets, and a
+previously-set nickname (keyed on the old `senderId`) stops resolving until the device
+re-broadcasts it under the new one (should self-heal within one connection cycle — both
+`framesToPushOnConnect` and `refreshFramesToPush` push current nicknames unconditionally on their
+own cadence, independent of `senderId`'s value). Same class of harmless discontinuity as a fresh
 reinstall or group rejoin — which this session's own hardware round already exercised (eg3's
-mid-test rejoin) without incident.
-
-**Not implemented yet — awaiting go-ahead.** Full test suite + detekt + both variants + version
-bump + hardware-confirmation-needed note, same discipline as every other slice, once implementation
-starts. Full detail in `docs/DECISIONS.md` decision 53 (scoping only, no code).
+mid-test rejoin) without incident. **NOT hardware-confirmed** — this real wire-semantics change
+(even without a `VERSION` bump) and the self-healing claim above should both be watched on the next
+live round. 505 tests, detekt clean, both variants green, no `missing_rules.txt`. Version
+v0.7.19-dev. Full detail in `docs/DECISIONS.md` decisions 53 (scoping) and 54 (implementation).
 
 **P1 — The forwarding plane (§5.3).**
 **STATUS (2026-08-05): wired into production, scoped to SOS only — see `docs/DECISIONS.md`

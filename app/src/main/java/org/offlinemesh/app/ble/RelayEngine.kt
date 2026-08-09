@@ -132,7 +132,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun createSos(groupId: String, text: String, isAlert: Boolean = false): SosEntity {
         val id = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
-        val senderId = repo.deviceId
+        val senderId = repo.senderIdFor(groupId)
         // Caps to the same bound MeshFrameCodec.decode/openSos enforce on the receiving end —
         // truncating by UTF-8 byte length (what the wire format actually measures), not by String
         // length, so this can never author a message the codec's own guard would then reject.
@@ -184,7 +184,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // FountainCode.encoder does its own zero-padding internally (see its own doc) — no manual
         // last-symbol handling needed here, a genuine simplification over the old chunkBytes shape.
         val encoder = FountainCode.encoder(ciphertext, CHUNK_SIZE)
-        val senderId = repo.deviceId
+        val senderId = repo.senderIdFor(groupId)
         // Sealed under the SAME contentKey the full-res ciphertext already uses — see
         // MeshFrameCodec.sealThumbnail's own doc for why this replaced this decision's original
         // cleartext-plus-MAC design. The mac below covers the SEALED bytes, same "whatever the
@@ -229,7 +229,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun setNickname(groupId: String, username: String): NicknameEntity {
         val trimmed = username.trim().take(MeshFrameCodec.MAX_USERNAME_CHARS)
         val updatedAt = System.currentTimeMillis()
-        val senderId = repo.deviceId
+        val senderId = repo.senderIdFor(groupId)
         val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
         val contentKey = CryptoUtils.contentEpochKey(rootKey, updatedAt / MILLIS_PER_SECOND)
         val macInput = MeshFrameCodec.nicknameMacInput(groupId, senderId, trimmed, updatedAt)
@@ -244,7 +244,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         return n
     }
 
-    suspend fun myNickname(groupId: String): NicknameEntity? = nicknameDao.get(groupId, repo.deviceId)
+    suspend fun myNickname(groupId: String): NicknameEntity? = nicknameDao.get(groupId, repo.senderIdFor(groupId))
 
     /** P4 slice 2 (docs/DECISIONS.md decision 41's own follow-up, PLAN-v2.md §4.2) — creates and
      *  persists a courier envelope for OUR OWN authored [payload], mirroring [createSos]'s shape
@@ -259,7 +259,7 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun createCourierEnvelope(groupId: String, payload: ByteArray): CourierEnvelopeEntity {
         val id = UUID.randomUUID().toString()
         val createdAt = System.currentTimeMillis()
-        val senderId = repo.deviceId
+        val senderId = repo.senderIdFor(groupId)
         val rootKey = repo.getGroupKey(groupId) ?: error("no key for group")
         val signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
         val contentKey = CryptoUtils.contentEpochKey(rootKey, createdAt / MILLIS_PER_SECOND)

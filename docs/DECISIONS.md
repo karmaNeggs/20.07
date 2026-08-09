@@ -3461,3 +3461,59 @@ already exercised without incident (eg3's mid-test rejoin).
 
 No code changed this decision — scoping only, per the user's own "scope it" request, ahead of an
 explicit go-ahead to implement. `PLAN-v2.md`'s P0b section carries the full write-up.
+
+## 54. senderId de-globalized — implements decision 53's scoped fix
+
+New `GroupRepository.senderIdFor(groupId): String`, derived from the per-group Ed25519 public key
+`ensureSenderIdentity` already generates and persists: `sha256Hex(publicKey).take(16)` (16 hex
+chars, 64 bits — comfortably collision-resistant at this app's realistic group sizes). No new key
+material, no new storage — purely a computed value over what already exists. `require`s a keypair
+already exists for the group rather than silently falling back to something wrong; every real
+join/create path already establishes one via `ensureSenderIdentity` first, so a miss here would be
+a real caller bug worth surfacing loudly.
+
+**All 12 identified call sites updated**, `repo.deviceId` → `repo.senderIdFor(groupId)`:
+- `RelayEngine.kt` (5): `createSos`, `createEvidence`, `setNickname`, `myNickname`,
+  `createCourierEnvelope` — all had `groupId` already in scope.
+- `RelayResponder.kt` (5): presence encode (`presenceAndPositionFrames`), position encode
+  (`positionFramesToPush`), position-relay self-exclusion (`selectPositionsToRelay` call), and two
+  self-detection checks (`ingestOpenedPosition`, `handlePresence`) — `body.senderId != repo.deviceId`
+  / `frame.senderId != repo.deviceId` became `!= repo.senderIdFor(groupId)`.
+- `BeaconRadio.kt` (3): Tier B position encode (`refreshBroadcastTierPositionIfDue`), Tier B
+  position-relay self-exclusion (`relayedPositionFrameForBroadcastTier`), Tier B self-broadcast
+  filter (`ingestBroadcastTierPosition`).
+
+**Deliberately NOT touched**: `BeaconRadio.advertiseJitterMs`'s own `repo.deviceId` use — a purely
+local, never-transmitted per-device offset that spreads advertise-restart timing jitter across
+phones to avoid a synchronized radio-restart stampede. No correlation risk; scoping it per-group
+would be pointless churn on something that never leaves the device.
+
+**Doc corrections alongside the code change**: `PeerIdentityResolver`'s own class doc (which
+previously stated the "random-per-install id... global across a device's groups" fact in passing,
+without flagging it as a problem — this is what let decision 15/P0b build on top of it uncritically)
+now describes `senderId` accurately as per-(device, group), pointing at `senderIdFor` and this
+decision. One stale `RelayResponder.kt` comment ("stable, global per device") corrected to "stable
+per (device, group)".
+
+**No `MeshFrameCodec.VERSION` bump** — confirmed by inspection: `senderId`'s wire byte layout (a
+length-prefixed string field in `Frame.Presence`/`Frame.PositionSealed`'s body) is unchanged, only
+the string's value differs. Same category as decision 39's "semantic change, not byte-layout
+change."
+
+505 tests (unchanged — this touches authoring/self-detection paths already covered by existing
+`RelayEngine`/`RelayResponder`/`BeaconRadio` tests, no new test surface needed since the fix is a
+value-derivation change, not new branching logic). detekt clean after one `MaxLineLength` fix
+(BeaconRadio.kt's self-broadcast-filter comment split onto its own line once the call got longer).
+Both variants green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`), no `missing_rules.txt`.
+Version bumped to v0.7.19-dev (versionCode 30), fresh debug APK built and `aapt`-confirmed.
+
+**Real, one-time transition cost on upgrade, as scoped in decision 53**: every device's `senderId`
+changes for every group it's already in the moment it installs this build. Existing peers will see
+what looks like a brand-new sender once per group — hop-tracking/route-ownership resets, and a
+previously-set nickname (keyed on the old `senderId`) stops resolving until re-broadcast, which
+should self-heal within one connection cycle (`framesToPushOnConnect`/`refreshFramesToPush` both
+push current nicknames unconditionally on their own cadence, independent of `senderId`'s value).
+**NOT hardware-confirmed** — this is a real wire-semantics change even without a `VERSION` bump, and
+the self-healing claim above should be watched for on the next hardware round, alongside confirming
+peer/hop-count discontinuity on upgrade is as harmless in practice as decision 52's own rejoin
+observation suggests it should be.

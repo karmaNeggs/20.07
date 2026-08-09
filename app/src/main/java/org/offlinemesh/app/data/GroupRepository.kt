@@ -111,6 +111,10 @@ class GroupRepository(context: Context) {
         /** millis-to-epoch-seconds conversion, for [resolveGroupKeyByHandle]'s default param. */
         private const val MILLIS_PER_SECOND = 1000L
 
+        /** [senderIdFor]'s truncation length — 16 hex chars = 64 bits, comfortably collision-
+         *  resistant at this app's realistic group sizes (hundreds, not millions of members). */
+        private const val SENDER_ID_HEX_CHARS = 16
+
         /** Pure matching core of [resolveGroupKeyByHandle] — no DAO/Keystore access, so directly
          *  unit-testable despite this class's real-Keystore construction constraint under
          *  Robolectric (see [keyStore]'s own doc). `.contentEquals()`, not
@@ -172,6 +176,26 @@ class GroupRepository(context: Context) {
      *  framesToPushOnConnect]). Null only if [groupId] was never actually joined/created through
      *  this repository (every real join/create path establishes one via [ensureSenderIdentity]). */
     fun getSenderKeyPair(groupId: String): SenderIdentity.Ed25519KeyPair? = keyStore.getSigningKeyPair(groupId)
+
+    /** The per-group identity string carried on the wire as `senderId` — hop-tracking, presence/
+     *  position envelopes, nickname keying, display. Derived from [getSenderKeyPair]'s own public
+     *  key (`sha256Hex(publicKey).take(SENDER_ID_HEX_CHARS)`), NOT [deviceId] — [deviceId] is a
+     *  single random id shared across every group this device is in, and `senderId` used to be
+     *  exactly that (found this session: any member of two overlapping groups could correlate a
+     *  device across them, and since `senderId` travels in cleartext on presence/position
+     *  broadcasts, so could any passive non-member listener — see `PLAN-v2.md`'s P0b-correction
+     *  write-up and `docs/DECISIONS.md` decision 53/54). No new key material: purely a computed
+     *  value over what [ensureSenderIdentity] already generates and persists per (device, group).
+     *  `require`s a keypair already exists — every real join/create path calls
+     *  [ensureSenderIdentity] first, so a missing keypair here means [groupId] was never actually
+     *  joined through this repository, a caller bug worth surfacing loudly rather than silently
+     *  falling back to something wrong. */
+    fun senderIdFor(groupId: String): String {
+        val publicKey = requireNotNull(getSenderKeyPair(groupId)) {
+            "no sender identity for group $groupId — was it ever joined/created through this repository?"
+        }.publicKey
+        return CryptoUtils.sha256Hex(publicKey).take(SENDER_ID_HEX_CHARS)
+    }
 
     /**
      * Reconstructs the exact same invite code any member could show — there's no "owner" role

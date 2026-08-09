@@ -505,7 +505,7 @@ class BeaconRadio(
         // groupHandle (inside encodePosition) stays on the root key, unchanged.
         val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
         broadcastTierPositionFrame = MeshFrameCodec.encodePosition(
-            rootKey, contentKey, repo.deviceId, myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
+            rootKey, contentKey, repo.senderIdFor(groupId), myLoc.latitude, myLoc.longitude, myLoc.accuracy.toInt(),
             nowSec, hop = 0, signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey,
         )
         broadcastTierLastPositionSealedAtMs = nowMs
@@ -542,7 +542,7 @@ class BeaconRadio(
      *  check-cycle just to notice when the relay candidate itself changes. */
     private fun relayedPositionFrameForBroadcastTier(groupId: String): Pair<ByteArray, String>? {
         val (senderId, record) = RelayResponder.selectPositionsToRelay(
-            positionTracker.forGroup(groupId), repo.deviceId, MAX_POSITION_RELAY_HOPS, limit = 1,
+            positionTracker.forGroup(groupId), repo.senderIdFor(groupId), MAX_POSITION_RELAY_HOPS, limit = 1,
         ).firstOrNull() ?: return null
         val sealed = record.sealed ?: return null
         val handle = record.handle ?: return null
@@ -1007,7 +1007,8 @@ class BeaconRadio(
         // as RelayResponder.handlePositionSealed's own candidate loop for the GATT path.
         val body = CryptoUtils.candidateContentEpochKeys(rootKey)
             .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return
-        if (body.senderId == repo.deviceId) return // never ingest our own broadcast fix back into our own tracker
+        // never ingest our own broadcast fix back into our own tracker
+        if (body.senderId == repo.senderIdFor(groupId)) return
         val pinned = repo.peerKeyDao.get(groupId, body.senderId)?.publicKey
         if (!RelayResponder.signatureCheckPasses(pinned, body.signature, body.signedBytes)) {
             Log.w(TAG, "broadcast-tier position signature failed verification for a pinned sender — dropping")

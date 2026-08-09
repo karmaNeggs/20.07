@@ -3,11 +3,13 @@ package org.offlinemesh.app.ble
 /**
  * Resolves a transient BLE address to the stable identity behind it, once known — the middle path
  * PLAN-v2.md §5.2 calls for: nothing new goes on the wire (the beacon stays a rotating, unlinkable
- * ID), but once a connection has authenticated a sender's `senderId` (a random-per-install id, see
- * [org.offlinemesh.app.data.GroupRepository.deviceId] — global across a device's groups, and
- * already sent in cleartext on presence heartbeats, so keying LOCAL state on it exposes nothing new
- * on the wire), every peer-keyed decision for that device can key on the stable identity instead of
- * the address that happened to be current when the connection was made.
+ * ID), but once a connection has authenticated a sender's `senderId` (see
+ * [org.offlinemesh.app.data.GroupRepository.senderIdFor] — a per-(device, group) id derived from
+ * that group's own Ed25519 public key, NOT shared across a device's other groups; see
+ * `docs/DECISIONS.md` decisions 53/54 for why this used to be a single global id and what that
+ * cost), every peer-keyed decision for that device can key on the stable identity instead of
+ * the address that happened to be current when the connection was made — stable WITHIN a group's
+ * own scope, which is all hop-tracking/routing here ever actually needs.
  *
  * This is what `NEXT_STEPS.md` D1 asked for: "46 distinct addresses in 23 minutes for 2-3 phones —
  * `ConnectionAttemptTracker` cooldowns and `HopTracker` route-ownership assume ~15min address
