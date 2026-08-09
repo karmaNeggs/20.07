@@ -1,12 +1,72 @@
 # 20.07 v2 — scaling plan
 
-**RESUME HERE — current status as of 2026-08-09 (session continued past the P6 checkpoint below).**
+**RESUME HERE — current status as of 2026-08-10 (session continued past the P6 checkpoint below).**
 This is the single status block to trust; anything else in this document (including inline "STATUS"
 notes inside Part 7 below) is detail underneath this, not a competing source. If a phase's own
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **NEXT SESSION STARTS HERE — the first live round happened, found a total-failure regression in
+- **NEXT SESSION STARTS HERE — round 2 (v0.7.23-dev, 3 phones) confirmed the CR-13 revert fixed the
+  total-failure regression: comms and radar both worked this time.** It surfaced two real, fixed
+  protocol bugs and one real, deliberately-deferred one — full diagnosis and fixes in decision 59,
+  `docs/DECISIONS.md`. **The APK to test now is `releases/20.07-v0.7.24-dev-debug.apk` (versionCode
+  35, `aapt`-confirmed) — NOT v0.7.23-dev, which is the build round 2 ran against.**
+  - **Fixed: SOS/evidence/nickname delivery silently stopped ~2.5-3 minutes into the session, on all
+    three phones** (`[sync] peer X: pushed=N` — the log line meaning a catalog-filter round-trip
+    actually happened — stopped firing on every phone after that point, even though fresh GATT
+    connections kept forming). Two of the user's own SOS alerts were confirmed lost permanently
+    (grepped every phone's full log for both ids — neither ever reappears). Root cause: the catalog
+    filter (what SOS/evidence/nickname/courier delivery is reactive to) is only ever sent once, at
+    connect — decision 20/30 already fixed this identical shape for presence/position/nicknames once
+    P3's long-lived links made a one-time push insufficient, but the catalog filter itself was left
+    out on the (wrong, for a "no open links" case) assumption event-driven flood-forward always
+    covers it. Fixed: `RelayResponder.refreshFramesToPush` now re-sends the catalog filter on every
+    periodic refresh (~15-20s) of an already-open link too, not just at connect.
+  - **Fixed: hop count reached 3-4 in a 3-phone mesh** (topologically impossible — max real distance
+    with one relay available is 1). Root cause: `selectPositionsToRelay`'s split-horizon check
+    compares raw BLE MAC addresses, which this app's own logs show rotating constantly and normally
+    — every rotation silently breaks the comparison and reopens the exact distance-vector loop
+    split-horizon (v0.4.0-dev) was built to close. Fixed: both sides now go through
+    `PeerIdentityResolver.resolve()` (stable identity) instead of the raw address. Pre-existing bug,
+    not a `.18`→`.23` regression — confirmed via `git log` that both mechanisms involved date to
+    v0.4.0-dev, well before `.18`; a redundant 3-phone mesh with real address rotation over several
+    minutes was apparently just never actually run against this code before.
+  - **Deliberately NOT fixed — "always shows 1 hop away," even with phones physically far apart**
+    (user-confirmed: frozen, not just usually-1). Root cause identified (`HopTracker.updateHop`'s
+    ownership rule lets a value only get WORSE via the same source that owns it, while any source
+    merely confirming the OLD value resets the staleness clock without changing it — so a redundant
+    mesh can keep a stale reading alive indefinitely). This is also v0.4.0-dev-era code, built to fix
+    a *different* prior bug (values that never went stale at all) — loosening it carelessly risks
+    bringing that one back. Per product decision, scoped for its own dedicated pass rather than
+    patched under this round's time pressure. **This WILL still reproduce in round 3 — that's
+    expected, not a sign the other fixes failed.**
+  - **Walked back, not fixed:** the initial read of round 2's evidence looked like group deletion
+    leaves a "zombie" broadcast running for several minutes after membership ends. Re-checked
+    `GroupRepository.dismantleGroup` — it's actually immediate and thorough (group row, key, and
+    signing keypair all removed together). The far simpler explanation is `PositionTracker`'s own
+    staleness window (up to ~6 minutes at higher hop counts, by design): other phones' cached copy of
+    the departed member's last position kept legitimately recirculating until it aged out on
+    schedule. No code changed for this — it's the existing, documented §9.3 tradeoff working as
+    intended.
+  - **Noted, not investigated this round:** `OpaqueFrameRelay`'s `excludePeer` checks (blind-relay
+    custody for positions/presence/SOS/nicknames from non-member groups) use the same raw-BLE-address
+    pattern the split-horizon fix above just moved away from, and may have the identical rotation gap
+    — unconfirmed by this round's evidence (the symptom that surfaced was specifically in the member
+    position path), flagged here as a real candidate for the next review pass rather than fixed
+    speculatively.
+  - **What to do when the user returns with round 3's results:** read what's actually reported first
+    — a confident diagnosis of round 2 is not proof round 3 is clean. If round 3 is clean apart from
+    the expected hop-freeze, treat the hop-freeze fix as the next real piece of work (needs a genuine
+    design pass on `HopTracker.updateHop`'s acceptance rule, not a quick patch — re-read decision 59's
+    write-up before touching it, to avoid re-introducing the never-goes-stale bug it was built to
+    fix). If round 3 surfaces anything NEW, diagnose it fresh from the logs the same way rounds 1 and
+    2 were — don't assume it's a repeat of either prior incident.
+  - Once a round is clean (or remaining issues are fixed/re-verified) and the hop-freeze has its own
+    pass, P7 (the real bitchat bridge implementation, not the spike tooling already shipped in
+    decision 55) is next — see Part 7's own P7 section for the design, already researched and locked,
+    just not built.
+
+- **2026-08-09 — the first live round happened, found a total-failure regression in
   the ONE fix that was flagged as unverified (CR-13), which is now diagnosed and fixed. The round
   needs to be RE-RUN against a new APK before anything else proceeds.** Round 1 (v0.7.22-dev, 3
   phones): `openLinkCount=0` for the entire session on every phone, no radar, every SOS
@@ -2756,6 +2816,103 @@ out to already do the filtering the finding claimed was missing.
 
 ---
 
+### Round 2 hardware findings (2026-08-10) — full diagnosis in decision 59, `docs/DECISIONS.md`
+
+Found from a real 3-phone round against v0.7.23-dev (the build that fixed CR-13's regression), by
+cross-referencing all three phones' full `DiagnosticsLog` exports against the actual code paths, not
+inferred from log patterns alone.
+
+#### CR-31 — SOS/evidence/nickname delivery silently stops ~2.5-3 minutes into a session — ✅ FIXED 2026-08-10
+
+**Evidence.** Two of the user's own SOS alerts got `sent to 0/2 target(s)` from
+`RelayResponder.floodForwardSos` (no GATT link open at that instant — a one-shot flood, no retry).
+Grepped both ids across all three phones' complete logs: neither ever reappears, anywhere, for the
+rest of the ~9-minute session. `[sync] peer X: pushed=N` (`handleCatalogFilter` actually processing a
+peer's filter) fired only in the first ~2.5-3 minutes on all three phones, then never again — while
+`[conn] synced ok` (a fresh connection completing) kept firing throughout.
+
+**Why.** `framesToPushOnConnect` sends the catalog filter — the only thing SOS/evidence/nickname/
+courier delivery is reactive to — exactly once, at connect. Decisions 20 and 30 already fixed this
+identical shape for presence/position and nicknames once P3's long-lived links (10-20 min) made a
+one-time push insufficient, but the catalog filter was left out, on the assumption a freshly-authored
+SOS is always covered by `floodForwardLocalSos`'s immediate flood instead. It isn't, when that flood
+finds zero open links.
+
+**Fix.** `RelayResponder.refreshFramesToPush` (already called every `presenceRefreshIntervalMs`,
+~15-20s, on every open link) now also rebuilds and re-sends the catalog filter, not just presence/
+position. Additive only — `selectPositionsToRelay`/`handleCatalogFilter`/dedup untouched.
+
+**Verify.** In a live round: author an SOS while confirming (via a live logcat pull) zero links are
+open at that instant; it should still reach other phones within one refresh cycle of the next
+connection forming, without needing a fresh reconnect specifically to that peer.
+
+#### CR-32 — Hop count exceeds real topology (reached 3-4 in a 3-phone mesh) — ✅ FIXED 2026-08-10
+
+**Evidence.** With only 3 physical phones, the real maximum position-relay distance is 1 hop (one
+intermediate relay). Logs showed hop values of 2, 3, and 4 repeatedly for the same senders.
+
+**Why.** `RelayResponder.selectPositionsToRelay`'s split-horizon check (`record.viaPeer == toPeer`,
+added in v0.4.0-dev to stop a position looping back through whoever supplied it) compares raw BLE MAC
+addresses. This app's own `[identity] peer resolved: addresses=N distinct=M` logging shows rotation
+happening constantly and normally — every rotation silently breaks the comparison, reopening the
+exact distance-vector loop split-horizon was built to close. Confirmed pre-existing (v0.4.0-dev,
+commit `3840b09`, well before `.18`) via `git log` — not a regression from this session's own fixes;
+more likely just never exercised before by a redundant-enough, long-enough, multi-phone session.
+
+**Fix.** Both sides of the comparison now go through `PeerIdentityResolver.resolve()` (stable
+identity, already built for other purposes) instead of the raw address — at `ingestOpenedPosition`'s
+`positionTracker.offer` call and at `positionFramesToPush`'s call into `selectPositionsToRelay`.
+`resolve()` falls back to the raw address when unresolved, so an unlearned peer behaves as before.
+
+**Not fixed, flagged for later:** `OpaqueFrameRelay`'s `excludePeer` checks (blind-relay custody for
+non-member groups' positions/presence/SOS/nicknames) use the identical raw-address pattern and may
+have the same gap — unconfirmed by this round's evidence (the symptom was specifically in the member
+position path), not fixed speculatively.
+
+**Verify.** In a live round with 3+ phones: no position/presence hop value should ever exceed
+(phone count − 1), and should typically stay well below that.
+
+#### CR-33 — `HopTracker` "N hop(s) away" can freeze indefinitely, even as the real distance grows — 🔜 DEFERRED (next steps, not this pass)
+
+**Evidence (user-confirmed live, not just log-inferred):** the group row's hop reading stayed at 1
+even while phones were physically separated by real distance for a sustained period.
+
+**Why.** `HomeScreen`'s display reads `HopTracker.myHop` live every second (confirmed not a UI/
+recomposition bug). `MeshProtocol.HopTracker.updateHop`'s acceptance rule lets a tracked value get
+WORSE only when the same "owning" source (a rotating BLE address) reports it worse itself; any OTHER
+source merely confirming the existing value refreshes recency and takes over ownership without
+changing the value. In a redundant multi-path mesh, some path will almost always echo the old value
+occasionally, so a stale reading can neither expire (confirmations keep refreshing it) nor
+legitimately escalate (worsening needs the one specific owning source, which may simply have gone
+quiet rather than explicitly reporting worse) — even once the real peer has moved genuinely farther
+away.
+
+**Why not fixed now.** Also v0.4.0-dev-era code, built specifically to fix a *different*, earlier bug
+(recency refreshed by every report including rejected ones, so a value could never go stale at all —
+see that commit's own message, and `updateHop`'s own doc comment). Loosening the ownership rule
+without a real design pass risks silently reintroducing that original bug. **Per product decision:
+scoped here for its own dedicated pass, not patched under a hardware-round's time pressure.**
+
+**When picking this up:** re-read `MeshProtocol.kt`'s `updateHop` doc comment in full before touching
+it — it explains exactly which prior bug the current shape prevents. Any fix needs to keep that
+property (a confirmed-stale route still eventually expires) while also letting a route that's
+genuinely worsened actually escalate, even when the original owning source goes silent rather than
+explicitly reporting worse — likely needs either a per-source freshness quorum or a time-boxed
+"provisional worse" state rather than the current binary owner-only-can-worsen rule. Write it as a
+new decision + CR entry when it happens, same as every other tracker fix this project has made.
+
+**Also considered, ruled out — not a CR, no code change:** round 2's evidence initially looked like
+group deletion leaves a live broadcast running for several minutes after membership ends (a
+"neutral" phone kept appearing as an active signed sender for ~4 minutes after its own decrypt
+capability was cut off). `GroupRepository.dismantleGroup` was re-checked and is actually immediate
+and thorough — group row, key, and signing keypair all removed together, so a lingering broadcast
+loop doesn't hold up as the explanation. The simpler explanation: `PositionTracker`'s own staleness
+window (up to ~6 minutes at higher hop counts, by design) let other phones' cached copy of the
+departed member's last position keep legitimately recirculating until it aged out on schedule — the
+existing, documented §9.3 blind-relay tradeoff working as intended, not a defect.
+
+---
+
 ### Resume checklist
 
 Tick these in order; each is independently committable.
@@ -2804,4 +2961,16 @@ Tick these in order; each is independently committable.
       CR-29 closed as intended, CR-30 meta-only.
 - [x] Version bump (v0.7.22-dev, versionCode 33) + fresh debug APK `aapt`-confirmed + committed
       (decision 57, `docs/DECISIONS.md`) — 2026-08-09
-- [ ] Run the device-test round, then P7
+- [x] Round 1 device-test round run against v0.7.22-dev — **failed** (total discovery failure,
+      CR-13's `ScanFilter`); diagnosed and reverted (decision 58), version bump (v0.7.23-dev,
+      versionCode 34) — 2026-08-09.
+- [x] Round 2 device-test round run against v0.7.23-dev — comms/radar confirmed working; found
+      **CR-31** (SOS/evidence/nickname delivery stops ~3 min in) and **CR-32** (hop count exceeds
+      real topology via split-horizon MAC-rotation gap), both fixed; **CR-33** (hop-count freeze)
+      identified and deliberately deferred to its own pass (decision 59, `docs/DECISIONS.md`).
+- [x] Version bump (v0.7.24-dev, versionCode 35) + fresh debug APK `aapt`-confirmed — 2026-08-10.
+- [ ] Round 3 device-test round against v0.7.24-dev — should confirm CR-31/32 fixed; CR-33's freeze
+      is EXPECTED to still reproduce (deferred, not fixed).
+- [ ] `HopTracker.updateHop` redesign (CR-33) — its own dedicated pass, not bundled with a hardware
+      round. See CR-33's entry for the constraint any fix must preserve.
+- [ ] Once round 3 is clean (modulo CR-33) and CR-33 has its own pass, P7 (real bitchat bridge)

@@ -3804,3 +3804,110 @@ removing the now-unused `ScanFilter` import, both variants green
 v0.7.23-dev (versionCode 34), fresh debug APK built and `aapt`-confirmed. **Not yet re-confirmed on
 hardware** — this is the fix for the reported regression, not proof it's fixed; needs the same
 3-phone round to re-run against `20.07-v0.7.23-dev-debug.apk`.
+
+## 59. First live round against v0.7.23-dev: two real protocol bugs found and fixed, one long-standing bug identified and deliberately deferred
+
+The re-run round (3 phones — anup, "neutral" acting as a brief member then a deleted/blind-relay
+observer, Rajveen) confirmed the CR-13 revert fixed the total-failure regression: comms and radar
+both worked. Two new reports came out of it: hop counts reaching 3-4 in a 3-phone mesh (topologically
+impossible — the most any position should ever need is 1 relay hop) and a group row's "N hop(s)
+away" reading staying frozen even as phones physically separated; separately, two SOS alerts the
+user sent were confirmed never delivered to the third phone.
+
+**Method.** All three `DiagnosticsLog` exports were read in full and cross-referenced by timestamp
+and sender-id hash, then checked against the actual code paths those hashes and hop values pass
+through (`GroupRepository.senderIdFor`, `RelayResponder.ingestOpenedPosition`/`handleCatalogFilter`/
+`floodForwardSos`, `PositionTracker`, `MeshProtocol.HopTracker`) — not inferred from log patterns
+alone. `senderIdFor` is a stable per-(device, group) hash of a persisted keypair, never rotates, so
+the same hash appearing in two different phones' logs reliably identifies the same physical device;
+this is what let the three raw hex ids in the logs (`715cac86`, `44edfb0a`, `73b78fd4`) resolve
+unambiguously to neutral, Rajveen, and anup respectively (including confirming neutral genuinely held
+group membership for the round's first ~2.5 minutes before being removed — decrypting real content
+from both other members — contradicting the initial assumption that it was relay-only throughout;
+user confirmed this after reviewing the evidence).
+
+**Bug 1 — SOS/evidence/nickname delivery silently stops on a long-lived connection (message loss).**
+Two SOS alerts anup authored got "sent to 0/2 target(s)" from `RelayResponder.floodForwardSos` — no
+GATT link happened to be open at that exact instant, which is a one-shot flood with no retry. Grepped
+both IDs across all three phones' full logs: neither ever appears again, anywhere, for the rest of
+the ~9-minute session. `[sync] peer X: pushed=N` — the log line `handleCatalogFilter` emits, meaning
+a peer's `CatalogFilter` was actually received and acted on — fired only in the first ~2.5-3 minutes
+on all three phones, then stopped for the remainder even though `[conn] synced ok` (a fresh GATT
+connection completing) kept firing throughout. Root cause: `RelayResponder.framesToPushOnConnect`
+sends the catalog filter (the only thing SOS/evidence/nickname/courier delivery is reactive to)
+exactly once, at connect. Decision 20 already found and fixed this identical shape for presence/
+position, and decision 30 for nicknames, once P3's long-lived links (10-20 minutes, not the old
+~45-60s reconnect cycle) made a one-time push insufficient — but the catalog filter itself was
+explicitly left out of that fix, on the assumption a freshly-authored SOS is always covered instead
+by `floodForwardLocalSos`'s immediate flood. It isn't, when that flood finds zero open links.
+
+**Fix:** `RelayResponder.refreshFramesToPush` (called every `presenceRefreshIntervalMs`, ~15-20s, on
+every still-open connection) now also rebuilds and re-sends the catalog filter, not just presence/
+position. This is the same self-healing shape `handleCatalogFilter`'s own doc already relies on for
+a same-connection false positive ("costs a skipped send this connection... offered again next
+reconnect") — extended to not require a reconnect at all. Low risk: additive only, reuses the exact
+`CatalogFilter.build(currentCatalogKeys())` + `MeshFrameCodec.encodeCatalogFilter` call already used
+in `framesToPushOnConnect`, no change to `selectPositionsToRelay`/`handleCatalogFilter`/dedup logic.
+
+**Bug 2 — split-horizon defeated by BLE address rotation (hop count exceeding real topology).**
+`RelayResponder.selectPositionsToRelay`'s split-horizon check (`record.viaPeer == toPeer`, added in
+v0.4.0-dev specifically to stop a position looping back through whoever supplied it) compares raw
+BLE MAC addresses on both sides. This app's own `[identity] peer resolved: addresses=N distinct=M`
+logging shows address rotation happening constantly and normally during a session — every rotation
+silently breaks the comparison, since the peer's current address no longer matches the (now stale)
+address recorded when the position was first learned. That reopens exactly the loop split-horizon
+was built to close: a position can circulate a 3-node mesh (member → relay → member → relay again)
+incrementing `hop` each pass, which is how hop reached 3-4 with only three phones on the network
+(topologically, the real maximum with one intermediate relay is 1). This mechanism predates `.18` by
+a wide margin (v0.4.0-dev, commit `3840b09`) — not a regression introduced by this session's own
+fixes, and not something a shorter or 2-phone test would have surfaced, since address rotation and
+redundant relay paths both need enough devices and enough session length to manifest.
+
+**Fix:** both sides of the comparison now go through `PeerIdentityResolver.resolve()` (the same
+address→stable-identity map `learnPeerIdentity` already builds for other purposes) instead of the
+raw address — `positionTracker.offer`'s `viaPeer` at `ingestOpenedPosition`, and `toPeer` at
+`positionFramesToPush`'s call into `selectPositionsToRelay`. `resolve()` falls back to the raw
+address when a peer's identity hasn't been learned yet, so behavior for an unresolved peer is
+unchanged. `selectPositionsToRelay` itself (the comparison logic, and its existing unit tests) is
+untouched — only its callers now pass resolved identities in. Scoped to the position path only,
+since that's what the evidence actually implicated; `OpaqueFrameRelay`'s own `excludePeer` checks
+(positions/presence/SOS/nickname blind-relay custody) use the same raw-address pattern and may have
+the same latent gap, but that's unconfirmed by this round's evidence — noted in `PLAN-v2.md` as a
+follow-up, not fixed speculatively here.
+
+**Identified but deliberately NOT fixed this pass — `HopTracker.updateHop`'s frozen-value asymmetry
+(the "always 1 hop away, even far apart" report).** `HomeScreen`'s "N hop(s) away" text reads
+`HopTracker.myHop` live every second (confirmed not a UI/recomposition bug) — the freeze is
+algorithmic. `updateHop`'s acceptance rule lets a value get WORSE only when the same "owning" source
+(a rotating BLE address) reports it worse itself; any other source merely CONFIRMING the existing
+value refreshes recency and steals ownership without changing anything. In a redundant multi-path
+mesh, some path will almost always echo the old value occasionally, so a tracked hop can neither go
+stale (confirmations keep refreshing it) nor legitimately escalate (worsening requires the one
+specific owning source, which may have simply gone quiet rather than explicitly reporting worse) —
+even once the real peer has moved genuinely farther away. This is also v0.4.0-dev-era code, built
+specifically to fix an earlier, different bug (recency refreshed by every report including rejected
+ones, so a value could never go stale at all — see that commit's own message). Loosening the
+ownership rule without care risks reintroducing that original bug. Per product decision: written up
+here and in `PLAN-v2.md`'s next-steps as a known, scoped problem for a dedicated pass, not patched
+under this round's time pressure.
+
+**Also revised: the initial theory that group deletion leaves a "zombie" broadcast loop running
+(neutral's identity kept appearing as a live sender for ~4 minutes after its own decrypt capability
+was cut off) does not hold up.** `GroupRepository.dismantleGroup` deletes the group row, its key, and
+its signing keypair together, immediately — `getActiveGroups()`/`getGroupKey` would stop including
+that group on the very next call, well inside one `presenceRefreshIntervalMs` cycle. The far simpler
+explanation is `PositionTracker`'s own staleness window (up to ~6 minutes at higher hop counts, by
+design — see that class's own doc on why a stale dot must "look old, not authoritative" rather than
+vanish instantly): the OTHER phones' own cached copy of neutral's last position, received before
+neutral left, kept legitimately recirculating through the mesh until it aged out on schedule. No code
+change made for this; it's the documented §9.3 blind-relay/staleness tradeoff working as intended,
+not a new defect.
+
+**Verification.** `./gradlew testDebugUnitTest detekt` — 525 tests, all green, detekt clean (no new
+suppressions needed). `assembleDebug`/`assembleRelease`/`lintVitalRelease` all green. Version bumped
+to v0.7.24-dev (versionCode 35), fresh debug APK built and `aapt`-confirmed. **Not yet re-confirmed
+on hardware** — needs a third round against `20.07-v0.7.24-dev-debug.apk`, specifically watching:
+hop counts should never exceed 1 in a 3-phone test; an SOS sent while no links happen to be open
+should still arrive within one `presenceRefreshIntervalMs` cycle (~15-20s) of the next connection
+forming, not require a fresh reconnect; the "N hop(s) away" freeze is EXPECTED to still reproduce —
+that fix is intentionally deferred, not attempted here.

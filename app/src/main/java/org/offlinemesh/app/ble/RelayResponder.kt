@@ -414,11 +414,12 @@ class RelayResponder(
      *  aren't in — the LIVE, time-sensitive subset of [framesToPushOnConnect]'s full set. Called
      *  once as part of that (connection start) AND periodically thereafter on an already-open
      *  link (see [refreshFramesToPush] / `MeshGattClient`'s periodic-refresh loop, PLAN-v2.md P3 /
-     *  docs/DECISIONS.md decision 20): everything else `framesToPushOnConnect` sends (the catalog
-     *  filter, L2CAP cap, evidence symbol requests — the L2CAP cap replaced the retired WFD cap in
-     *  decision 49) either doesn't need this cadence of refreshing or is already handled by P1's
-     *  event-driven flood-forward — only presence/position go stale purely from TIME passing on a
-     *  link that's no longer cycling every ~45-60s the way v1's did. */
+     *  docs/DECISIONS.md decision 20): the L2CAP cap and evidence symbol requests are the only
+     *  `framesToPushOnConnect` items that genuinely don't need this cadence — the catalog filter
+     *  used to be in that "doesn't need it" set too, on the theory that P1's event-driven
+     *  [floodForwardLocalSos] already covered a freshly-authored SOS. It doesn't when
+     *  [floodForwardSos] finds zero open links at that exact instant (logs "BLOCKED: no open
+     *  links" and gives up, no retry) — see [refreshFramesToPush]'s own doc for the fix. */
     private suspend fun presenceAndPositionFrames(toPeer: String?): List<ByteArray> {
         val frames = mutableListOf<ByteArray>()
         for (g in repo.groupDao.getActiveGroups()) {
@@ -485,8 +486,28 @@ class RelayResponder(
      *  now that links can stay up for 10-20 minutes — read as "the radar doesn't work" for the
      *  entire life of a healthy link. Nicknames got the same fix later (decision 30,
      *  2026-08-06) after the identical symptom showed up for them: a nickname set after a link was
-     *  already open never reached that peer. */
-    suspend fun refreshFramesToPush(toPeer: String?): List<ByteArray> = presenceAndPositionFrames(toPeer)
+     *  already open never reached that peer.
+     *
+     *  **Catalog filter re-sent here too, as of the three-phone hardware round fix pass
+     *  (2026-08-10, docs/DECISIONS.md)** — the exact same symptom, one link deeper: SOS/evidence/
+     *  courier delivery is otherwise reactive ONLY to a peer's [Frame.CatalogFilter][
+     *  MeshFrameCodec.Frame.CatalogFilter], which [framesToPushOnConnect] sends exactly once, at
+     *  connect. A SOS authored while a link is already open reaches that peer via
+     *  [floodForwardLocalSos] instead — a one-shot flood over whatever links are open at that
+     *  instant, which silently does nothing if none are (a live 3-phone round confirmed two
+     *  originated SOS alerts that hit "no open links" and were never seen again on any device,
+     *  anywhere, for the rest of that ~9-minute session). The catalog filter was assumed to be an
+     *  implicit fallback for exactly that case, but was never actually refreshed on a link that
+     *  stays open without reconnecting — which P3 links routinely do. Re-sending it here restores
+     *  that fallback: the peer's [handleCatalogFilter] runs again on receipt and pulls whatever's
+     *  new, no reconnect required — same self-healing shape [handleCatalogFilter]'s own doc already
+     *  relies on for a same-connection filter false-positive. */
+    suspend fun refreshFramesToPush(toPeer: String?): List<ByteArray> {
+        val frames = presenceAndPositionFrames(toPeer).toMutableList()
+        val filter = CatalogFilter.build(currentCatalogKeys())
+        frames += MeshFrameCodec.encodeCatalogFilter(filter.seed, filter.sizeBits, filter.toBits())
+        return frames
+    }
 
     /** My own fix, plus whatever I'm holding on behalf of other group members, one hop further out
      *  — capped to the nearest [MAX_RELAYED_POSITIONS_PER_GROUP] (see [selectPositionsToRelay]'s
@@ -520,8 +541,12 @@ class RelayResponder(
         // multi-hop position provenance turns out to matter in practice; the receiver's own
         // pin-on-first-sight check still applies to a DIRECT neighbor's own position frame either
         // way, which is this feature's primary target.
+        // Resolved the same way positionTracker.offer's viaPeer now is (see that call site's own
+        // doc) — split-horizon below only holds if both sides of its comparison are the SAME kind
+        // of identity, and toPeer arrives here as the connection's raw, rotation-prone BLE address.
+        val resolvedToPeer = toPeer?.let { peerIdentity.resolve(it) }
         val toRelay = selectPositionsToRelay(
-            positionTracker.forGroup(groupId), repo.senderIdFor(groupId), maxPositionRelayHops, toPeer
+            positionTracker.forGroup(groupId), repo.senderIdFor(groupId), maxPositionRelayHops, resolvedToPeer
         )
         for ((senderId, record) in toRelay) {
             // Forward the ORIGINAL ciphertext rather than re-sealing it. Re-encrypting produced a
@@ -1019,7 +1044,17 @@ class RelayResponder(
                 positionTracker.offer(
                     groupId, body.senderId, body.lat, body.lon,
                     body.accuracyM, body.timestampSec, frame.hop,
-                    viaPeer = peerAddress, sealed = frame.sealed, handle = frame.handle,
+                    // peerIdentity.resolve, not raw peerAddress: split-horizon (selectPositionsToRelay)
+                    // compares this against a connection's OWN resolved identity, and BLE addresses
+                    // rotate every ~10-15 min (same reasoning as HopTracker's lastSource comment). A
+                    // live 3-phone round confirmed the raw-address comparison silently stops working
+                    // across a rotation, letting a position loop back through the peer that supplied
+                    // it — the "hop climbing to 3-4 in a 3-phone mesh" symptom (three-phone hardware
+                    // round fix pass, 2026-08-10, docs/DECISIONS.md) that should be topologically
+                    // impossible with only one other relay available. Falls back to the raw address
+                    // when unresolved (PeerIdentityResolver.resolve's own default), so a peer whose
+                    // identity hasn't been learned yet behaves exactly as before.
+                    viaPeer = peerIdentity.resolve(peerAddress), sealed = frame.sealed, handle = frame.handle,
                 )
                 // hop>0 is a RELAYED position — the single clearest signal that multi-hop actually
                 // worked, and the thing the radar's far-phone dot depends on. Never logs the
