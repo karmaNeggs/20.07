@@ -3517,3 +3517,71 @@ push current nicknames unconditionally on their own cadence, independent of `sen
 the self-healing claim above should be watched for on the next hardware round, alongside confirming
 peer/hop-count discontinuity on upgrade is as harmless in practice as decision 52's own rejoin
 observation suggests it should be.
+
+## 55. P7 spike tooling shipped — encoder + BLE injector, awaiting a real bitchat install to test
+
+Implements the first half of decision 51's "hard dependency, not skippable" note: before any real
+bridge code gets built on top of the design decision 51 researched, confirm a forged bitchat
+`groupMessage` packet is actually relayed by a real, unmodified bitchat install. This decision
+ships the tooling to attempt that; running it against a real device is still an open, user-owned
+step (needs a phone with bitchat installed nearby — not something buildable/testable from here).
+
+**Fresh byte-level research pass, more precise than decision 51's own structural summary** (full
+citations in the research transcript, `permissionlesstech/bitchat` main branch): v1 header is
+exactly 14 bytes, all big-endian — `version(1) type(1) ttl(1) timestamp(8) flags(1)
+payloadLength(2)` — followed by `senderId` (always exactly 8 raw bytes, fixed position, not
+length-prefixed) and then `payload`. Confirmed the real production `broadcastGroupMessage`
+construction sends `flags=0` (no recipient — broadcast, field omitted entirely rather than
+zero-filled; unsigned; uncompressed; no route) and TTL 7 (`TransportConfig.messageTTLDefault`).
+Confirmed broadcast-type sends are NOT auto-fragmented in bitchat's own traced code path — no size
+threshold to hit as long as the packet stays comfortably under one GATT write. Confirmed the GATT
+topology is mutual dual-role (central+peripheral simultaneously), same shape this project's own
+`MeshGattClient`/`MeshGattServer` pair already uses — either scan-and-write or advertise-and-wait
+works, chose scan-and-write for this spike as the simpler one-shot direction. Confirmed the
+timestamp-skew ingress guard is a true symmetric `abs(now - timestamp) <= 120_000ms`. **New,
+important caveat found this pass**: bitchat advertises a DIFFERENT service UUID on its own
+`#if DEBUG` builds (`...4B5A`) than its release/mainnet build (`...4B5C`) — a debug bitchat install
+will never answer on the mainnet UUID, an easy-to-miss reason for "no device found" that has
+nothing to do with relay behavior.
+
+**Shipped, new package `org.offlinemesh.app.bitchatbridge`** (deliberately isolated — nothing in
+`MeshService`/`RelayResponder`/the real mesh constructs or calls into this package):
+
+- `BitchatPacketEncoder.kt` — pure, Android-free, directly unit-tested (5 new tests: exact byte
+  layout at every offset against a known input, default ttl/timestamp, and the three validation
+  rejections). The only half of this spike that CAN be verified without real hardware.
+- `BitchatSpikeTransport.kt` — debug-only (same `BuildConfig.DEBUG` boundary `DiagnosticsLog`
+  itself sits behind, for the same "no reason to exist in a release build" logic). Scans for
+  either of bitchat's two service UUIDs (mainnet or debug-testnet), connects to the first match,
+  writes one forged packet carrying a random hex marker embedded in the payload, disconnects.
+  Logs every step and failure mode to `DiagnosticsLog` under a new tag `bitchat-spike`, exportable
+  the same way as everything else via the existing "Export diagnostics" row. Connection
+  establishment itself is compile-verified only — same category as decision 48's own L2CAP work,
+  no local/Robolectric way to simulate a real bitchat peripheral.
+- `HomeScreen.kt`: new debug-only `BitchatSpikeRow`, directly below the existing
+  `DiagnosticsExportRow`, one tap fires `sendTestPacket()` and reports success/marker or failure
+  via `Toast`.
+
+**What a successful write confirms, stated precisely, and what it doesn't**: a clean
+`onCharacteristicWrite` success confirms bitchat's own peripheral GATT server accepted a
+structurally well-formed `groupMessage` packet from a sender it has never seen, with no prior
+handshake — genuinely the first, necessary half of decision 51's dependency. It does NOT by itself
+confirm multi-hop RELAY actually happened past that first node; that needs a third device (or
+physical movement) checking whether the call's marker keeps showing up further from the injection
+point than one BLE hop should reach — realistically a raw HCI snoop capture, a separate manual step
+this tool doesn't attempt to automate.
+
+Two detekt fixes needed: `ReturnCount` on `sendTestPacket` (4 raw returns, one excluded as a
+leading guard, 3 counted — over the limit) fixed by extracting `findBitchatNode()`, same
+`openFor`/`connectAndWrap` split precedent decision 48's own `L2capBulkTransport` already
+established; `TooGenericExceptionCaught` on the two callback-bridging functions
+(`scanForBitchatNode`/`connectAndWrite`) suppressed at the function level with the same
+"boundary code that must resolve a waiting coroutine rather than crash" reasoning
+`DiagnosticsLog.flush()`'s own suppress already gives.
+
+510 tests (up from 505 — 5 new `BitchatPacketEncoderTest` cases). detekt clean after the two fixes
+above. Both variants green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`), no
+`missing_rules.txt`. Version bumped to v0.7.20-dev (versionCode 31), fresh debug APK built and
+`aapt`-confirmed. **Not hardware-confirmed — genuinely can't be, from here.** Running this against
+a real bitchat install, and separately confirming multi-hop relay via a packet capture, is the
+next, user-owned step before any of the real P7 bridge gets built.

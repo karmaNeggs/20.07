@@ -6,6 +6,21 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 55 (`docs/DECISIONS.md`): P7 spike tooling shipped — encoder + BLE
+  injector, still needs a real bitchat install to actually run against.** New isolated package
+  `org.offlinemesh.app.bitchatbridge`: `BitchatPacketEncoder` (pure, unit-tested, exact v1 header
+  byte layout confirmed against bitchat's own source — 14-byte header, `senderId` always exactly 8
+  raw bytes fixed-position, broadcast `groupMessage` at `flags=0`/TTL 7, not auto-fragmented for a
+  small payload) and `BitchatSpikeTransport` (debug-only — scans for either of bitchat's TWO
+  service UUIDs, since a debug bitchat build advertises a different one than release; connects;
+  writes one forged packet with a random marker; logs every step to `DiagnosticsLog` tag
+  `bitchat-spike`). Debug-only trigger row in `HomeScreen.kt`. **A clean write confirms bitchat's
+  peripheral GATT accepted the packet — the first half of decision 51's "hard dependency, not
+  skippable" note — but NOT multi-hop relay itself**, which needs a third device or packet capture,
+  a separate manual step. 510 tests (5 new), detekt clean, both variants green, version v0.7.20-dev,
+  committed locally, **not pushed**. **This is genuinely not further automatable from here** — the
+  next step needs the user's own phone with bitchat actually installed.
+
 - **2026-08-09, decision 54 (`docs/DECISIONS.md`): senderId de-globalization SHIPPED — implements
   decision 53's scoped fix.** `senderId` was `GroupRepository.deviceId`, a single random-per-install
   id reused across every group and sent in CLEARTEXT on presence/position broadcasts — any member of
@@ -1676,6 +1691,23 @@ contradicts this design, but whether any of it quietly deprioritises traffic fro
 bitchat has never seen before is genuinely unknown until tested against a real device running a
 real bitchat build. **First implementation task, not skippable: confirm a forged `groupMessage`
 packet actually gets relayed by a real bitchat node, before writing anything else.**
+
+**Spike tooling shipped (2026-08-09, decision 55) — the test itself still needs a real bitchat
+install to run against, which is not something buildable from here.** New, deliberately isolated
+package `org.offlinemesh.app.bitchatbridge` (nothing in `MeshService`/`RelayResponder`/the real
+mesh touches it): `BitchatPacketEncoder` (pure, unit-tested — exact v1 header byte layout confirmed
+against bitchat's own source this pass, more precisely than the structural summary above: 14-byte
+header, `senderId` always exactly 8 raw bytes at a fixed position, broadcast `groupMessage` sent
+with `flags=0`/TTL 7, confirmed NOT auto-fragmented for a small payload) and
+`BitchatSpikeTransport` (debug-only, same boundary `DiagnosticsLog` sits behind — scans for either
+of bitchat's two service UUIDs, since **a debug bitchat build advertises a DIFFERENT UUID than its
+release build**, connects, writes one forged packet with a random marker, logs every step under
+`DiagnosticsLog` tag `bitchat-spike`). Debug-only `BitchatSpikeRow` in `HomeScreen.kt`, one tap.
+**What a clean write confirms, precisely: bitchat's own peripheral GATT accepted a well-formed
+packet from an unfamiliar sender — the first half of the dependency above. It does NOT by itself
+confirm multi-hop relay** — that needs a third device or a packet capture watching whether the
+marker keeps showing up further out than one hop should reach, a separate manual step. 510 tests
+(5 new), detekt clean, both variants green, version v0.7.20-dev. Full detail in decision 55.
 
 **Standing constraints carried over from Part 3, unchanged:** off by default, clearly labelled —
 advertising bitchat's own service UUID is a public "this device runs bitchat" signature, a real

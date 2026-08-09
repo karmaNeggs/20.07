@@ -45,6 +45,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.launch
 import org.offlinemesh.app.ble.MeshProtocol
 import org.offlinemesh.app.ble.MeshService
 import org.offlinemesh.app.ble.PositionTracker
@@ -175,6 +176,8 @@ fun HomeScreen(
                         QuickToggleTiles(meshService, onGeneralSos)
                         Spacer(Modifier.height(10.dp))
                         DiagnosticsExportRow()
+                        Spacer(Modifier.height(10.dp))
+                        BitchatSpikeRow()
                         Spacer(Modifier.height(20.dp))
                     }
                 }
@@ -429,6 +432,55 @@ private fun DiagnosticsExportRow() {
             Text("Export diagnostics", color = AppColors.OnSurface, style = MaterialTheme.typography.bodyMedium)
             Text(
                 "debug build only \u2022 long-press to clear",
+                color = AppColors.OnSurfaceMuted,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
+/** P7 spike trigger (`PLAN-v2.md` Part 7, `docs/DECISIONS.md` decision 51's own "hard dependency,
+ *  not skippable" note; decision 55 for this tool itself) — debug-only, same boundary
+ *  [DiagnosticsExportRow] sits behind. One tap: scan for a real bitchat node nearby, write one
+ *  forged test packet, report success/failure. NOT the real bridge — no production wiring, see
+ *  [org.offlinemesh.app.bitchatbridge.BitchatSpikeTransport]'s own class doc for exactly what a
+ *  success here does and doesn't confirm. */
+@Composable
+private fun BitchatSpikeRow() {
+    if (!BuildConfig.DEBUG) return
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var running by remember { mutableStateOf(false) }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(AppColors.Surface)
+            .clickable(enabled = !running) {
+                running = true
+                scope.launch {
+                    val marker = org.offlinemesh.app.bitchatbridge.BitchatSpikeTransport(context).sendTestPacket()
+                    running = false
+                    val message = if (marker != null) {
+                        "Sent, marker=$marker — check DiagnosticsLog / a capture for propagation"
+                    } else {
+                        "Failed — see DiagnosticsLog (tag bitchat-spike) for why"
+                    }
+                    Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+                }
+            }
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(Icons.Filled.Bolt, contentDescription = null, tint = AppColors.OnSurfaceMuted)
+        Spacer(Modifier.width(10.dp))
+        Column {
+            Text(
+                if (running) "Sending…" else "Bitchat spike: send test packet",
+                color = AppColors.OnSurface, style = MaterialTheme.typography.bodyMedium
+            )
+            Text(
+                "debug build only • P7 validation, not the real bridge",
                 color = AppColors.OnSurfaceMuted,
                 style = MaterialTheme.typography.bodySmall
             )
