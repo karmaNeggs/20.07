@@ -6,6 +6,33 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **NEXT SESSION STARTS HERE — everything engineering-side is done; the device-test round is the
+  only remaining step, and it's the user's, not something to redo or second-guess from a transcript
+  alone.** As of `86e9f74` (pushed to `origin/main`, nothing outstanding locally): all 20 Gate A/B
+  fixes from Part 10 (decision 56) plus the full Tracked-tier disposition (decision 57) are shipped,
+  compile-verified (525 tests, 0 failures, detekt clean, both variants + `lintVitalRelease` green,
+  no `missing_rules.txt`), and committed. The APK to test is
+  `releases/20.07-v0.7.22-dev-debug.apk` (versionCode 33, `aapt`-confirmed) — already the one built
+  from this exact commit, no rebuild needed unless the user reports something that requires a code
+  change first. **What to do when the user returns with results:**
+  1. Read whatever they report (a `DiagnosticsLog` export, described symptoms, or both) before
+     assuming anything — don't re-derive conclusions this session already reached.
+  2. **CR-13 (`PLAN-v2.md` Part 10) is the one specific thing this round needs to answer**: does
+     3-phone discovery stay exactly as fast as before now that the legacy scan has a hardware
+     `ScanFilter`, and does every test chipset keep delivering scan results at all (decision 3's own
+     failure mode is *silent* non-delivery, not a crash) — see that entry's own doc for why it's
+     flagged differently from every other fix in this pass. If it regressed, the fix is scoped
+     exactly as that entry describes (filter off for the affected device class, not a global
+     revert).
+  3. **CR-24's `degree` log lines** (`DiagnosticsLog` tag `degree`, `MeshService.startDegreeLogging`)
+     are the other thing worth pulling from any export — real `openLinkCount` numbers are what
+     `ForwardingPolicy`'s degree thresholds (`§9.2 item 7`) need to be re-derived from, if at all.
+  4. Anything else the round surfaces gets triaged the normal way (a new `PLAN-v2.md` finding, or
+     straight to a decision + fix if it's small and clear).
+  5. Once the round is clean (or issues from it are fixed and re-verified), P7 (the real bitchat
+     bridge implementation, not the spike tooling already shipped in decision 55) is next — see
+     Part 7's own P7 section for the design, already researched and locked, just not built.
+
 - **2026-08-09 — TRACKED TIER (CR-21..30) CLOSED OUT + PANIC-DELETE CUT FROM SCOPE. Committed as
   v0.7.22-dev, compile-verified. This is the current top-of-file status; everything below is older.**
   Second pass over Part 10, user-directed: "whatever can be done, do it" for the 10 items left in
