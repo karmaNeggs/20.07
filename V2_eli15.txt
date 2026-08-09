@@ -1,0 +1,171 @@
+20.07 — V2 PLAN, EXPLAINED SIMPLY
+==================================
+
+WHAT IS THIS APP?
+------------------
+A phone app that lets nearby phones talk to each other over Bluetooth, with
+no internet, no cell towers, no SIM card, nothing. Think of it like a
+walkie-talkie network, except messages can also HOP from phone to phone to
+reach people further away than direct Bluetooth range. Built for people who
+need to coordinate when the internet is jammed, shut off, or not trusted
+(e.g. protesters worried about phone seizure or surveillance).
+
+THE PROBLEM WITH V1
+--------------------
+V1 worked fine with 2-3 phones. But the way it moved messages around did NOT
+scale. Here's the core issue in one line:
+
+  V1 made every phone shake hands, compare full inventories, and swap files
+  with every other phone it met — like two people meeting and cross-checking
+  their ENTIRE mailbox against each other before passing along one letter.
+
+That "handshake + compare + transfer" cycle took ~45 seconds per phone-pair,
+and it got WORSE the more phones were around, not better. At 400 phones in a
+crowd, a message could take 8+ minutes to get anywhere. A "someone's hurt
+here" alert that's 8 minutes stale is close to useless.
+
+Meanwhile the things that SHOULD have been slow and heavy (photos, videos)
+were being blasted to every single phone nearby whether they wanted them or
+not — including phones that couldn't even decrypt them.
+
+THE CORE FIX (ONE IDEA, EVERYTHING ELSE FOLLOWS FROM IT)
+----------------------------------------------------------
+Stop treating message delivery like a file-sync between two computers. Treat
+it like a rumor spreading through a crowd: the instant a phone hears a new
+message, it immediately repeats it to a few nearby phones, who repeat it to
+a few more, and so on. No handshake, no inventory comparison, just "pass it
+on." This is basically how real crowds spread news, and it's also how a
+comparable project called "bitchat" already works. We didn't copy bitchat's
+identity system (see WHY WE SAID NO below) but we adopted its core idea:
+FORWARD FIRST, don't wait to sync.
+
+WHAT WE ACTUALLY BUILT, PHASE BY PHASE
+-----------------------------------------
+Each phase below shipped as its own tested build before the next one
+started — same discipline as v1: one step, fully tested, confirmed on real
+phones where possible, before touching the next thing.
+
+P0 — Foundations
+  Built a computer simulation that can pretend to be 3 phones OR 400 phones,
+  so we could test crowd-scale behavior without owning 400 phones. Also gave
+  each phone a stable internal "name tag" for bookkeeping — before this, a
+  phone's Bluetooth address kept randomly changing every ~15 min (privacy
+  feature) which was confusing our own code into thinking it was meeting a
+  new stranger every few minutes.
+
+P1 — Instant forwarding
+  Turned on "shout and pass it on" for emergency (SOS) messages. A message
+  that arrives on one open connection now immediately gets pushed out on
+  every OTHER open connection, instead of waiting for the next slow
+  handshake cycle.
+
+P2 — A broadcast channel for small urgent stuff
+  Added a way to blast tiny, important updates (I'm here / I'm hurt / SOS
+  distance) to EVERY nearby phone at once, with no handshake or connection
+  at all — like a radio beacon. Also added "Trickle" (a well-known
+  networking trick): a phone stays quiet if it's already hearing enough
+  copies of the same info, so this broadcast doesn't get louder just
+  because more phones show up.
+
+P3 — Stop wasting the radio on reconnecting
+  V1 kept dropping and re-establishing connections on a timer, which wasted
+  battery and radio time for no reason. V2 keeps a good connection open as
+  long as it's healthy, and only closes it when it actually needs the slot
+  for someone else.
+
+P4 — Couriers (delivery across "dead zones")
+  If two phones/groups are separated (e.g. one side of a blocked street),
+  messages still need to get across eventually when someone physically
+  walks between the groups. Added a "courier" system: a phone can carry a
+  handful of messages it can't currently deliver, and pass them along when
+  it meets another phone — like a mail carrier bridging a gap, without
+  needing to know who's who.
+
+P5 — Fixing media (photos/videos)
+  Three changes:
+   1. Send a small thumbnail + "here's the full photo if you want it" tag
+      to everyone first. Only send the FULL photo to people who actually
+      ask for it. (Previously: everyone got the whole file whether they
+      wanted it or not.)
+   2. Replaced the old "numbered puzzle pieces, must get the exact missing
+      ones" chunking system with a math trick ("fountain coding") where ANY
+      enough pieces from ANY combination of nearby phones can rebuild the
+      file — so more helpful phones nearby = faster download, not slower.
+   3. Gave big file transfers a faster private "pipe" (BLE L2CAP, basically
+      a proper two-way socket instead of tiny one-message-at-a-time
+      writes) for phones that support it, and removed the old Wi-Fi Direct
+      shortcut entirely — it needed a system popup that gave away that the
+      app was running, which broke the whole point of keeping it low-key.
+
+P6 — Locking down privacy
+  Encrypted more of the message content that used to travel in a readable
+  form (e.g. the actual SOS text). Replaced a plaintext "which group is
+  this for" tag with a rotating, meaningless-looking code, so someone
+  sniffing the airwaves can't map out who's talking to whom. Also padded
+  every message to a few fixed sizes so message LENGTH alone can't hint at
+  what type of message it is.
+
+P7 — Not started yet
+  An OPTIONAL bridge to talk to the "bitchat" app's own network too (see
+  below), so our users can also reach bitchat users nearby. Off by default.
+
+WHY WE MADE THE DECISIONS WE MADE
+------------------------------------
+- We copied bitchat's ROUTING IDEAS (forward-first, TTL, fanout, couriers)
+  but NOT its identity system. bitchat gives every phone one permanent ID
+  visible on the air — good for reliability, bad for privacy, since it lets
+  someone track a specific phone over time. Our users' threat model (phone
+  seizure, state surveillance) can't afford that trade, so we kept rotating,
+  hard-to-track IDs even though it's more engineering work.
+
+- We rejected an internet fallback (e.g. relaying messages over the public
+  Nostr network when Bluetooth can't reach). The whole point of this app is
+  "the internet is down/untrusted" — building a fallback that needs the
+  internet defeats the premise, and any such relay is a single point that
+  can be watched or blocked.
+
+- We rejected heavier, "more correct on paper" crypto systems (like MLS) for
+  the group encryption because they assume a delivery service that keeps
+  perfect order — which a Bluetooth mesh that keeps splitting into separate
+  pockets of phones can't guarantee. We picked a simpler scheme that every
+  phone can compute on its own, no coordination required, even if it means
+  we don't get "if your phone is seized today, yesterday's messages are
+  still safe" — that guarantee needs a live two-way handshake this kind of
+  network can't reliably do.
+
+- We deliberately kept "a phone that isn't in your group can still carry
+  your encrypted message forward without being able to read it." bitchat
+  doesn't really have this property this strongly — it's one of our best
+  privacy wins and we protected it through every phase.
+
+- Every phase kept the existing safety promise: nothing sensitive (GPS,
+  message text, keys) is ever written to permanent storage in a form that
+  survives if the phone is seized — a debug-only log exists for testing,
+  strips itself in the shipped version, and never records message content or
+  full identities, only short event summaries for troubleshooting.
+
+IMPORTANT PROCESS THINGS
+---------------------------
+- Nothing shipped without: full automated test suite passing, a code-quality
+  checker (detekt) clean, both a normal build AND a shrunk/optimized
+  "release" build working, and a version bump — every single phase.
+- Every phase got a debug build the user could actually put on real phones
+  and try — because a simulator can prove the LOGIC is right, but only real
+  phones prove the RADIO actually behaves the way we assumed.
+- Nothing was ever pushed to the shared code repository (GitHub) without
+  explicit permission — everything stayed local until asked otherwise.
+- Every decision, including the ones we reversed or corrected mid-way, got
+  written down with the reasoning, not just the final answer — so future
+  changes don't accidentally undo something that was a deliberate tradeoff.
+
+WHERE WE ARE NOW
+-------------------
+All the code for P0 through P6 is done, tested, and built. What's NOT done
+yet:
+  - A real, sustained test with actual phones in actual rooms/distances —
+    the simulator and unit tests can't prove the real Bluetooth radio
+    behaves the way we assumed, especially for this session's newest,
+    riskiest piece (the faster file-transfer pipe, never tried on a real
+    phone yet).
+  - P7, the optional bitchat bridge — intentionally saved for last, after
+    everything else is proven solid on real hardware.
