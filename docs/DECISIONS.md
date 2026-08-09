@@ -3002,3 +3002,113 @@ end to end, deleting the old mechanism outright rather than running both in para
 `PLAN-v2.md` §4.3's own stated order is item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi Aware,
 replacing GATT's 400-byte-write-per-round-trip ceiling and finally removing Wi-Fi Direct outright,
 closing the loop on this decision's own "left inert" WFD work above).
+
+## 48. P5 item 3 — BLE L2CAP CoC bulk pipe, additive (Wi-Fi Direct removal deferred to decision 49)
+
+First half of §4.3 item 3 ("a real bulk pipe"), continuing the same autonomous session that shipped
+decisions 46-47, per the user's explicit instruction to complete item 3 now and do a device-test
+round before P7. A Plan agent designed it first, re-verifying everything against actual current
+source (confirmed `minSdk`/`targetSdk`/`compileSdk` = 26/34/34, `MeshFrameCodec.VERSION` = 11,
+`RelayEngine.CHUNK_SIZE` = 400, and the exact Wi-Fi Direct wiring surface across 5 `transport/
+wifidirect/` files, `ui/WifiDirectSettings.kt`, `ui/HomeScreen.kt`, `MeshFrameCodec.kt`,
+`RelayResponder.kt`, `MeshService.kt`, and the manifest).
+
+**The minSdk-vs-API-29 gap is real, not theoretical.** `BluetoothDevice.createInsecureL2capChannel`/
+`BluetoothAdapter.listenUsingInsecureL2capChannel` need API 29; this project's own `minSdk` is 26.
+Devices on 26-28 can never use this path — GATT's existing 400-byte chunking is therefore not merely
+"the universal fallback" in name, it is the ONLY path on three OS versions this app still targets,
+and stays load-bearing indefinitely, not legacy code on its way out. Every entry point into the new
+code is `Build.VERSION.SDK_INT`-gated; a pre-29 device simply never advertises a PSM and
+`RelayResponder.handleSymbolRequest` always uses its GATT `respond` fallback, unchanged from
+decision 47's own behavior.
+
+**No initiator/responder role restriction, unlike the retired WFD accelerator — a deliberate
+divergence from that precedent, with real reasoning, not an oversight.** `WifiP2pManager.connect()`
+performed stateful group formation; two sides racing to call it could corrupt shared P2P state,
+which is why only WFD's initiator was ever allowed to dial. An L2CAP CoC `connect()` is an ordinary
+socket connect over a BLE ACL link that ALREADY exists (both devices are already GATT-connected) —
+there is no shared group state to corrupt. The worst case of both sides racing to open a channel is
+a harmless duplicate, not corrupted topology, so `L2capBulkTransport.openFor` only needs a
+per-address `Mutex` to collapse concurrent attempts into one, not prevent them by role.
+
+**New `ble/BulkChannel.kt`**: the `BulkChannel` interface (`send`/`close`) `RelayResponder` codes
+against, decoupled from the concrete transport — same role the retired `WifiDirectTransport` played
+for WFD. `BulkFraming` (length-prefixed stream I/O, pure `java.io`, zero Android dependency) is the
+actual framing mechanism — **deliberately NOT `MeshFrameCodec.padGattFrame`/`unpadGattFrame`**,
+despite the Plan agent's own initial suggestion to reuse it: that wrapper was built for
+MESSAGE-ORIENTED GATT writes, where the platform callback already delivers one bounded blob per
+call; a raw byte stream has no such boundary at all. Re-reading the actual existing precedent for a
+byte-stream transport in this codebase — the retired `WifiDirectAccelerator.sendChunks`/
+`receiveChunks` — showed it never used `padGattFrame` either, just a plain 4-byte length prefix
+around the raw encoded frame. Reused that exact, already-established pattern instead, resolving the
+Plan agent's own flagged-open "should the bulk pipe pad for disguise or skip padding for throughput"
+question by simply following what this codebase already does for stream transports — genuinely
+unresolved for GATT's own future padding tuning, but not ambiguous here.
+
+**New `ble/L2capBulkTransport.kt`**: owns the device-level listening socket (`startListening`, called
+once from `MeshGattServer.start`, mirroring the GATT server's own "one object for the whole radio
+session" shape), the dial-out path (`openFor`, `RelayResponder`'s `bulkChannelOpener` collaborator),
+and per-peer channel/device bookkeeping (`noteDevice`/`closeFor`, called from both GATT roles'
+connect/disconnect handling, mirroring `resetSessionBudget`'s own "called by both roles" precedent).
+**NOT device-tested** — a Robolectric spike this session (not kept as a permanent test) confirmed
+`listenUsingInsecureL2capChannel()` does not throw under Robolectric but returns a non-functional
+stub server socket (`psm = -1`) — no real loopback simulation exists for this API, unlike the
+`java.net.Socket` loopback pairs the retired `WifiDirectAcceleratorSocketTest` used for WFD's own
+plain-TCP sockets. `BulkFraming` (pure stream framing) is what's actually unit-tested; connection
+establishment itself is compile-verified only, same category `WifiP2pManager` mechanics already
+lived in for WFD.
+
+**`RelayResponder` changes**: two new optional collaborators (`bulkChannelOpener`,
+`localL2capPsm`), a new `peerBulkChannel` map (cleared in `resetSessionBudget`, same lifecycle as
+the retired `peerWfdCapable`), `handleL2capCap` (opens a channel via the collaborator, no role
+check — see above), and `handleSymbolRequest` now prefers an open bulk channel over GATT's own
+`respond` — deliberately WITHOUT the `delay(15)` GATT pacing between pushes, since a real socket
+with credit-based flow control makes that artificial pacing pure overhead defeating the pipe's own
+throughput purpose. A bulk-send failure mid-run does not fall back to GATT for the remaining
+symbols in that same call (the channel is presumed dead and dropped); whatever didn't send is
+simply requested again on the peer's next `SymbolRequest` — the same "worst case is wasted
+bandwidth, never incorrectness" framing `FountainCode`'s own class doc already gives the primitive
+riding on top of this pipe.
+
+**New wire frame**: `FRAME_L2CAP_CAP` (0x1F), `Frame.L2capCap(psm: Int)` — device-level, no MAC,
+same "carries no sensitive claim" reasoning `Frame.WifiDirectCap` already established (a forged/
+stale PSM just makes `connect()` throw, never a forged transfer). `MeshFrameCodec.VERSION` 11 → 12
+— bundles this addition with retiring `FRAME_WIFI_DIRECT_CAP`/`HANDOFF`/`ACCEPT` (0x19/0x1A/0x1B,
+actually deleted in decision 49 below, not this one) under one bump rather than two, since pure
+removal isn't independently load-bearing on its own (an old build's `decode()` already safely
+no-ops on any unrecognized byte) but is bundled here for discoverability, matching decision 47's own
+v11 precedent of combining a retirement and an addition under one version number.
+
+**Scope stays narrow, deliberately**: only `FRAME_SYMBOL_REQUEST`/`FRAME_EVID_SYMBOL` traffic ever
+moves over the bulk pipe. SOS, position, presence, catalog filter, nickname, and courier frames all
+stay on GATT — matches §4.3's own problem statement (media specifically, not the low-frequency
+control plane GATT already handles adequately) and keeps this already-novel, hardware-unconfirmed
+slice's blast radius bounded.
+
+19 new tests: `BulkFramingTest` (round-trip, multiple frames back-to-back on one stream, clean EOF,
+hostile oversized/negative length prefix, a real `PipedInputStream`/`PipedOutputStream` pair to
+prove this isn't just an in-memory-buffer artifact), `MeshFrameCodecTest`'s `FRAME_L2CAP_CAP`
+round-trip, and `RelayResponderTest`'s `handleSymbolRequest`/`handleL2capCap` coverage via a fake
+`BulkChannel` (prefers the bulk channel over `respond` once open, drops it and stops — no mid-run
+GATT fallback — on a send failure, and confirms `handleL2capCap` no-ops safely when no
+`bulkChannelOpener` is wired, the shape every pre-existing `RelayResponder` construction site still
+has). detekt clean (`ReturnCount` on `L2capBulkTransport.openFor` fixed by collapsing to a single
+guard + one final `if`/`else` return rather than three separate early returns — mirrors
+`FountainDecoder`'s own `addSymbol`/`tryInsert` split precedent for the identical reason;
+`SwallowedException` fixed by renaming genuinely-ignored catch variables to `_`, matching
+`WifiDirectAccelerator`'s own established convention; `LongParameterList` suppressed on
+`MeshGattClient`'s now-7-param constructor, same shape `MeshGattServer`/`RelayResponder` already
+carry). Both variants compile/test/assemble green (`assembleDebug`/`assembleRelease`,
+`lintVitalRelease`, R8-minified), no `missing_rules.txt`. Version bumped to v0.7.15-dev, fresh debug
+APK built and `aapt`-confirmed (`versionCode='26' versionName='0.7.15-dev'`). **NOT
+hardware-confirmed** — a real `VERSION` 12 wire break, adds to the existing next-live-round backlog;
+this slice specifically also needs the actual connection-establishment mechanics checked on real
+hardware, since nothing in the automated suite touches them (see `L2capBulkTransport`'s own class
+doc).
+
+**Wi-Fi Direct itself is untouched by this decision** — still fully wired, still functionally inert
+per decision 47 (nothing calls `maybeAccelerateOverWifiDirect`, which no longer exists). Removing it
+outright is decision 49, landed as a separate commit/version bump in the same session, deliberately
+not bundled into this one so each stays independently revertible (mirrors decisions 43/44's own
+GATT-wiring-vs-handover-mechanics split — two genuinely separate units of behavior change that
+happened to ship back to back, not one change artificially split in two).

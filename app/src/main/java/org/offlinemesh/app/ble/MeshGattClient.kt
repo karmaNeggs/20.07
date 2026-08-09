@@ -37,6 +37,9 @@ import java.util.concurrent.ConcurrentHashMap
  * simulator finding (decisions 16-17) that a link only being open ~15-20s of every ~60-65s cycle,
  * not P1's own forwarding logic, was the real bottleneck.
  */
+@Suppress("LongParameterList") // one collaborator per constructor param, same shape MeshGattServer
+// and RelayResponder already use elsewhere in this file — not a candidate for a params-object
+// without adding an abstraction this codebase doesn't otherwise use.
 class MeshGattClient(
     private val context: Context,
     private val responder: RelayResponder,
@@ -48,6 +51,11 @@ class MeshGattClient(
     // Shared with MeshGattServer and RelayResponder (PLAN-v2.md P1 §5.3) — see
     // ConnectionRegistry's class doc.
     private val connectionRegistry: ConnectionRegistry,
+    // Shared with MeshGattServer and RelayResponder (P5 item 3, docs/DECISIONS.md's own entry for
+    // this slice) — this side records the BluetoothDevice backing each connection it holds
+    // (noteDevice) so RelayResponder's role-agnostic handleL2capCap has something to dial with, and
+    // tears the channel down alongside its own writeQueue/negotiatedMtu cleanup on disconnect.
+    private val l2capTransport: L2capBulkTransport,
 ) {
     private val writeQueue = GattOperationQueue()
     private val maxConcurrentClientConnections = 3
@@ -235,6 +243,7 @@ class MeshGattClient(
         writeQueue.clear(held.gatt.device.address)
         negotiatedMtu.remove(held.gatt.device.address)
         activeTrackerKey.remove(held.gatt.device.address)
+        l2capTransport.closeFor(held.gatt.device.address)
         attemptTracker.connectionEnded(trackerKey, synced = syncedThisSession.remove(held.gatt.device.address))
     }
 
@@ -322,6 +331,7 @@ class MeshGattClient(
                 activeTrackerKey.remove(address)
                 writeQueue.clear(address)
                 negotiatedMtu.remove(address)
+                l2capTransport.closeFor(address)
                 handledGatts.remove(gatt)
                 gatt.close()
             }
@@ -344,6 +354,7 @@ class MeshGattClient(
                 ?.getCharacteristic(MeshProtocol.RELAY_CHAR_UUID) ?: run { gatt.disconnect(); return }
             gatt.setCharacteristicNotification(characteristic, true)
             responder.resetSessionBudget(gatt.device.address)
+            l2capTransport.noteDevice(gatt.device.address, gatt.device)
             serviceScope.launch {
                 val cccd = characteristic.getDescriptor(MeshGattServer.CCCD_UUID)
                 if (cccd != null) {

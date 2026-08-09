@@ -54,6 +54,19 @@ class RelayResponder(
     // Placed before onSosReceived, not after, so onSosReceived stays the last constructor param —
     // MeshService's existing call site uses trailing-lambda syntax for it.
     private val wifiDirectCoordinator: WifiDirectHandoffCoordinator? = null,
+    // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — L2capBulkTransport.openFor,
+    // wired post-construction-order-agnostic (a plain method reference, not a capturing lambda, so
+    // no cycle with L2capBulkTransport needing to exist before RelayResponder can reference it).
+    // Optional/default-null for the same "don't force every RelayResponder construction site to
+    // change" reason wifiDirectCoordinator above already established. Called from handleL2capCap
+    // once a peer's advertised PSM is known; the resulting channel (if any) is what
+    // handleSymbolRequest prefers over GATT's own respond.
+    private val bulkChannelOpener: (suspend (peerAddress: String, psm: Int) -> BulkChannel?)? = null,
+    // This device's own currently-advertised L2CAP PSM, or null if not listening (pre-API-29, no
+    // adapter, or the listen call itself failed) — read fresh every connection in
+    // framesToPushOnConnect, same "check live, not once" style every other capability check in this
+    // file already follows (see wifiDirectCoordinator's own CAP-announcement precedent).
+    private val localL2capPsm: () -> Int? = { null },
     // Fires once per newly-received (not duplicate/relayed-again), authenticated SOS in a group
     // we're actually a member of — MeshService uses this to post the system notification. No-op
     // default so this stays optional for anything else that constructs a RelayResponder.
@@ -167,6 +180,14 @@ class RelayResponder(
         peerWfdCapable[address] = true
     }
 
+    // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — the L2CAP bulk channel opened
+    // (if any) for a given peer this connection, set by handleL2capCap and read by
+    // handleSymbolRequest. Plain ConcurrentHashMap, not LRU-bounded like peerWfdCapable: cleared on
+    // every resetSessionBudget call (start of the NEXT connection for this address), and the actual
+    // socket teardown lives in L2capBulkTransport.closeFor, called directly from both GATT roles'
+    // own disconnect handling — this map is just a reference, not the resource itself.
+    private val peerBulkChannel = ConcurrentHashMap<String, BulkChannel>()
+
     @Synchronized
     fun resetSessionBudget(address: String) {
         // remove(), not set-to-0: this runs once at the start of EVERY connection (both GATT
@@ -178,6 +199,7 @@ class RelayResponder(
         symbolSessionBudget.remove(address)
         catalogItemBudget.remove(address)
         peerWfdCapable.remove(address)
+        peerBulkChannel.remove(address)
     }
 
     /** [FIRST_SIGHT]/[UNCHANGED] are both "nothing to worry about". [CHANGED] means this sender is
@@ -379,6 +401,11 @@ class RelayResponder(
         if (wifiDirectCoordinator?.capabilityAdvertisable() == true) {
             frames += MeshFrameCodec.encodeWifiDirectCap(version = 1)
         }
+        // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — same "check live, not once"
+        // style as the WFD announcement above: localL2capPsm() re-reads L2capBulkTransport's own
+        // current listening state every connection, so a listen failure/adapter toggle mid-session
+        // is reflected immediately rather than cached from connect time.
+        localL2capPsm()?.let { psm -> frames += MeshFrameCodec.encodeL2capCap(psm) }
         frames += presenceAndPositionFrames(toPeer)
         // P5 slice 1 (docs/DECISIONS.md decision 45): fullResRelayable, NOT relayableEvidenceMeta —
         // sending our own SymbolRequest here IS what solicits symbols back (see RelayEngine.
@@ -1299,6 +1326,17 @@ class RelayResponder(
      *  from a shared, item-scoped esi cursor for a complete item, or whatever partial rows this
      *  device itself holds for an incomplete one — see that function's own doc.
      *
+     *  **Prefers [peerBulkChannel] (P5 item 3) over GATT's own [respond] when one is open** — the
+     *  actual point of the bulk pipe: a `BulkChannel` is a real socket with credit-based flow
+     *  control, so the artificial `delay(15)` between pushes that exists purely to pace
+     *  [GattOperationQueue] would defeat its whole throughput purpose; only the GATT fallback path
+     *  paces itself. A [BulkChannel.send] failure mid-run does NOT fall back to GATT for the
+     *  remaining symbols in this same call — the channel is presumed dead (removed here, and
+     *  [L2capBulkTransport]'s own receive loop reaches the same conclusion independently on its
+     *  side of the same socket), and whatever didn't get sent is simply requested again on the
+     *  peer's next `SymbolRequest`, the same "worst case is wasted bandwidth, never incorrectness"
+     *  framing [FountainCode]'s own class doc already gives the primitive this rides on.
+     *
      *  Does NOT call [maybeAccelerateOverWifiDirect] — that function, and the whole WFD accelerator
      *  subsystem, is now unreachable dead code pending PLAN-v2.md §4.3 item 3's already-planned
      *  removal of Wi-Fi Direct outright (adapting its positional `deficit: List<Int>` API to a
@@ -1311,11 +1349,31 @@ class RelayResponder(
     ) {
         val take = consumeSymbolBudget(peerAddress, frame.stillNeed)
         if (take <= 0) return
+        val bulk = peerBulkChannel[peerAddress]
         for (symbol in relay.symbolsToSend(frame.evidenceId, take)) {
             val evidSymbol = MeshFrameCodec.Frame.EvidSymbol(frame.evidenceId, symbol.esi, symbol.data)
-            respond(MeshFrameCodec.encodeEvidSymbol(evidSymbol))
-            delay(15)
+            val encoded = MeshFrameCodec.encodeEvidSymbol(evidSymbol)
+            if (bulk != null) {
+                if (!bulk.send(encoded)) {
+                    peerBulkChannel.remove(peerAddress, bulk)
+                    return
+                }
+            } else {
+                respond(encoded)
+                delay(15)
+            }
         }
+    }
+
+    /** P5 item 3 (docs/DECISIONS.md's own entry for this slice) — a peer just told us the PSM to
+     *  reach their own listening L2CAP socket on. Attempts to open a channel immediately via
+     *  [bulkChannelOpener]; the result (or null, if unsupported/unavailable/the connect failed) is
+     *  what [handleSymbolRequest] later reads from [peerBulkChannel]. No role restriction — see
+     *  [L2capBulkTransport]'s own class doc on why a race here is harmless, unlike the retired WFD
+     *  accelerator's initiator/responder split. */
+    private suspend fun handleL2capCap(frame: MeshFrameCodec.Frame.L2capCap, peerAddress: String) {
+        val opener = bulkChannelOpener ?: return
+        opener(peerAddress, frame.psm)?.let { channel -> peerBulkChannel[peerAddress] = channel }
     }
 
     private fun handleWifiDirectCap(peerAddress: String) {
@@ -1351,6 +1409,7 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.Nickname -> handleNickname(frame, peerAddress)
                 is MeshFrameCodec.Frame.CatalogFilter -> handleCatalogFilter(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.SymbolRequest -> handleSymbolRequest(frame, peerAddress, respond)
+                is MeshFrameCodec.Frame.L2capCap -> handleL2capCap(frame, peerAddress)
                 is MeshFrameCodec.Frame.WifiDirectCap -> handleWifiDirectCap(peerAddress)
                 is MeshFrameCodec.Frame.WifiDirectHandoff -> handleWifiDirectHandoff(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.WifiDirectAccept -> handleWifiDirectAccept(frame, peerAddress)

@@ -58,6 +58,11 @@ class MeshGattServer(
     // Drives BleTuning.Profile.presenceRefreshIntervalMs for the periodic presence/position
     // refresh on held connections — see periodicRefresh's doc / decision 20.
     private val currentTier: () -> MeshService.PowerTier,
+    // Shared with MeshGattClient and RelayResponder (P5 item 3, docs/DECISIONS.md's own entry for
+    // this slice) — start() opens the device-level L2CAP listening socket here, alongside the GATT
+    // server itself; this side also records/tears down the BluetoothDevice for its own inbound
+    // connections, same as MeshGattClient does for outbound ones.
+    private val l2capTransport: L2capBulkTransport,
 ) {
     private var gattServer: BluetoothGattServer? = null
     private val subscribedDevices = ConcurrentHashMap.newKeySet<BluetoothDevice>() // mutated from BLE callback threads
@@ -97,6 +102,11 @@ class MeshGattServer(
     @SuppressLint("MissingPermission")
     fun start() {
         gattServer = bluetoothManager.openGattServer(context, callback)
+        // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — one listening socket for the
+        // whole radio session, not per-connection, same shape as the GATT server object itself.
+        // No-ops below API 29 or if listen fails (l2capTransport.advertisedPsm stays null either
+        // way) — see L2capBulkTransport's own class doc.
+        l2capTransport.startListening(bluetoothManager.adapter)
         val service = BluetoothGattService(MeshProtocol.SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
         val characteristic = BluetoothGattCharacteristic(
             MeshProtocol.RELAY_CHAR_UUID,
@@ -198,6 +208,7 @@ class MeshGattServer(
             // a second periodicRefresh loop here that lives for the connection's whole lifetime.
             if (!subscribedDevices.add(device)) return
             responder.resetSessionBudget(device.address)
+            l2capTransport.noteDevice(device.address, device)
             // Registered as soon as the link can actually accept a notify — see
             // ConnectionRegistry's class doc and registeredKey's doc on why the key is captured
             // once here, not re-resolved at unregister time.
@@ -252,6 +263,7 @@ class MeshGattServer(
                 subscribedDevices.remove(device)
                 writeQueue.clear(device.address)
                 negotiatedMtu.remove(device.address)
+                l2capTransport.closeFor(device.address)
                 // Same key register() used, never a fresh resolve — see registeredKey's doc. A
                 // connection that disconnects before ever subscribing (no CCCD write, so never
                 // registered) has no entry here, and unregister on an absent key is a no-op.

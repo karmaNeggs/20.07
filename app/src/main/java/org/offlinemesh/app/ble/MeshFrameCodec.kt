@@ -53,6 +53,11 @@ object MeshFrameCodec {
     const val FRAME_SYMBOL_REQUEST: Byte = 0x1D // "I still need N more distinct symbols for X"
     const val FRAME_EVID_SYMBOL: Byte = 0x1E    // one fountain-coded symbol: esi + payload
 
+    // P5 item 3 (docs/DECISIONS.md's own entry for this slice, PLAN-v2.md §4.3) — advertises this
+    // device's listening BLE L2CAP CoC PSM, the real bulk pipe SymbolRequest/EvidSymbol traffic can
+    // move onto instead of GATT. See L2capBulkTransport's own class doc.
+    const val FRAME_L2CAP_CAP: Byte = 0x1F // "here's the PSM to open an L2CAP channel to me on"
+
     /** Display names are a small courtesy label, not an identity — kept short so it stays a
      *  one-line, cheap-to-relay addition rather than a second chat field. */
     const val MAX_USERNAME_CHARS = 20
@@ -167,7 +172,15 @@ object MeshFrameCodec {
     // themselves must never be reused while any pre-v11 build might still be reachable. (2)
     // FRAME_EVID_META gains `contentLength` — a genuine field-shape change, same load-bearing
     // reasoning as v10's own thumbnail addition.
-    const val VERSION: Int = 11
+    // v12: P5 item 3 (docs/DECISIONS.md's own entry for this slice, PLAN-v2.md §4.3's bulk-pipe
+    // item) — new FRAME_L2CAP_CAP (0x1F), a genuinely new byte, same "not strictly required but
+    // bumped anyway for discoverability" case v9's FRAME_COURIER already established. Also retires
+    // FRAME_WIFI_DIRECT_CAP/HANDOFF/ACCEPT (0x19/0x1A/0x1B, deleted alongside Wi-Fi Direct outright
+    // in this same slice's second commit) — pure removal isn't independently load-bearing (an old
+    // build's decode() already safely no-ops on any byte it doesn't recognize), but bundled under
+    // this same bump rather than left undiscoverable, matching decision 47's own v11 precedent of
+    // bundling a retirement and an addition under one bump.
+    const val VERSION: Int = 12
 
     private const val PAD_BUCKET_1 = 256
     private const val PAD_BUCKET_2 = 512
@@ -384,6 +397,16 @@ object MeshFrameCodec {
          *  why the receiver can't assume a fixed bit-space anymore now that filter size scales with
          *  catalog size. */
         data class CatalogFilter(val seed: Long, val sizeBits: Int, val bits: ByteArray) : Frame()
+
+        /** "Here's the PSM to open a BLE L2CAP CoC channel to me on" (P5 item 3,
+         *  `docs/DECISIONS.md`'s own entry for this slice) — device-level, no MAC, same "carries no
+         *  sensitive claim" reasoning [WifiDirectCap] below already established: a forged/stale
+         *  [psm] just makes [android.bluetooth.BluetoothDevice.createInsecureL2capChannel]`(psm)`'s
+         *  `connect()` throw, never a forged transfer — nothing downstream trusts anything off the
+         *  resulting raw socket without going through this same [decode] every other frame does
+         *  (see [L2capBulkTransport]'s own class doc). Announced once per connection whenever this
+         *  device has an active listening socket — see `RelayResponder.framesToPushOnConnect`. */
+        data class L2capCap(val psm: Int) : Frame()
 
         /** "I support the WiFi Direct accelerator and my opt-in is on" — device-level, no MAC (see
          *  [WifiDirectHandoffCoordinator]'s doc for why this carries no sensitive claim: it can
@@ -875,6 +898,8 @@ object MeshFrameCodec {
             d.writeLong(seed); d.writeShort(sizeBits); d.writeStr16Bytes(bits)
         }
 
+    fun encodeL2capCap(psm: Int): ByteArray = frame(FRAME_L2CAP_CAP) { d -> d.writeInt(psm) }
+
     fun encodeWifiDirectCap(version: Int): ByteArray = frame(FRAME_WIFI_DIRECT_CAP) { d ->
         d.writeByte(version.coerceIn(0, 255))
     }
@@ -1158,6 +1183,7 @@ object MeshFrameCodec {
                     val bits = buf.readStr16Bytes()
                     Frame.CatalogFilter(seed, sizeBits, bits)
                 }
+                FRAME_L2CAP_CAP -> Frame.L2capCap(buf.int)
                 FRAME_WIFI_DIRECT_CAP -> {
                     val capVersion = buf.get().toInt() and 0xFF
                     Frame.WifiDirectCap(capVersion)

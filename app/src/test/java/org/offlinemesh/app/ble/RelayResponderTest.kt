@@ -14,6 +14,7 @@ import org.offlinemesh.app.crypto.CryptoUtils
 import org.offlinemesh.app.data.AppDatabase
 import org.offlinemesh.app.data.CourierEnvelopeEntity
 import org.offlinemesh.app.data.EvidenceEntity
+import org.offlinemesh.app.data.EvidenceSymbolEntity
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
@@ -193,6 +194,102 @@ class RelayResponderTest {
             frames.filterIsInstance<MeshFrameCodec.Frame.SymbolRequest>().none { it.evidenceId == "evid-fr-blind" },
         )
         AppDatabase.get(context).evidenceDao().pruneOlderThan(Long.MAX_VALUE)
+    }
+
+    // ---------- handleSymbolRequest / handleL2capCap (P5 item 3, docs/DECISIONS.md's own entry
+    // ---------- for this slice) ----------
+    // FakeBulkChannel stands in for a real L2capBulkTransport-backed channel — this is the same
+    // "decouple the decision logic from the real radio" split WifiDirectHandoffCoordinatorTest
+    // already uses via a fake WifiDirectTransport.
+
+    private class FakeBulkChannel(private val succeeds: Boolean = true) : BulkChannel {
+        val sent = mutableListOf<ByteArray>()
+        var closed = false
+        override suspend fun send(frame: ByteArray): Boolean {
+            if (!succeeds) return false
+            sent.add(frame)
+            return true
+        }
+        override fun close() { closed = true }
+    }
+
+    @Test
+    fun `handleSymbolRequest pushes EvidSymbol frames via respond when no bulk channel is open`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sr-1"))
+        val db = AppDatabase.get(context)
+        db.evidenceSymbolDao().insert(EvidenceSymbolEntity("evid-sr-1", 0, ByteArray(400)))
+        db.evidenceSymbolDao().insert(EvidenceSymbolEntity("evid-sr-1", 1, ByteArray(400)))
+
+        val requestFrame = MeshFrameCodec.encodeSymbolRequest("evid-sr-1", stillNeed = 2)
+        val responded = mutableListOf<ByteArray>()
+        responder.handleIncoming(requestFrame, "peer-sr-1") { responded.add(it) }
+
+        val esis = responded.mapNotNull { MeshFrameCodec.decode(it) }
+            .filterIsInstance<MeshFrameCodec.Frame.EvidSymbol>()
+            .map { it.esi }
+        assertEquals(setOf(0, 1), esis.toSet())
+        db.evidenceDao().deleteForGroup("group-1")
+        db.evidenceSymbolDao().deleteForEvidence("evid-sr-1")
+    }
+
+    @Test
+    fun `handleL2capCap opens a bulk channel, then handleSymbolRequest prefers it over respond`() = runTest {
+        val fake = FakeBulkChannel()
+        val opener: suspend (String, Int) -> BulkChannel? = { _, _ -> fake }
+        val bulkResponder = RelayResponder(
+            repo, relay, HopTracker(), PositionTracker(), LocationTracker(context),
+            PeerIdentityResolver(), ConnectionRegistry(),
+            bulkChannelOpener = opener,
+        )
+        relay.ingestEvidenceMeta(evidenceFixture("evid-sr-2"))
+        val db = AppDatabase.get(context)
+        db.evidenceSymbolDao().insert(EvidenceSymbolEntity("evid-sr-2", 0, ByteArray(400)))
+
+        bulkResponder.handleIncoming(MeshFrameCodec.encodeL2capCap(psm = 129), "peer-sr-2") { }
+
+        val respondCalls = mutableListOf<ByteArray>()
+        val requestFrame = MeshFrameCodec.encodeSymbolRequest("evid-sr-2", stillNeed = 1)
+        bulkResponder.handleIncoming(requestFrame, "peer-sr-2") { respondCalls.add(it) }
+
+        assertTrue("respond (GATT fallback) must not be used once a bulk channel is open", respondCalls.isEmpty())
+        assertEquals(1, fake.sent.size)
+        val decoded = MeshFrameCodec.decode(fake.sent[0])
+        check(decoded is MeshFrameCodec.Frame.EvidSymbol)
+        assertEquals(0, decoded.esi)
+        db.evidenceDao().deleteForGroup("group-1")
+        db.evidenceSymbolDao().deleteForEvidence("evid-sr-2")
+    }
+
+    @Test
+    fun `handleSymbolRequest drops the bulk channel and stops after a send failure, no GATT fallback mid-run`() =
+        runTest {
+            val fake = FakeBulkChannel(succeeds = false)
+            val opener: suspend (String, Int) -> BulkChannel? = { _, _ -> fake }
+            val bulkResponder = RelayResponder(
+                repo, relay, HopTracker(), PositionTracker(), LocationTracker(context),
+                PeerIdentityResolver(), ConnectionRegistry(),
+                bulkChannelOpener = opener,
+            )
+            relay.ingestEvidenceMeta(evidenceFixture("evid-sr-3"))
+            val db = AppDatabase.get(context)
+            db.evidenceSymbolDao().insert(EvidenceSymbolEntity("evid-sr-3", 0, ByteArray(400)))
+
+            bulkResponder.handleIncoming(MeshFrameCodec.encodeL2capCap(psm = 129), "peer-sr-3") { }
+            val respondCalls = mutableListOf<ByteArray>()
+            val requestFrame = MeshFrameCodec.encodeSymbolRequest("evid-sr-3", stillNeed = 1)
+            bulkResponder.handleIncoming(requestFrame, "peer-sr-3") { respondCalls.add(it) }
+
+            assertTrue("a failed bulk send must not fall back to GATT mid-run", respondCalls.isEmpty())
+            assertTrue(fake.sent.isEmpty())
+            db.evidenceDao().deleteForGroup("group-1")
+            db.evidenceSymbolDao().deleteForEvidence("evid-sr-3")
+        }
+
+    @Test
+    fun `handleL2capCap is a no-op when no bulkChannelOpener is wired`() = runTest {
+        // The default (setUp's own responder, same as production RelayResponder instances built
+        // without the P5 item 3 collaborators) — must not throw.
+        responder.handleIncoming(MeshFrameCodec.encodeL2capCap(psm = 1), "peer-sr-4") { }
     }
 
     @Test

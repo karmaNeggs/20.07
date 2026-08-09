@@ -86,6 +86,9 @@ class MeshService : Service() {
     // background, silently breaking that toggle's "no radio activity" promise. Found by an
     // automated regression scan of this session's changes, fixed here rather than left as a gap.
     private lateinit var wifiDirectAccelerator: WifiDirectAccelerator
+    // Same "reachable from setMeshActive(false)" reasoning as wifiDirectAccelerator above — P5
+    // item 3 (docs/DECISIONS.md's own entry for this slice).
+    private lateinit var l2capTransport: L2capBulkTransport
 
     // Power tier: ACTIVE while the app is actually on-screen (favors responsiveness — you're
     // watching the radar or about to send something), RELAY the rest of the time (favors battery
@@ -132,6 +135,7 @@ class MeshService : Service() {
             locationTracker.stop()
             compassTracker.stop()
             wifiDirectAccelerator.abortCurrent()
+            l2capTransport.closeAll()
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
         _meshActive.value = active
@@ -246,15 +250,25 @@ class MeshService : Service() {
             serviceScope,
             capabilityCheck = { WifiDirectCapabilities.supported(applicationContext) },
         )
+        // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — constructed before responder
+        // deliberately: RelayResponder's bulkChannelOpener param is a plain method reference
+        // (l2capTransport::openFor), not a capturing lambda, so there's no construction-order cycle
+        // even though the two eventually reference each other (l2capTransport.onFrame is wired
+        // below, only once responder exists — see L2capBulkTransport.onFrame's own doc).
+        l2capTransport = L2capBulkTransport(serviceScope)
         responder = RelayResponder(
             repo, relay, hopTracker, positionTracker, locationTracker, peerIdentity, connectionRegistry,
-            wifiDirectCoordinator,
+            wifiDirectCoordinator, l2capTransport::openFor, { l2capTransport.advertisedPsm },
         ) { sos, groupName -> notifySos(sos, groupName) }
+        l2capTransport.onFrame = { address, bytes, respond -> responder.handleIncoming(bytes, address, respond) }
 
         gattServer = MeshGattServer(
             this, bluetoothManager, responder, serviceScope, connectionRegistry, peerIdentity, ::currentTier,
+            l2capTransport,
         ).also { it.start() }
-        gattClient = MeshGattClient(this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry)
+        gattClient = MeshGattClient(
+            this, responder, serviceScope, ::currentTier, peerIdentity, connectionRegistry, l2capTransport,
+        )
         beaconRadio = BeaconRadio(
             bluetoothManager, repo, hopTracker, positionTracker, broadcastSosPreview, relay, locationTracker,
             serviceScope, ::currentTier,
@@ -320,6 +334,7 @@ class MeshService : Service() {
         // past the service's own lifetime. Found while reviewing this method for the radar-tick
         // job cleanup above; fixed alongside it rather than left as a separate pass.
         wifiDirectAccelerator.abortCurrent()
+        l2capTransport.closeAll()
         serviceScope.cancel()
         super.onDestroy()
     }

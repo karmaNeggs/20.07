@@ -877,6 +877,13 @@ class MeshFrameCodecTest {
     }
 
     @Test
+    fun `l2cap capability frame round-trips its psm`() {
+        val decoded = MeshFrameCodec.decode(MeshFrameCodec.encodeL2capCap(psm = 129))
+        check(decoded is MeshFrameCodec.Frame.L2capCap)
+        assertEquals(129, decoded.psm)
+    }
+
+    @Test
     fun `wifi direct handoff frame round-trips and carries a verifiable tag`() {
         val key = randomKey()
         val nonce = ByteArray(16) { it.toByte() }

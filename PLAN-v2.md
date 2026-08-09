@@ -6,6 +6,28 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 48 (`docs/DECISIONS.md`): §4.3 item 3 (bulk pipe) — BLE L2CAP CoC,
+  additive, DONE. Wi-Fi Direct removal is decision 49, a separate commit/version bump in this
+  same session.** Per the user's explicit instruction: complete item 3 now, device-test round
+  before P7. New `ble/BulkChannel.kt`/`L2capBulkTransport.kt` — a real bulk pipe for
+  `FRAME_SYMBOL_REQUEST`/`FRAME_EVID_SYMBOL` traffic only (every other frame type stays on GATT),
+  negotiated via new `FRAME_L2CAP_CAP` (0x1F). **Real, confirmed gap**: this project's `minSdk` 26
+  is below L2CAP CoC's own API-29 floor — GATT's 400-byte chunking is therefore not merely "the
+  universal fallback" in name, it's the ONLY path on three OS versions this app still targets, and
+  must stay correct indefinitely. No initiator/responder role restriction (unlike the retired WFD
+  accelerator) — a deliberate, reasoned divergence: L2CAP `connect()` has no shared group state to
+  corrupt the way `WifiP2pManager.connect()` did, so a race is a harmless duplicate channel, not
+  corrupted topology; `openFor`'s per-address `Mutex` just collapses concurrent attempts.
+  `RelayResponder.handleSymbolRequest` now prefers an open bulk channel over GATT's own `respond`,
+  deliberately WITHOUT GATT's `delay(15)` pacing (a real socket has its own flow control; the pacing
+  would defeat the whole throughput point). **NOT device-tested** — a Robolectric spike this
+  session (not kept) found `listenUsingInsecureL2capChannel()` returns a non-functional stub
+  (`psm=-1`) under test, no real loopback simulation exists for this API; `BulkFraming`'s pure
+  stream-framing logic is what's actually unit-tested (19 new tests total), connection
+  establishment itself is compile-verified only. `MeshFrameCodec.VERSION` 11 → 12. detekt clean,
+  both variants green, no `missing_rules.txt`. Version v0.7.15-dev, committed locally, **not
+  pushed**. Full detail in decision 48's own entry.
+
 - **2026-08-09, decision 47 (`docs/DECISIONS.md`): §4.3 item 2 (fountain coding) slice 2 —
   wiring, DONE. Item 2 is now fully code-complete end to end**, continuing the same autonomous
   session decision 46 started. One clean cutover (a Plan agent designed it first, re-verifying
@@ -1294,7 +1316,9 @@ unchanged from slice 3, only what value the already-existing `copiesRemaining` f
 48 h retention viable at 400), then fountain coding, then L2CAP CoC and Wi-Fi Aware as bulk pipes.
 Wi-Fi Direct removed.
 **STATUS (2026-08-09): item 1 (thumbnail-first) done; item 2 (fountain coding) fully done, both
-slices — see `docs/DECISIONS.md` decisions 45-47. Item 3 (bulk pipe) not started, neither designed.**
+slices — see `docs/DECISIONS.md` decisions 45-47. Item 3 (bulk pipe): BLE L2CAP CoC step done
+(decision 48); Wi-Fi Direct removal in progress (decision 49); Wi-Fi Aware itself deferred to a
+later slice, not started, not designed.**
 
 **Slice 1 (45) — thumbnail-first, full-res pull-on-demand.** `RelayEngine.fullResRelayable()`
 (own-authored, or explicitly `wantsFullRes`-requested) replaces `relayableEvidenceMeta()` as what
@@ -1351,6 +1375,28 @@ Full detail in decision 47's own entry.
 
 *Sim gate: at D = 400, per-node media storage stays bounded with 20 items circulating.*
 *Hardware gate: 3 phones — a 300 KB photo delivered member-to-member without entering the flood.*
+
+**Item 3 step 1 (48) — BLE L2CAP CoC bulk pipe, additive.** New `ble/BulkChannel.kt`/
+`L2capBulkTransport.kt` — a real socket-based bulk pipe for `FRAME_SYMBOL_REQUEST`/
+`FRAME_EVID_SYMBOL` traffic only (every other frame type stays on GATT), negotiated via new
+`FRAME_L2CAP_CAP` (0x1F). **Confirmed gap: `minSdk` 26 is below L2CAP CoC's own API-29 floor** —
+GATT's 400-byte chunking is the ONLY path on three OS versions this app still targets, not merely
+"the fallback" in name; every new code path is `SDK_INT`-gated, falling straight back to GATT's
+existing `respond`. No initiator/responder role restriction (unlike the retired WFD accelerator) —
+an L2CAP `connect()` has no shared group state to corrupt the way WFD's did, so a race between both
+sides is a harmless duplicate channel, collapsed via a per-address `Mutex`, not prevented by role.
+`RelayResponder.handleSymbolRequest` prefers an open bulk channel over GATT, without GATT's own
+`delay(15)` pacing (a real socket already has flow control). **NOT device-tested** — a Robolectric
+spike this session found `listenUsingInsecureL2capChannel()` returns a non-functional stub
+(`psm=-1`) under test; `BulkFraming`'s pure stream-framing logic is what's actually unit-tested (19
+new tests), connection establishment is compile-verified only. `MeshFrameCodec.VERSION` 11 → 12.
+detekt clean, both variants green, no `missing_rules.txt`. Version v0.7.15-dev. Full detail in
+decision 48's own entry.
+
+*Sim gate: n/a (transport-layer change, no protocol-level behavior to simulate).*
+*Hardware gate: 3 phones — confirm `listenUsingInsecureL2capChannel`/`createInsecureL2capChannel`
+actually establish a channel at all (nothing in the automated suite touches this), then confirm a
+full-res pull actually prefers it over GATT once open.*
 
 **P6 — Crypto (§4.4).** Epoch key ratchet, rotating group handle replacing cleartext `groupId`,
 padding for all frame types, SOS body encryption.
