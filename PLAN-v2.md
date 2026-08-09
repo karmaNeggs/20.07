@@ -6,6 +6,33 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 50 (`docs/DECISIONS.md`): diagnostics logging widened ahead of the
+  device-test round — no behavior change.** The user asked, before greenlighting the test round
+  below: is the exportable `DiagnosticsLog` actually capturing this session's own changes and their
+  failure modes, and message-level send/receive timestamps for delay/hop analysis? Audit found two
+  real gaps: the entire new L2CAP CoC path (decision 48) wrote zero exportable diagnostics (only
+  `logcat`), and `RelayResponder.handleIncoming`'s own top-level catch-all — wrapping every frame
+  type's processing — only logged to `logcat` too, meaning a regression anywhere in this session's
+  changes could have thrown silently as far as the exported log is concerned. Fixed: L2CAP listen/
+  connect/accept/close now all log to `DiagnosticsLog`; `handleSymbolRequest` logs which path
+  (`l2cap`/`gatt`) a push actually took; `handleL2capCap` logs channel-open success/failure; the
+  `handleIncoming` catch-all now also exports; every remaining bare-`Log.w` auth/signature "dropping"
+  path across SOS/courier/evidence/position/presence/nickname now mirrors to `DiagnosticsLog` too.
+  For delay/hop tracing: the existing `"NEW sos"` receive log now includes a truncated message id
+  (not a person identifier) alongside its hop count; `floodForwardSos` — the one function both a
+  freshly-authored message and every relay forward already funnel through — now logs every call,
+  including a `BLOCKED` event with reason when TTL is exhausted or no links are open (previously
+  invisible either way); `pushFullResRequestNow` (full-res pull requests) went from silent to logged.
+  Deliberately did NOT touch `BeaconRadio`/`MeshGattServer`'s own pre-existing `Log.w` sites — those
+  are Tier B/connection-layer conditions already covered by prior hardware-confirmed rounds, and
+  widening every single warning in the codebase risks flooding the 512KB rotating cap with noise
+  during a real multi-hour session, burying the actually-new signal this exists to surface. Same
+  export mechanism as before — no new UI, `HomeScreen`'s existing "Export diagnostics" row and its
+  `ACTION_SEND` chooser (Drive/email/anything installed) is unchanged. 505 tests (unchanged — pure
+  logging, no wire/schema change). detekt clean, both variants green, no `missing_rules.txt`. Version
+  v0.7.17-dev, committed locally, **not pushed**. **This is the build going out for the device-test
+  round.** Full detail in decision 50's own entry.
+
 - **2026-08-09, decision 49 (`docs/DECISIONS.md`): §4.3 item 3 — Wi-Fi Direct removed outright.
   Item 3 status: L2CAP CoC done (48), WFD removed (this one), Wi-Fi Aware deferred to a later
   slice — item 3 is otherwise done; P5 (Media) is now fully code-complete across all 3 items.**

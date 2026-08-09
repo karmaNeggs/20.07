@@ -14,6 +14,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import java.io.IOException
 import java.util.concurrent.ConcurrentHashMap
 
@@ -145,9 +146,25 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
                         s
                     }
                 }
-                if (socket == null) null else wrap(peerAddress, socket)
+                if (socket == null) {
+                    DiagnosticsLog.event(
+                        "l2cap",
+                        "connect timed out: ${peerAddress.take(PEER_ID_LOG_CHARS)}"
+                    )
+                    null
+                } else {
+                    DiagnosticsLog.event(
+                        "l2cap",
+                        "connected out (dialed): ${peerAddress.take(PEER_ID_LOG_CHARS)}"
+                    )
+                    wrap(peerAddress, socket)
+                }
             } catch (e: IOException) {
                 Log.w(TAG, "L2CAP connect to $peerAddress failed: ${e.message}")
+                DiagnosticsLog.event(
+                    "l2cap",
+                    "connect failed: ${peerAddress.take(PEER_ID_LOG_CHARS)} (${e.message})"
+                )
                 null
             }
         }
@@ -164,9 +181,11 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
             val server = adapter.listenUsingInsecureL2capChannel()
             serverSocket = server
             advertisedPsm = server.psm
+            DiagnosticsLog.event("l2cap", "listening, psm=${server.psm}")
             serviceScope.launch(Dispatchers.IO) { acceptLoop(server) }
         } catch (e: IOException) {
             Log.w(TAG, "L2CAP listen failed: ${e.message}")
+            DiagnosticsLog.event("l2cap", "listen failed: ${e.message}")
             advertisedPsm = null
         }
     }
@@ -182,6 +201,7 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
             }
             val address = socket.remoteDevice.address
             knownDevices[address] = socket.remoteDevice
+            DiagnosticsLog.event("l2cap", "connected in (accepted): ${address.take(PEER_ID_LOG_CHARS)}")
             wrap(address, socket)
         }
     }
@@ -219,6 +239,10 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
                 }
             } catch (e: IOException) {
                 Log.w(TAG, "L2CAP receive loop for $peerAddress ended: ${e.message}")
+                DiagnosticsLog.event(
+                    "l2cap",
+                    "channel closed: ${peerAddress.take(PEER_ID_LOG_CHARS)} (${e.message})"
+                )
             } finally {
                 channels.remove(peerAddress, this)
                 close()
@@ -233,5 +257,9 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
         // over an already-live BLE link, so a short timeout is enough to avoid a hung coroutine
         // without inventing a WFD-scale multi-second budget for a fundamentally different operation.
         private const val CONNECT_TIMEOUT_MS = 10_000L
+
+        // Only this much of a peer address goes into the exportable diagnostics log — same
+        // convention/value as MeshGattClient's own private PEER_ID_LOG_CHARS.
+        private const val PEER_ID_LOG_CHARS = 8
     }
 }

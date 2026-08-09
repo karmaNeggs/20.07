@@ -14,6 +14,7 @@ import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SeenMessageEntity
 import org.offlinemesh.app.data.SosEntity
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -442,6 +443,11 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         val actualHash = CryptoUtils.sha256Hex(ciphertext)
         if (actualHash != meta.sha256) {
             Log.w(TAG, "evidence $evidenceId hash mismatch — corrupted or tampered, discarding reassembly")
+            DiagnosticsLog.event(
+                "error",
+                "evidence hash mismatch, discarding reassembly: " +
+                    evidenceId.take(RelayResponder.SENDER_ID_LOG_CHARS)
+            )
             liveDecoders.remove(evidenceId)
             return@withLock
         }

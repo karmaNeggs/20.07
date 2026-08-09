@@ -3178,3 +3178,75 @@ code-complete across all three items. Per the user's own explicit instruction th
 a device-test round (covering the accumulated backlog since P3, plus this session's own
 `VERSION` 11/12 wire breaks and the first-ever L2CAP CoC connection-establishment check), then P7
 (bitchat bridge) — the last phase before the project's sustained field-test milestone.
+
+## 50. Diagnostics logging widened ahead of the device-test round — no behavior change
+
+Prompted directly by the user before greenlighting the device-test round decision 49 set up: the
+exportable `DiagnosticsLog` (see its own class doc — debug-only, no positions/message bodies/keys,
+bounded 512KB rotating file, shared via the existing `DiagnosticsExportRow`/`shareDiagnostics`
+`ACTION_SEND` chooser in `HomeScreen.kt`, which already reaches Drive/email/etc. with no cable) had
+NOT kept pace with this session's own changes. Two concrete gaps found by auditing every `Log.w`/
+`Log.e` call site under `ble/` against what `DiagnosticsLog.event` actually mirrors:
+
+1. **The entire new L2CAP CoC path (decision 48) wrote zero exportable diagnostics.** The single
+   riskiest, newest, hardware-unverified code this session shipped — `listenUsingInsecureL2capChannel`/
+   `createInsecureL2capChannel` connection establishment has no local/Robolectric coverage at all (see
+   decision 48's own Robolectric-stub finding) — was invisible outside a `logcat` cable session. A
+   silent L2CAP failure on-device would have been indistinguishable from "GATT fallback is just what
+   happened," with no exported evidence either way.
+2. **`RelayResponder.handleIncoming`'s own top-level `catch (e: Exception)` — the catch-all wrapping
+   *every* frame type's processing (SOS, position, evidence, presence, nickname, courier, catalog
+   filter, L2CAP cap, symbol request) — only logged to `logcat`.** Any exception this session's
+   changes introduced anywhere in that dispatch would never appear in an exported log.
+
+**What changed, no wire/schema/behavior change anywhere — purely additive logging:**
+
+- `L2capBulkTransport.kt`: new `DiagnosticsLog.event("l2cap", ...)` calls at every state transition
+  that previously only had a `Log.w` (or nothing) — `startListening` success (with PSM) and failure,
+  outbound `connectAndWrap` success/timeout/failure, inbound `acceptLoop` accept, and
+  `RealBulkChannel.receiveLoop`'s close. `closeAll`'s routine teardown catch deliberately left
+  `Log.w`-only — not a diagnosable failure mode, just socket-close noise.
+- `RelayResponder.kt`: `handleSymbolRequest` now logs which path a symbol push actually took
+  (`l2cap` vs `gatt`) and any bulk mid-run send failure; `handleL2capCap` logs whether a peer's
+  advertised PSM actually turned into an open channel; the `handleIncoming` catch-all now also
+  writes `DiagnosticsLog.event("error", ...)` with the frame type and exception class, closing gap 2
+  above; every remaining bare `Log.w` "dropping" path (SOS/courier/evidence/position/presence/
+  nickname auth or signature failures, oversized catalog filter) now has a matching
+  `DiagnosticsLog.event("reject", ...)` mirror — extending the dual-logging convention a few of
+  these paths (e.g. the broadcast-tier presence-signature check) already had, to the ones that
+  didn't.
+- `RelayEngine.kt`: the evidence hash-mismatch path (`decodeAndPersist`) now also logs to
+  `DiagnosticsLog` under tag `error`, with a truncated evidence id — a real fountain-coding
+  correctness signal (decision 46/47 changed this whole reassembly path this session) that was
+  previously `logcat`-only. The unrelated file-sweep-failure catch left as-is (routine housekeeping,
+  not something this test round is trying to diagnose).
+- **Message-level send/receive tracing for delay and hop analysis**, per the user's explicit ask:
+  `handleSos`'s existing `"NEW sos"` receive-side log now includes a truncated `frame.id` (a
+  per-message UUID, not a person identifier — deliberately not subject to the class doc's
+  sender/group-id exclusions) alongside the hop count it already logged, so exported logs from
+  separate phones can be joined on "the same message" to compute actual origin-to-receipt delay per
+  hop. `floodForwardSos` — the single function both a freshly-authored local message
+  (`floodForwardLocalSos`) and every relayed forward already funnel through — now logs on every
+  call: a `BLOCKED` event with reason (`ttl exhausted` / `no open links`) on either early return, and
+  otherwise the message id, hop, actual sent/attempted target count, and jitter delay applied. This
+  is the "blocks" half of what the user asked for — previously neither block condition, nor a
+  successful send, produced any exported evidence at all. `pushFullResRequestNow` (the full-res pull
+  request path, previously entirely silent) now logs the evidence id, symbols still needed, and link
+  count it went out on.
+
+**Deliberately not touched**: `BeaconRadio.kt`'s advertise/scan start/stop failures and
+`MeshGattServer.kt`'s soft-connection-cap warning — these are Tier B/connection-layer conditions
+already covered by this project's existing hardware-confirmed rounds (decisions 21/22/30 all found
+and fixed real bugs in exactly this area via `logcat` auditing, not a gap in what's exported), and
+widening every single `Log.w` in the codebase indiscriminately risks flooding the 512KB rotating
+cap with routine noise during a real multi-hour session, burying the new, actually-unverified
+signal (L2CAP, fountain-coding reassembly, forward blocks) this decision exists to surface. Scope
+was deliberately: everything touched or left unverified by this session's own changes (decisions
+45-49), plus the one pre-existing catch-all gap (`handleIncoming`) that would have silently
+swallowed evidence of a regression in any of them.
+
+505 tests (unchanged — pure logging, no new test surface). detekt clean on the first pass. Both
+variants compile/test/assemble green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`,
+R8-minified), no `missing_rules.txt`. Version bumped to v0.7.17-dev, fresh debug APK built and
+`aapt`-confirmed (`versionCode='28' versionName='0.7.17-dev'`). This is the build going out for the
+device-test round.

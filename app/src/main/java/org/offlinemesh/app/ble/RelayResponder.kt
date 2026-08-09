@@ -344,6 +344,11 @@ class RelayResponder(
             // failure was silent and total on this connection. Falls back to the pre-catalog-
             // filter behavior: push relayable content eagerly. Correctness (it arrives) beats
             // efficiency (a compact diff) here.
+            DiagnosticsLog.event(
+                "relay",
+                "catalog filter (${filterFrame.size}B) exceeds ${maxFrameBytes}B budget — eager " +
+                    "push of ${keys.size} item(s)"
+            )
             Log.w(
                 "RelayResponder",
                 "catalog filter (${filterFrame.size}B) exceeds this connection's ${maxFrameBytes}B " +
@@ -559,6 +564,7 @@ class RelayResponder(
             .firstNotNullOfOrNull { MeshFrameCodec.openSos(frame.sealed, it) }
             ?: run {
                 Log.w("RelayResponder", "SOS failed to open for a group we hold the key to — dropping")
+                DiagnosticsLog.event("reject", "sos failed to open for a held group")
                 return
             }
         ingestOpenedSos(groupId, frame, body, peerAddress)
@@ -582,6 +588,7 @@ class RelayResponder(
                 "RelayResponder",
                 "SOS signature failed verification for a pinned sender — dropping (possible impersonation)"
             )
+            DiagnosticsLog.event("reject", "sos signature failed for a pinned sender")
             return
         }
         val sos = SosEntity(
@@ -606,9 +613,15 @@ class RelayResponder(
         // so the value shown here and the value persisted for this SOS's own next relay agree.
         val hopsFromOrigin = frame.hop + 1
         if (isNew) {
+            // frame.id (a per-message UUID, not a person identifier) is included, deliberately
+            // unlike sender/group ids elsewhere in this file — for a device test it's what lets
+            // exported logs from separate phones be joined on "the same message," to measure
+            // actual origin-to-receipt delay per hop. See DiagnosticsLog's class doc: this is a
+            // content id, not the kind of identifier that class doc's exclusions are about.
             DiagnosticsLog.event(
                 "recv",
-                "NEW sos from ${body.senderId.take(SENDER_ID_LOG_CHARS)} hop=$hopsFromOrigin"
+                "NEW sos id=${frame.id.take(SENDER_ID_LOG_CHARS)} from " +
+                    "${body.senderId.take(SENDER_ID_LOG_CHARS)} hop=$hopsFromOrigin"
             )
         }
         // Sourced on senderId (stable, global per device — see PeerIdentityResolver's class doc),
@@ -693,6 +706,7 @@ class RelayResponder(
         val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.createdAt / MILLIS_PER_SECOND)
         val body = MeshFrameCodec.openCourierBody(frame.sealed, contentKey) ?: run {
             Log.w("RelayResponder", "courier envelope failed to open for a group we hold the key to — dropping")
+            DiagnosticsLog.event("reject", "courier envelope failed to open for a held group")
             return
         }
         ingestOpenedCourier(groupId, frame, body, peerAddress)
@@ -708,6 +722,7 @@ class RelayResponder(
         peerAddress: String,
     ) {
         if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) {
+            DiagnosticsLog.event("reject", "courier envelope signature failed for a pinned sender")
             Log.w(
                 "RelayResponder",
                 "courier envelope signature failed verification for a pinned sender — dropping " +
@@ -770,11 +785,18 @@ class RelayResponder(
         // freshly created (createSos seals+handles before storing) or freshly ingested (handleSos
         // constructs with both set) — hence handle's own unguarded `!!` a few lines below.
         val sealed = sos.sealed ?: return
+        val shortId = sos.id.take(SENDER_ID_LOG_CHARS)
         val openLinkCount = connectionRegistry.openLinkCount()
         val forwardedTtl = ForwardingPolicy.forwardedTtl(sos.ttl, openLinkCount)
-        if (forwardedTtl <= 0) return
+        if (forwardedTtl <= 0) {
+            DiagnosticsLog.event("send", "sos id=$shortId hop=$hopsFromOrigin BLOCKED: ttl exhausted")
+            return
+        }
         val candidates = connectionRegistry.others(excludeKey).keys.toList()
-        if (candidates.isEmpty()) return
+        if (candidates.isEmpty()) {
+            DiagnosticsLog.event("send", "sos id=$shortId hop=$hopsFromOrigin BLOCKED: no open links")
+            return
+        }
         val targets = ForwardingPolicy.linksToForwardOn(
             candidates, messageIdSeed = sos.id.hashCode().toLong(), openLinkCount = openLinkCount,
         )
@@ -782,9 +804,16 @@ class RelayResponder(
         // envelope's hop/ttl change — same "never re-encrypt a relayed item" reasoning position's
         // own reframePositionForRelay already follows, and for the same dedup-stability reason.
         val outgoing = MeshFrameCodec.reframeSosForRelay(sos.handle!!, sos.id, forwardedTtl, hopsFromOrigin, sealed)
-        delay(ForwardingPolicy.pickJitterMs(openLinkCount))
+        val jitterMs = ForwardingPolicy.pickJitterMs(openLinkCount)
+        delay(jitterMs)
         val liveTargets = connectionRegistry.others(excludeKey)
-        for (peerKey in targets) liveTargets[peerKey]?.send(outgoing)
+        var sentCount = 0
+        for (peerKey in targets) if (liveTargets[peerKey]?.send(outgoing) == true) sentCount++
+        DiagnosticsLog.event(
+            "send",
+            "sos id=$shortId hop=$hopsFromOrigin sent to $sentCount/${targets.size} target(s), " +
+                "jitter=${jitterMs}ms"
+        )
     }
 
     /** Call right after [RelayEngine.requestFullResolution] succeeds (P5 slice 1, docs/DECISIONS.md
@@ -805,9 +834,15 @@ class RelayResponder(
         val stillNeed = relay.symbolDeficit(evidenceId)
         if (stillNeed <= 0) return
         val requestFrame = MeshFrameCodec.encodeSymbolRequest(meta.id, stillNeed)
-        for ((_, push) in connectionRegistry.others(excludePeerKey = null)) {
+        val others = connectionRegistry.others(excludePeerKey = null)
+        for ((_, push) in others) {
             push.send(requestFrame)
         }
+        DiagnosticsLog.event(
+            "send",
+            "symbol request evid=${evidenceId.take(SENDER_ID_LOG_CHARS)} stillNeed=$stillNeed " +
+                "to ${others.size} link(s)"
+        )
     }
 
     /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
@@ -857,10 +892,12 @@ class RelayResponder(
         val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.timestamp / MILLIS_PER_SECOND)
         if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
             Log.w("RelayResponder", "evidence header failed auth for a group we hold — dropping")
+            DiagnosticsLog.event("reject", "evidence header failed auth for a held group")
             return false
         }
         val signatureOk = verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)
         if (!signatureOk) {
+            DiagnosticsLog.event("reject", "evidence header signature failed for a pinned sender")
             Log.w(
                 "RelayResponder",
                 "evidence header signature failed verification for a pinned sender — dropping " +
@@ -942,6 +979,7 @@ class RelayResponder(
         peerAddress: String,
     ) {
         if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) {
+            DiagnosticsLog.event("reject", "position signature failed for a pinned sender")
             Log.w(
                 "RelayResponder",
                 "position signature failed verification for a pinned sender — dropping (possible impersonation)"
@@ -989,6 +1027,7 @@ class RelayResponder(
         // tolerance chosen.
         if (!presenceWithinSkew(frame.timestamp, hop = frame.hop)) {
             Log.w("RelayResponder", "presence frame outside skew window — dropping (replay?)")
+            DiagnosticsLog.event("reject", "presence frame outside skew window (replay?)")
             return
         }
         // No key: we can't verify this and never will — but we can carry it, which is what makes a
@@ -1055,6 +1094,7 @@ class RelayResponder(
             // own signature is checked below against the key we just accepted.
         }
         if (!verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)) {
+            DiagnosticsLog.event("reject", "presence signature failed under the pinned key")
             Log.w(
                 "RelayResponder",
                 "presence signature failed verification under the pinned key — dropping (possible impersonation)"
@@ -1093,10 +1133,12 @@ class RelayResponder(
         val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.updatedAt / MILLIS_PER_SECOND)
         if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
             Log.w("RelayResponder", "nickname failed auth for a group we hold — dropping")
+            DiagnosticsLog.event("reject", "nickname failed auth for a held group")
             return
         }
         val nickSignatureOk = verifySignatureIfPinned(groupId, frame.senderId, frame.signature, macInput)
         if (!nickSignatureOk) {
+            DiagnosticsLog.event("reject", "nickname signature failed for a pinned sender")
             Log.w(
                 "RelayResponder",
                 "nickname signature failed verification for a pinned sender — dropping (possible impersonation)"
@@ -1305,12 +1347,21 @@ class RelayResponder(
         val take = consumeSymbolBudget(peerAddress, frame.stillNeed)
         if (take <= 0) return
         val bulk = peerBulkChannel[peerAddress]
+        DiagnosticsLog.event(
+            "bulk",
+            "sending $take symbol(s) to ${peerAddress.take(SENDER_ID_LOG_CHARS)} via " +
+                if (bulk != null) "l2cap" else "gatt"
+        )
         for (symbol in relay.symbolsToSend(frame.evidenceId, take)) {
             val evidSymbol = MeshFrameCodec.Frame.EvidSymbol(frame.evidenceId, symbol.esi, symbol.data)
             val encoded = MeshFrameCodec.encodeEvidSymbol(evidSymbol)
             if (bulk != null) {
                 if (!bulk.send(encoded)) {
                     peerBulkChannel.remove(peerAddress, bulk)
+                    DiagnosticsLog.event(
+                        "bulk",
+                        "l2cap send failed mid-run, dropped channel: ${peerAddress.take(SENDER_ID_LOG_CHARS)}"
+                    )
                     return
                 }
             } else {
@@ -1328,7 +1379,14 @@ class RelayResponder(
      *  accelerator's initiator/responder split. */
     private suspend fun handleL2capCap(frame: MeshFrameCodec.Frame.L2capCap, peerAddress: String) {
         val opener = bulkChannelOpener ?: return
-        opener(peerAddress, frame.psm)?.let { channel -> peerBulkChannel[peerAddress] = channel }
+        val channel = opener(peerAddress, frame.psm)
+        val short = peerAddress.take(SENDER_ID_LOG_CHARS)
+        if (channel != null) {
+            peerBulkChannel[peerAddress] = channel
+            DiagnosticsLog.event("bulk", "l2cap channel ready for $short (psm=${frame.psm})")
+        } else {
+            DiagnosticsLog.event("bulk", "l2cap channel NOT opened for $short (psm=${frame.psm})")
+        }
     }
 
     // handleWifiDirectCap/handleWifiDirectHandoff/handleWifiDirectAccept lived here through
@@ -1353,6 +1411,10 @@ class RelayResponder(
             }
         } catch (e: Exception) {
             Log.w("RelayResponder", "frame handling failed: ${e.message}")
+            DiagnosticsLog.event(
+                "error",
+                "frame handling threw (${frame::class.simpleName}): ${e::class.simpleName} ${e.message}"
+            )
         }
     }
 
