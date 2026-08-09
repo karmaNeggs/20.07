@@ -2752,3 +2752,106 @@ existing next-live-round backlog (37/38/40/43).
 pipe — BLE L2CAP CoC, Wi-Fi Aware). This slice's pull-gating decision (*whether* to solicit full
 resolution) stays conceptually valid underneath either future transport — only the mechanism for
 actually moving symbols/bytes once solicited would change.
+
+## 46. P5 slice 1 of §4.3 item 2 — fountain-code encode/decode primitive, construction only
+
+First slice of §4.3 item 2 (RaptorQ/fountain coding), the phase's own next item per decision 45's
+closing note. A Plan agent read the existing chunk/manifest/deficit mechanism first
+(`RelayEngine.CHUNK_SIZE`/`chunkBytes`/`maybeReassemble`, `Frame.Manifest`/`FRAME_MANIFEST`,
+`MeshProtocol.encodeBitset`/`decodeBitset`, `RelayResponder.handleManifest`'s deficit computation and
+session chunk budget) and confirmed the actual load-bearing requirement is the PROPERTY §4.3 states —
+"a receiver reconstructs from any k(1+ε) distinct symbols from any combination of sources" — not
+literal RFC 6330 conformance.
+
+**Library vs. hand-rolled RFC 6330 vs. a simpler hand-rolled scheme: checked and rejected the first
+two.** Two real Android-viable libraries exist and both fail this project's own dependency bar (every
+existing dependency in `build.gradle.kts` — Tink, CameraX, zxing, LeakCanary — carries institutional
+maintenance): OpenRQ, the only mature RFC 6330 Java implementation, has had no commits since 2017 and
+isn't published to Maven Central; the one Kotlin-native alternative found is a single-author,
+effectively unpublished project about a year old. Full hand-rolled RFC 6330 (LDPC+HDPC precoding over
+GF(256), inactivation decoding) was rejected as disproportionate — thousands of lines, easy to get
+subtly wrong, and its whole value proposition (near-zero decoding overhead via precoding) is CDN-scale
+efficiency this app doesn't need, since realistic evidence items are ~200 symbols
+(`MeshFrameCodec.MAX_EVIDENCE_CHUNKS`'s own doc). Direct precedent: `CatalogFilter.kt` already made
+the identical substitution (a plain Bloom filter standing in for bitchat's heavier Golomb-Coded Set)
+for the identical reason.
+
+**Built: a systematic random-linear fountain code (`ble/FountainCode.kt`, new file) with incremental
+Gaussian elimination over GF(2) for decoding, not belief propagation.** `FountainCode.encoder(data,
+symbolSize)` splits input into `k` fixed-size systematic source symbols (esi `0 until k`, zero-padded
+like `chunkBytes` pads its last chunk today); `FountainEncoder.symbol(esi)` returns source data
+verbatim for `esi < k` or an XOR combination of a deterministically-derived subset of source symbols
+for `esi >= k` (repair, unbounded esi space, no per-peer state — mirrors
+`framesToPushOnConnect`'s own "no memory of any specific peer" design).
+`FountainDecoder.addSymbol(symbol)` folds a symbol into an incrementally-maintained reduced row-
+echelon system (`isComplete` is a rank test, `decode()` a plain concatenation once every column has
+its own pivot row — see the class's own proof-shaped doc comment for why the invariant the insertion
+loop maintains guarantees that). GE was chosen deliberately over the RaptorQ/LT-standard
+belief-propagation decoder specifically because GE's correctness never depends on which degrees or
+indices a repair symbol was built from — only on the received rows having full rank — making a bug in
+the repair-symbol construction a pure efficiency risk (more symbols needed) rather than a correctness
+one, the one place this design is deliberately more forgiving than hand-rolled RaptorQ would have
+been.
+
+**A real mid-slice correction, caught by measurement, not review.** The first version of
+`RepairPlan` (the module deriving a repair symbol's source-index subset from `esi` alone) used the
+textbook robust soliton distribution (Luby 2002) — standard for LT codes, but standard specifically
+for belief-propagation decoding. Diagnostic tests (not kept in the suite) measured it against this
+class's own GE decoder directly: 1.3-2.6x the information-theoretic minimum number of repair symbols
+needed across k=20..1000, because most low-degree draws landed entirely inside the region a receiver
+already held, contributing nothing. Switched `RepairPlan` to dense random coefficients (each of the k
+source indices included independently with ~1/2 probability, drawn directly from the PRNG's raw bits
+rather than a degree-then-indices two-step) — standard random-linear-coding territory. Re-measured:
+1-2 EXTRA symbols past the true deficit, independent of k. Simpler code too (no floating-point
+robust-soliton math, no `StrictMath` cross-device-determinism concern that construction would have
+carried). The tradeoff, accepted deliberately: more XOR work per repair symbol (touches ~k/2 source
+symbols instead of a handful) in exchange for far less wire bandwidth — the right trade for a
+BLE-bottlenecked mesh, where bandwidth, not phone CPU, is the scarce resource.
+
+**Determinism**: repair-symbol construction is seeded from `(k, esi)` alone via a hand-rolled
+SplitMix64 PRNG, not `java.util.Random` — same precedent `CatalogFilter.hashIndexes`'s doc already
+set (avoid depending on a platform-provided algorithm for anything two independent devices must
+derive identically).
+
+**Known cost, not yet hardware-measured**: `FountainDecoder.addSymbol` is O(k) BitSet checks per call
+(the "clear this pivot from every other row" step) plus data-dependent XOR work; end to end this is
+an O(k²)-ish incremental Gaussian elimination, not RaptorQ's near-linear message passing, and dense
+repair symbols add real O(k) XOR cost per symbol on top. At `k` near `MAX_EVIDENCE_CHUNKS` (4096) this
+is untested on real phone hardware — added to the existing next-live-round backlog alongside every
+other unconfirmed slice. A bounded-time smoke test at k=1000 (well under 10s) is in the regular suite
+as a sanity check, not a hardware benchmark.
+
+15 new tests (`FountainCodeTest`, 497 total up from 482): exact round-trip with no loss; round-trip
+surviving dropped systematic symbols via repair at k=1/2/5/37/200/4096 (the real
+`MAX_EVIDENCE_CHUNKS` ceiling); the literal §4.3 property tested directly — two disjoint simulated
+sources (disjoint systematic indices + disjoint repair-esi ranges) assembled into one decoder;
+duplicate esi as a harmless no-op; out-of-order/shuffled arrival; small-overhead reliability across 30
+random trials; malformed-symbol rejection (wrong size, negative esi); empty input; k=1; non-multiple
+`originalLength`; two independent encoder instances for the same k deriving identical repair symbols;
+the k=1000 bounded-time smoke test. detekt clean (a `ReturnCount`/`LoopWithTooManyJumpStatements`
+pair in `addSymbol` fixed by extracting `tryInsert`/`clearPivotFromOtherRows`, five `MagicNumber`
+findings fixed by naming the SplitMix64 shift constants and the seed-packing width/mask). Both
+variants compile/test/assemble green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`,
+R8-minified), no `missing_rules.txt`. Version bumped to v0.7.13-dev, fresh debug APK built and
+`aapt`-confirmed (`versionCode='24' versionName='0.7.13-dev'`). **Zero production call sites** — no
+`Frame` subtype, no new `FRAME_*` byte, no `MeshFrameCodec.VERSION` bump, no `AppDatabase` migration,
+no `RelayEngine`/`RelayResponder` change; nothing in the running app calls `FountainCode` yet. **Not
+hardware-confirmed** (nothing to hardware-confirm yet — no behavior change, same as decision 41's own
+slice 1 note).
+
+**Deferred to slice 2 (wiring, not designed here)**: delete `FRAME_MANIFEST`/`Frame.Manifest`/
+`encodeManifest` and `MeshProtocol.encodeBitset`/`decodeBitset` outright; replace
+`RelayResponder.handleManifest`'s deficit computation with a new minimal `Frame.SymbolRequest`
+(`evidenceId`/handle, `stillNeed: Int` — no bitset, no per-peer state, matching what §4.3 itself says
+this deletes); decide the session chunk budget's fate (this project's own reading is it's genuinely
+dropped, not replaced with a symbol-count equivalent, but that's a real fairness-across-peers
+question worth confirming, not assuming); rewire `RelayEngine.createEvidence`/`ingestChunk`/
+`maybeReassemble` around `FountainCode.encoder`/`FountainDecoder`, likely keeping one live decoder
+per in-flight item across a connection's symbol stream rather than recomputing from all-persisted-rows
+per ingest; `MeshFrameCodec.VERSION` bump (11) since a reused `FRAME_EVID_CHUNK`-shaped wire layout
+reinterpreting its `Int` field as `esi` instead of `chunkIndex` is a semantic change even if the byte
+layout doesn't move; and an explicit decision on `maybeAccelerateOverWifiDirect`'s WFD handoff path,
+which currently keys off a positional `deficit: List<Int>` that has no fountain-coding equivalent (a
+symbol-count trigger, or leave it inert until §4.3 item 3 removes Wi-Fi Direct outright as already
+planned). Full scoping detail — file-by-file, function-by-function — is in the Plan agent's own
+design write-up this session started from; not reproduced verbatim here.

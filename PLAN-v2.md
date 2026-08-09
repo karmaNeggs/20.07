@@ -6,20 +6,40 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **SESSION PAUSED here 2026-08-09 (user hit low tokens, asked to stop for the day, will resume
-  tomorrow).** Decision 45 (P5 slice 1, below) is fully shipped, tested, committed — see its own
-  entry for the full story, including a real mid-slice correction: the evidence thumbnail shipped
-  cleartext-plus-MAC first, was flagged to the user as new passive-exposure surface before
-  committing (any device that merely connects would see a genuine visual preview, not just
-  metadata), and the user chose to seal it under the content-epoch key instead — same AES-GCM
-  treatment SOS/position bodies already get. 482 tests, detekt clean, both variants green, no
-  `missing_rules.txt`. Version v0.7.12-dev, committed locally, **not pushed at the time of this
-  edit — user asked to push at end of session, done as part of this same commit.** Working tree
-  clean, nothing else mid-flight. **Start next session here: P5 slice 2 (§4.3 item 2, RaptorQ/
-  fountain coding — replaces `FRAME_MANIFEST`/have-bitset/per-peer deficit computation entirely) or
-  item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi Aware), neither designed yet.** This slice's own
-  pull-gating decision (`wantsFullRes`) stays valid underneath either — only the mechanism for
-  moving symbols/bytes once solicited changes.
+- **2026-08-09, decision 46 (`docs/DECISIONS.md`): §4.3 item 2 (fountain coding)'s first slice —
+  encode/decode primitive, construction only — DONE, running in autonomous/"auto mode" continuation
+  of the session decision 45 paused.** New `ble/FountainCode.kt`: a systematic random-linear fountain
+  code with Gaussian-elimination (GF(2)) decoding — deliberately **not** literal RFC 6330 (checked
+  and rejected both real library options — OpenRQ dead since 2017/not on Maven Central, the one
+  Kotlin-native alternative single-author/unpublished — and full hand-rolled RFC 6330 as
+  disproportionate; same simplification-over-the-named-spec precedent `CatalogFilter` already set).
+  **A real mid-slice correction, caught by measurement**: the first version used the textbook robust
+  soliton distribution (correct for belief-propagation decoding, wrong for this class's GE decoding)
+  and measured 1.3-2.6x the true minimum repair-symbol overhead; switched to dense random
+  coefficients and re-measured at 1-2 extra symbols regardless of k. 497 tests (up from 482, all 15
+  new), detekt clean, both variants green, no `missing_rules.txt`. Version v0.7.13-dev, fresh debug
+  APK built and `aapt`-confirmed, committed locally — **not pushed** (no explicit ask this session
+  for that specific action). Zero production call sites; nothing to hardware-confirm yet. **Start
+  next here: slice 2 (wiring)** — delete `FRAME_MANIFEST`/`Frame.Manifest`/`encodeManifest`/
+  `MeshProtocol.encodeBitset`/`decodeBitset`; replace `RelayResponder.handleManifest`'s deficit
+  computation with a new minimal `Frame.SymbolRequest` (`stillNeed: Int`, no bitset); decide the
+  session chunk budget's fate (this project's own read: genuinely dropped, not replaced — confirm,
+  don't assume); rewire `RelayEngine.createEvidence`/`ingestChunk`/`maybeReassemble` around
+  `FountainCode`; `MeshFrameCodec.VERSION` bump to 11; decide `maybeAccelerateOverWifiDirect`'s fate
+  (its positional `deficit: List<Int>` has no fountain-coding equivalent — symbol-count trigger, or
+  leave inert until item 3 removes WFD as already planned). Full scoping in decision 46's own entry.
+  **Alternative next step, not yet started**: item 3 (a real bulk pipe — BLE L2CAP CoC / Wi-Fi
+  Aware) instead of slice 2, per §4.3's own stated order (fountain coding before bulk pipes) this
+  wasn't chosen, but is still a legitimate reordering if a future session judges it better.
+
+- **SESSION PAUSED-THEN-RESUMED 2026-08-09**: decision 45 (P5 item 1, below) is fully shipped,
+  tested, committed — see its own entry for the full story, including a real mid-slice correction:
+  the evidence thumbnail shipped cleartext-plus-MAC first, was flagged to the user as new
+  passive-exposure surface before committing (any device that merely connects would see a genuine
+  visual preview, not just metadata), and the user chose to seal it under the content-epoch key
+  instead — same AES-GCM treatment SOS/position bodies already get. 482 tests, detekt clean, both
+  variants green, no `missing_rules.txt`. Version v0.7.12-dev, pushed at the user's explicit request
+  at the end of that session.
 
 - **2026-08-09, decision 44 (`docs/DECISIONS.md`): P4's fourth and final slice, handover
   mechanics — copy-budget split + rate limiting, DONE. P4 is now fully code-complete.** New
@@ -1251,7 +1271,8 @@ unchanged from slice 3, only what value the already-existing `copiesRemaining` f
 **P5 — Media (§4.3).** Thumbnail-first + pull-on-demand **first** (§9.2 item 8 — it is what makes
 48 h retention viable at 400), then fountain coding, then L2CAP CoC and Wi-Fi Aware as bulk pipes.
 Wi-Fi Direct removed.
-**STATUS (2026-08-09): slice 1 of 3 done — see `docs/DECISIONS.md` decision 45.**
+**STATUS (2026-08-09): item 1 (thumbnail-first) done; item 2 (fountain coding) slice 1 of an
+unknown-total done — see `docs/DECISIONS.md` decisions 45-46.**
 
 **Slice 1 (45) — thumbnail-first, full-res pull-on-demand.** `RelayEngine.fullResRelayable()`
 (own-authored, or explicitly `wantsFullRes`-requested) replaces `relayableEvidenceMeta()` as what
@@ -1267,6 +1288,25 @@ construction (`fullResRelayable`/`requestFullResolution` both exclude `groupId =
 actual 6MB→~100KB win §9.2 item 8 describes. New async `RelayEngine.decryptedThumbnail` + UI
 `FeedThumbnail`/three-state `FeedRow`. 482 tests (up from 462). **NOT hardware-confirmed.** Full
 detail in decision 45's own entry, including the mid-slice sealing correction.
+
+**Slice 2 (46) — fountain-code encode/decode primitive, construction only.** First slice of item 2
+(RaptorQ/fountain coding). A Plan agent scoped it first; **not literal RFC 6330** — a hand-rolled
+systematic random-linear fountain code (`ble/FountainCode.kt`, new file) satisfying §4.3's own stated
+property ("any k(1+ε) symbols from any combination of sources") with Gaussian elimination (GF(2))
+decoding instead of belief propagation, the same kind of simplification-over-the-named-spec precedent
+`CatalogFilter` already set. Real RFC 6330 (checked: OpenRQ dead since 2017/not on Maven Central; the
+one Kotlin-native alternative is single-author and unpublished) and full hand-rolled RFC 6330 (LDPC+
+HDPC precoding, thousands of lines) were both rejected — full detail and reasoning in decision 46's
+own entry. **A real correction caught by measurement, not review, mid-slice**: the first version used
+the textbook robust soliton distribution (correct choice for belief-propagation decoding, wrong one
+for this class's GE decoding) and measured 1.3-2.6x the true minimum repair symbols needed; switched
+to dense random coefficients (random-linear-coding territory) and re-measured at 1-2 extra symbols
+regardless of k. 497 tests (up from 482, all 15 new). detekt clean, both variants green, no
+`missing_rules.txt`. Version bumped to v0.7.13-dev, fresh debug APK built and `aapt`-confirmed.
+**Zero production call sites** — no wire change, nothing in the running app calls this yet; nothing
+to hardware-confirm. Full detail, including the deferred slice-2-wiring scope (deleting
+`FRAME_MANIFEST`/have-bitset/deficit computation, the session-chunk-budget-fate question, the WFD
+handoff path's positional-deficit incompatibility), in decision 46's own entry.
 
 *Sim gate: at D = 400, per-node media storage stays bounded with 20 items circulating.*
 *Hardware gate: 3 phones — a 300 KB photo delivered member-to-member without entering the flood.*
