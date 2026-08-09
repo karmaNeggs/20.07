@@ -6,30 +6,39 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **NEXT SESSION STARTS HERE — everything engineering-side is done; the device-test round is the
-  only remaining step, and it's the user's, not something to redo or second-guess from a transcript
-  alone.** As of `86e9f74` (pushed to `origin/main`, nothing outstanding locally): all 20 Gate A/B
-  fixes from Part 10 (decision 56) plus the full Tracked-tier disposition (decision 57) are shipped,
-  compile-verified (525 tests, 0 failures, detekt clean, both variants + `lintVitalRelease` green,
-  no `missing_rules.txt`), and committed. The APK to test is
-  `releases/20.07-v0.7.22-dev-debug.apk` (versionCode 33, `aapt`-confirmed) — already the one built
-  from this exact commit, no rebuild needed unless the user reports something that requires a code
-  change first. **What to do when the user returns with results:**
-  1. Read whatever they report (a `DiagnosticsLog` export, described symptoms, or both) before
-     assuming anything — don't re-derive conclusions this session already reached.
-  2. **CR-13 (`PLAN-v2.md` Part 10) is the one specific thing this round needs to answer**: does
-     3-phone discovery stay exactly as fast as before now that the legacy scan has a hardware
-     `ScanFilter`, and does every test chipset keep delivering scan results at all (decision 3's own
-     failure mode is *silent* non-delivery, not a crash) — see that entry's own doc for why it's
-     flagged differently from every other fix in this pass. If it regressed, the fix is scoped
-     exactly as that entry describes (filter off for the affected device class, not a global
-     revert).
-  3. **CR-24's `degree` log lines** (`DiagnosticsLog` tag `degree`, `MeshService.startDegreeLogging`)
-     are the other thing worth pulling from any export — real `openLinkCount` numbers are what
-     `ForwardingPolicy`'s degree thresholds (`§9.2 item 7`) need to be re-derived from, if at all.
+- **NEXT SESSION STARTS HERE — the first live round happened, found a total-failure regression in
+  the ONE fix that was flagged as unverified (CR-13), which is now diagnosed and fixed. The round
+  needs to be RE-RUN against a new APK before anything else proceeds.** Round 1 (v0.7.22-dev, 3
+  phones): `openLinkCount=0` for the entire session on every phone, no radar, every SOS
+  `BLOCKED: no open links` — total discovery failure, not a partial degradation. Root cause found
+  from the user's own `DiagnosticsLog` exports (no guessing, no re-test needed to isolate it — see
+  decision 58, `docs/DECISIONS.md`, for the full diagnosis): CR-13's `ScanFilter` matched a BLE AD
+  structure (Service UUIDs List) this app's beacon has never emitted (it advertises via Service Data
+  instead, deliberately, to fit legacy BLE's 31-byte limit) — a filter that could never match, on
+  any device, not chipset flakiness. Fixed by reverting BOTH the legacy scan's filter (CR-13) and an
+  identical, previously-undetected instance of the exact same bug in the Tier B scan (present since
+  decision 34, never caught because Tier B was separately marked untested). Both scans are back to
+  the original unfiltered, software-matching shape that was live-tested working across four prior
+  rounds. Committed, pushed, compile-verified (525 tests, 0 failures, detekt clean, both variants +
+  `lintVitalRelease` green, no `missing_rules.txt`). **The APK to test now is
+  `releases/20.07-v0.7.23-dev-debug.apk` (versionCode 34, `aapt`-confirmed) — NOT v0.7.22-dev, which
+  is the build that just failed.** **What to do when the user returns with round 2's results:**
+  1. Read whatever they report first — don't assume the fix worked just because the diagnosis was
+     confident; a confident diagnosis of round 1's failure is not the same thing as proof round 2
+     succeeds.
+  2. If round 2 is clean: core comms/radar/SOS delivery working across all test phones is the actual
+     bar now — not "as fast as before" (the original CR-13 framing), given what round 1 showed. Pull
+     the `[degree]` log lines too (`MeshService.startDegreeLogging`, CR-24) — real `openLinkCount`
+     numbers are what `ForwardingPolicy`'s degree thresholds (§9.2 item 7) need to be re-derived
+     from, if at all.
+  3. If round 2 ALSO fails: do not re-apply a hardware `ScanFilter` anywhere as a fix for anything
+     without first checking, in code, which AD structure the relevant beacon actually advertises
+     against which AD structure the proposed filter type matches — the exact check that would have
+     caught CR-13 before it ever reached a live round. Treat any other new failure as its own fresh
+     diagnosis from the logs, the same way this one was — don't assume it's a repeat of CR-13.
   4. Anything else the round surfaces gets triaged the normal way (a new `PLAN-v2.md` finding, or
      straight to a decision + fix if it's small and clear).
-  5. Once the round is clean (or issues from it are fixed and re-verified), P7 (the real bitchat
+  5. Once a round is clean (or issues from it are fixed and re-verified), P7 (the real bitchat
      bridge implementation, not the spike tooling already shipped in decision 55) is next — see
      Part 7's own P7 section for the design, already researched and locked, just not built.
 
@@ -2505,46 +2514,45 @@ explicit age label on a dot past some threshold rather than relying on alpha alo
 **Verify.** `PositionTrackerTest`/`RelayResponderPresenceSkewTest` both already test these functions
 directly — add cases at hop 6, 7 and 120 asserting the window stops growing.
 
-#### CR-13 — §9.2 item 1's `ScanFilter` was only applied to Tier B; the legacy scan is still unfiltered — ✅ FIXED 2026-08-09
+#### CR-13 — §9.2 item 1's `ScanFilter` was only applied to Tier B; the legacy scan is still unfiltered — ❌ REVERTED 2026-08-09 (broke discovery outright on first live round — see decision 58)
 
-**Evidence.** `BeaconRadio.restartBroadcastTierScan` (`:844-859`) correctly does both halves of
-§9.2 item 1 — `ScanFilter.Builder().setServiceUuid(...)` and degree-gated `setReportDelay`.
-`BeaconRadio.restartScan` (`:862-875`), the **legacy** scan, does neither:
-`s.startScan(emptyList(), settings, scanCallback)`, with a comment citing decision 3
-(*"a hardware filter silently fails to fire on some BLE chipsets"*).
+**This was the one Gate A item explicitly flagged as "not hardware-confirmed... needs its own
+dedicated live round" — it failed the first round it got.** 3 phones, `openLinkCount=0` for the
+entire session on every phone, no radar, every SOS `BLOCKED: no open links`. Full diagnosis and root
+cause in `docs/DECISIONS.md` decision 58; summary here.
 
-But decision 3 was about **service-DATA** filtering. §9.2 item 1 says this explicitly:
+**Root cause — not the chipset flakiness this entry originally worried about, a deterministic
+mismatch on every device.** `ensureAdvertising` builds this app's beacon with `addServiceData(uuid,
+payload)`, deliberately — `addServiceUuid()` alongside it would overflow legacy BLE's 31-byte
+advertising limit. `ScanFilter.setServiceUuid()` matches a completely different AD structure (the
+Service UUIDs List) than Service Data — it cannot match an advertisement that never carries a
+Service UUIDs List at all, on any chipset. This entry's own "service-UUID filtering is reliable, not
+the chipset-flaky kind decision 3 removed" claim is still true in the abstract; it just doesn't
+apply to an advertisement that was never given the AD structure that filter type looks for. Same
+bug, same root cause, found in a second place while fixing the first: Tier B's own `ScanFilter`
+(decision 34) has had this identical, never-actually-matching filter since it was written — never
+caught because Tier B carries its own "NOT device-tested" caveat.
 
-> Required: restore a hardware `ScanFilter` on the service UUID… Note this is *service-UUID*
-> filtering, which is reliable — not the *service-data* filtering correctly removed in Pass 12 as
-> chipset-unreliable. They are different filter types, and conflating them is why we ended up with
-> no filtering at all.
+**Fix — both `ScanFilter`s removed.** `restartScan` (legacy) reverted to its exact pre-CR-13 shape:
+unfiltered, matching in `scanCallback.onScanResult`, the precise code live-tested working across all
+four prior hardware rounds. `restartBroadcastTierScan` (Tier B) also unfiltered, matching in
+`handleResult` (already correctly discarded non-matching devices in software) — deliberately not
+"fixed" by adding a real Service UUIDs List AD to Tier B's advertisement instead (extended
+advertising's budget could technically afford it), since that would stack a second never-verified
+radio change on an already-never-hardware-confirmed channel in the same pass that just shipped one
+unverified radio change as a live regression.
 
-The legacy scan is still making exactly that conflation, in a comment that cites the decision the
-plan was warning about. §9.2 item 1 is marked **"blocks P1/P2"**.
+**What this costs.** §9.2 item 1's crowd-scale battery win (filtering BLE noise in the radio chip
+instead of app code) is genuinely undone, not deferred for free — both scans are back to
+software-only matching. Proven correct at the 2-8 phone scale this app's own operating envelope
+(§9.1) actually targets; not battery-optimized at hundreds-of-nearby-devices crowd density. Needs a
+different, actually-checkable-in-advance approach before being re-attempted — verify the beacon's
+own AD structure against the exact filter type being proposed BEFORE it reaches a live round, not
+after.
 
-**Why it matters.** The legacy scan is the one that feeds `onDeviceSeen` → `maybeConnect`, i.e. all
-GATT connectivity. At the stated D≈400 target it takes every BLE advert from every nearby device —
-earbuds, trackers, POS terminals — onto the callback thread before any app logic runs, and
-`scanCallback` does real work inline (service-data lookup, beacon decode, hex encode, match-table
-lookup, `hopTracker.considerNeighborReport`). This is the callback storm §9.2 names as a first-order
-problem.
-
-**Why it's Gate A rather than "later".** It is a behaviour change that itself needs hardware
-validation. Landing it *for* the round means one round validates both it and everything else; landing
-it after means an extra round. The alternative — explicitly scoping this round to the unfiltered
-legacy scan and accepting that the density findings won't generalise — is a legitimate call, but it
-must be a stated decision rather than an omission.
-
-**Fix.** Add `ScanFilter.Builder().setServiceUuid(ParcelUuid(MeshProtocol.SERVICE_UUID)).build()` to
-`restartScan`, and add degree-gated `setReportDelay` above the floor only (reuse
-`broadcastTierReportDelayMs`'s shape and the same floor of 5, so 3-phone discovery stays immediate —
-§5.4's identity-function rule). Keep the decision-3 comment but correct it to say which filter type
-it applies to, so this doesn't get re-reverted by the next person reading it.
-
-**Verify.** This is the item the round most needs to answer: with the filter on, 3-phone discovery
-must be exactly as fast as before (that's the regression risk decision 3 is really about). If
-discovery degrades on any test phone, revert the filter on that path and record the chipset.
+**Re-verify.** Same as originally planned: with the fix, 3-phone discovery must work at all (the bar
+just dropped from "as fast as before" to "at all," given what just happened) — needs the same round
+to re-run against `20.07-v0.7.23-dev-debug.apk`.
 
 ---
 
@@ -2773,11 +2781,13 @@ Tick these in order; each is independently committable.
 - [x] **CR-12** clamp hop-derived staleness/skew slack — compile-verified 2026-08-09. Applied to
       all THREE shape-alike functions (added `HopTracker.effectiveStaleMs`, missed in the original
       finding), not just the two named originally.
-- [x] **CR-13** legacy-scan `ScanFilter` + degree-gated report delay — compile-verified 2026-08-09.
-      **Decision: landed it** (not scoped around) — compiles and passes the full suite, but still
-      explicitly flagged in its own Part 10 entry as the one item needing a dedicated LIVE round
-      (real chipsets, real discovery latency) before being trusted, since that's a property no
-      compiler can confirm.
+- [x] ~~**CR-13** legacy-scan `ScanFilter` + degree-gated report delay~~ — **FAILED its live round,
+      REVERTED, root cause fixed** (decision 58, 2026-08-09). Broke discovery totally on all 3 test
+      phones (`openLinkCount=0` the whole session, every SOS blocked). Root cause: our beacon
+      advertises via `addServiceData`, never `addServiceUuid` — a service-UUID `ScanFilter`
+      structurally cannot match that, on any device, not a chipset-flakiness issue. Both the legacy
+      AND Tier B scan filters removed (Tier B had the identical bug since decision 34, never caught
+      since it was untested). v0.7.23-dev, versionCode 34 — this is the build to re-test.
 - [x] Gate B: **CR-14** … **CR-20** — all 7 applied 2026-08-09, compile-verified 2026-08-09. CR-15 was
       corrected (overstated finding, only the trivial half was real) before being applied — see its
       own Part 10 entry.

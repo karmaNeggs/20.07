@@ -3732,3 +3732,75 @@ no `missing_rules.txt`. Version bumped to v0.7.22-dev (versionCode 33), fresh de
 Full detail in `PLAN-v2.md` Part 10, each `CR-n` entry updated in place with its own resolution
 rather than moved or deleted (except CR-28, removed per the user's explicit "obliviate this from
 plan" instruction).
+
+## 58. Live regression: CR-13's `ScanFilter` broke discovery outright on every phone — reverted, root cause found
+
+**The first live round against v0.7.22-dev found a total failure**: 3 phones, `openLinkCount=0` for
+the entire session on every phone, every SOS `BLOCKED: no open links`, no radar. This is CR-13
+(decision 56) — the one fix that entry itself flagged as "not hardware-confirmed... needs its own
+dedicated live round" — confirmed broken on the first live round it got.
+
+**Diagnosis, from the user's own `DiagnosticsLog` exports, before touching any code.** Three lines
+ruled out every alternative and isolated the cause:
+- `[l2cap] listening, psm=...` fires on both phones at startup — only reachable if
+  `meshActivePersisted` was `true` (CR-17's own gate), ruling out decision 57's offline-persistence
+  logic as a contributing cause.
+- `[degree] openLinkCount=0` keeps firing every 60s for the whole session on both phones — the
+  service is alive, coroutines are running, nothing crashed. Rules out CR-9's new
+  `CoroutineExceptionHandler` silently swallowing a fatal exception.
+- Phone 2's own `[bitchat-spike]` line found and connected to a real nearby bitchat node mid-session,
+  using its own independent scan with its own filter for a *different* service UUID. Proves the BLE
+  radio and scanning stack work fine on that hardware — the failure is specific to *this app's own*
+  filtered scan, not BLE in general.
+
+That isolates it to exactly `BeaconRadio.restartScan`'s `ScanFilter`, added in CR-13.
+
+**Root cause, found after isolating it (not chipset flakiness like decision 3's original problem —
+a deterministic mismatch on every device).** `ensureAdvertising` builds this app's beacon with
+`AdvertiseData.Builder().addServiceData(uuid, payload)` — deliberately, per that function's own
+comment, since also calling `addServiceUuid()` would overflow legacy BLE's 31-byte advertising
+limit. `ScanFilter.setServiceUuid()` matches a completely different AD structure (the Service UUIDs
+List, types 0x02/0x03/0x06/0x07) than Service Data (type 0x16) — it does not, and structurally
+cannot, match an advertisement that never carries a Service UUIDs List at all. §9.2 item 1's own
+claim that "service-UUID filtering is reliable" is still true in general (it's a real, different
+mechanism from the service-DATA filtering decision 3 found chipset-flaky) — it just doesn't apply to
+an advertisement that was never given the AD structure that filter type matches against. CR-13's own
+write-up got the *category* of risk right (flagged as the one unverified change needing its own
+round) but missed this specific, checkable-in-advance mismatch.
+
+**Same bug, same root cause, found in a second place while fixing the first:** the Tier B broadcast
+beacon (`evaluateBroadcastTierAdvertising`) has advertised via `addServiceData` since decision 27,
+and its own scan (`restartBroadcastTierScan`, decision 34) has carried an identical
+`ScanFilter.setServiceUuid()` since then — meaning Tier B's hardware filter has never actually
+matched anything, on any device, since the day it was written. Never caught because Tier B carries
+its own separate "NOT device-tested" caveat and nobody had live results to notice zero matches
+against.
+
+**Fix.** Both `ScanFilter`s removed. `BeaconRadio.restartScan` (legacy scan) reverted to its exact
+pre-CR-13 shape: no filter, `emptyList()`, matching done in `scanCallback.onScanResult` — the
+precise code that was live-tested working across all four prior hardware rounds (decisions 8-52).
+`restartBroadcastTierScan` (Tier B) also unfiltered now, matching in `handleResult` (which already
+correctly discarded non-matching devices in software) — deliberately NOT "fixed" by adding a real
+Service UUIDs List AD to Tier B's own advertisement instead (extended advertising's larger byte
+budget could technically afford it, ~18 bytes), since that would be a second never-verified radio
+change stacked on top of an already-never-hardware-confirmed channel, in the same pass that just
+shipped one unverified radio change as a live regression. Revisit only once Tier B itself has a
+hardware-confirmed round to regress against.
+
+**What this costs, and what it doesn't.** §9.2 item 1's crowd-scale battery optimization (filtering
+BLE noise in the radio chip instead of app code, so a dense crowd's earbuds/trackers/POS-terminal
+traffic doesn't wake the CPU) is genuinely undone, not just deferred with no cost — the legacy and
+Tier B scans are both back to software-only matching, proven correct at the 2-8 phone scale this
+app's own operating envelope (§9.1) actually targets, but not battery-optimized at hundreds-of-
+nearby-devices crowd density. That optimization needs a different, actually-checkable approach
+before being re-attempted (e.g. verifying the beacon's own AD structure against the exact filter
+type being proposed, before it ever reaches a live round) — not re-derived from this incident alone.
+
+525 tests (unchanged — this bug was never something the JVM unit test tier could have caught; it's
+Android BLE AD-structure semantics, entirely outside what Robolectric/plain-JVM tests exercise, same
+category this project already documents for every other radio-level finding). detekt clean after
+removing the now-unused `ScanFilter` import, both variants green
+(`assembleDebug`/`assembleRelease`/`lintVitalRelease`), no `missing_rules.txt`. Version bumped to
+v0.7.23-dev (versionCode 34), fresh debug APK built and `aapt`-confirmed. **Not yet re-confirmed on
+hardware** — this is the fix for the reported regression, not proof it's fixed; needs the same
+3-phone round to re-run against `20.07-v0.7.23-dev-debug.apk`.
