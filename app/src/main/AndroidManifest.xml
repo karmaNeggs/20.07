@@ -36,24 +36,18 @@
          QR *this* app displays all still work with zero camera access. -->
     <uses-permission android:name="android.permission.CAMERA" />
 
-    <!-- Experimental, opt-in WiFi Direct evidence accelerator — see WifiDirectAccelerator's class
-         doc. ACCESS_WIFI_STATE/CHANGE_WIFI_STATE are install-time "normal" permissions (no runtime
-         prompt, no launcher entry needed anywhere); NEARBY_WIFI_DEVICES is requested only from the
-         Home screen toggle's own permission launcher when the user turns this feature on, never at
-         launch — MainActivity.requiredPermissions is untouched by this feature, matching the
-         existing CAMERA-on-first-use precedent above. neverForLocation matches the same flag
-         already used on BLUETOOTH_SCAN above — flagged in WifiDirectCapabilities as needing a
-         re-check against current Play policy specifically for WifiP2pManager peer discovery
-         (as opposed to plain WiFi scanning) before this is ever distributed. -->
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
-        android:usesPermissionFlags="neverForLocation" tools:targetApi="33" />
+    <!-- ACCESS_WIFI_STATE/CHANGE_WIFI_STATE/NEARBY_WIFI_DEVICES and the wifi.direct feature (Wi-Fi
+         Direct evidence accelerator's own manifest entries) lived here through v0.7.15-dev —
+         removed by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's removal (PLAN-v2.md §4.3 item
+         3). Not re-added speculatively for the still-unimplemented Wi-Fi Aware slice that item 3
+         also names — that slice should check its own actual permission requirements against
+         current Play policy when it's real, not inherit WFD's possibly-different ones now. BLE
+         L2CAP CoC (decision 48), this item's own current bulk pipe, needs no Wi-Fi permission at
+         all — it rides the existing Bluetooth permissions above. -->
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
     <application
         android:name=".MeshApp"

@@ -174,7 +174,6 @@ fun HomeScreen(
                         Spacer(Modifier.height(16.dp))
                         QuickToggleTiles(meshService, onGeneralSos)
                         Spacer(Modifier.height(10.dp))
-                        WifiDirectRow()
                         DiagnosticsExportRow()
                         Spacer(Modifier.height(20.dp))
                     }
@@ -386,89 +385,9 @@ private fun SosTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
     }
 }
 
-/**
- * The WiFi Direct evidence accelerator's opt-in switch — off by default, kept as its own
- * descriptive row (not folded into [QuickToggleTiles]'s compact tiles) because it carries a
- * warning that doesn't fit a one-word tile: see [org.offlinemesh.app.transport.wifidirect.WifiDirectAccelerator]'s
- * class doc for what "experimental" means here specifically — `WifiP2pManager.connect()` may show
- * a system "Invitation to connect" dialog on the OTHER phone, which would visibly break both
- * phones' disguise the moment it fires. This has not been confirmed on real hardware; the warning
- * stays visible regardless of the switch's own state so it's read *before* turning this on, not
- * only after. `NEARBY_WIFI_DEVICES` (Android 13+) is requested only from this row's own permission
- * launcher, the moment the switch is turned on — never at app launch, matching the same
- * on-first-use precedent [Manifest.permission.CAMERA] already follows on the Join screen.
- */
-@Composable
-private fun WifiDirectRow() {
-    val context = LocalContext.current
-    var enabled by remember { mutableStateOf(WifiDirectSettings.isEnabled(context)) }
-    val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) {
-            WifiDirectSettings.setEnabled(context, true)
-            enabled = true
-        }
-        // Denied: the switch simply doesn't turn on, no further nagging — matches this app's
-        // conservative permission philosophy (see AddGroupScreen's camera flow).
-    }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(AppColors.Surface)
-            .padding(horizontal = 16.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        val speedTint = if (enabled) AppColors.Warning else AppColors.OnSurfaceMuted
-        Icon(Icons.Filled.Speed, contentDescription = null, tint = speedTint)
-        Spacer(Modifier.width(10.dp))
-        Column(Modifier.weight(1f)) {
-            Text(
-                "Speed up large file transfers",
-                color = AppColors.OnSurface,
-                style = MaterialTheme.typography.bodyMedium
-            )
-            Text(
-                "Experimental — the other phone may show a connection prompt",
-                color = AppColors.Warning,
-                style = MaterialTheme.typography.labelSmall
-            )
-        }
-        Switch(
-            checked = enabled,
-            onCheckedChange = { turnOn ->
-                handleWifiDirectToggle(turnOn, context, permissionLauncher) { enabled = it }
-            },
-            colors = SwitchDefaults.colors(
-                checkedTrackColor = AppColors.Warning, checkedThumbColor = Color.White,
-                uncheckedThumbColor = AppColors.OnSurfaceMuted,
-                uncheckedTrackColor = Color(0xFF3A4149),
-                uncheckedBorderColor = Color(0xFF3A4149)
-            )
-        )
-    }
-}
-
-private fun handleWifiDirectToggle(
-    turnOn: Boolean,
-    context: android.content.Context,
-    permissionLauncher: androidx.activity.result.ActivityResultLauncher<String>,
-    setEnabled: (Boolean) -> Unit,
-) {
-    if (!turnOn) {
-        WifiDirectSettings.setEnabled(context, false)
-        setEnabled(false)
-        return
-    }
-    val grantState = ContextCompat.checkSelfPermission(context, Manifest.permission.NEARBY_WIFI_DEVICES)
-    val notYetGranted = grantState != PackageManager.PERMISSION_GRANTED
-    val needsPermission = Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && notYetGranted
-    if (needsPermission) {
-        permissionLauncher.launch(Manifest.permission.NEARBY_WIFI_DEVICES)
-    } else {
-        WifiDirectSettings.setEnabled(context, true)
-        setEnabled(true)
-    }
-}
+// WifiDirectRow/handleWifiDirectToggle (the WiFi Direct evidence accelerator's opt-in switch)
+// lived here through v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's
+// removal (PLAN-v2.md §4.3 item 3).
 
 /** Debug-only "export the mesh event log" affordance — invisible in release builds, where
  *  [DiagnosticsLog] is a no-op and writes nothing (see its class doc: a durable log on disk would

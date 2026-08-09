@@ -43,8 +43,7 @@ import org.robolectric.RobolectricTestRunner
  * needs to produce/open a real AES-GCM seal (decision 37, `docs/DECISIONS.md`), never to round-trip
  * through Keystore.
  *
- * Robolectric-backed for the same reason [WifiDirectHandoffCoordinatorTest] is: [RelayEngine]
- * needs a real `Context` for its Room database.
+ * Robolectric-backed: [RelayEngine] needs a real `Context` for its Room database.
  */
 @RunWith(RobolectricTestRunner::class)
 class RelayResponderTest {
@@ -198,9 +197,9 @@ class RelayResponderTest {
 
     // ---------- handleSymbolRequest / handleL2capCap (P5 item 3, docs/DECISIONS.md's own entry
     // ---------- for this slice) ----------
-    // FakeBulkChannel stands in for a real L2capBulkTransport-backed channel — this is the same
-    // "decouple the decision logic from the real radio" split WifiDirectHandoffCoordinatorTest
-    // already uses via a fake WifiDirectTransport.
+    // FakeBulkChannel stands in for a real L2capBulkTransport-backed channel — same "decouple the
+    // decision logic from the real radio" split the retired WifiDirectHandoffCoordinatorTest once
+    // used via a fake WifiDirectTransport.
 
     private class FakeBulkChannel(private val succeeds: Boolean = true) : BulkChannel {
         val sent = mutableListOf<ByteArray>()

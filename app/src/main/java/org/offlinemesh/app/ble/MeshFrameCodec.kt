@@ -38,11 +38,10 @@ object MeshFrameCodec {
     const val FRAME_PRESENCE: Byte = 0x17   // "an authenticated member of this group is on this connection"
     // Bloom filter of held sos/evidence-header/nickname keys — see CatalogFilter.
     const val FRAME_CATALOG_FILTER: Byte = 0x18
-    // WiFi Direct evidence-chunk accelerator handoff — see WifiDirectHandoffCoordinator.
-    // Experimental, opt-in, off by default; see WifiDirectAccelerator's class doc.
-    const val FRAME_WIFI_DIRECT_CAP: Byte = 0x19      // "I support WFD acceleration, opt-in is on"
-    const val FRAME_WIFI_DIRECT_HANDOFF: Byte = 0x1A  // "here's a chunk deficit worth accelerating"
-    const val FRAME_WIFI_DIRECT_ACCEPT: Byte = 0x1B   // "yes, forming the link"
+    // 0x19/0x1A/0x1B are RETIRED (were FRAME_WIFI_DIRECT_CAP/HANDOFF/ACCEPT through v0.7.15-dev) —
+    // never reuse these byte values. Decision 49 (docs/DECISIONS.md) removed Wi-Fi Direct outright
+    // (PLAN-v2.md §4.3 item 3), replaced by BLE L2CAP CoC (decision 48, FRAME_L2CAP_CAP below) and
+    // — later, a separate slice — Wi-Fi Aware.
 
     // P4 slice 3 (docs/DECISIONS.md decision 43, PLAN-v2.md §4.2) — a courier envelope, spray-and-
     // wait store-and-carry delivery for a partition flood-relay alone can't bridge in time.
@@ -331,11 +330,11 @@ object MeshFrameCodec {
          *  either — [evidenceId] is already cleartext on every [EvidMeta] this app floods, so it is
          *  not new information; the only thing protecting content is that the requested symbols are
          *  still ciphertext the requester can't decrypt without the group key. [stillNeed] is
-         *  intentionally NOT bound-checked in [decode] (matches [Frame.WifiDirectHandoff.
-         *  deficitCount]'s own precedent, unlike [EvidMeta.totalChunks] which feeds directly into an
-         *  O(totalChunks) allocation inside decode() itself) — the existing per-connection symbol
-         *  budget (`RelayResponder.consumeSymbolBudget`) is what actually bounds the cost of an
-         *  inflated value, downstream in `RelayResponder.handleSymbolRequest`, not here. */
+         *  intentionally NOT bound-checked in [decode] — unlike [EvidMeta.totalChunks], which feeds
+         *  directly into an O(totalChunks) allocation inside decode() itself, nothing here allocates
+         *  proportional to [stillNeed]; the existing per-connection symbol budget (`RelayResponder.
+         *  consumeSymbolBudget`) is what actually bounds the cost of an inflated value, downstream in
+         *  `RelayResponder.handleSymbolRequest`, not here. */
         data class SymbolRequest(val evidenceId: String, val stillNeed: Int) : Frame()
         /** Envelope only — RelayResponder opens [sealed] with the group key via [openPosition].
          *
@@ -398,46 +397,16 @@ object MeshFrameCodec {
          *  catalog size. */
         data class CatalogFilter(val seed: Long, val sizeBits: Int, val bits: ByteArray) : Frame()
 
-        /** "Here's the PSM to open a BLE L2CAP CoC channel to me on" (P5 item 3,
-         *  `docs/DECISIONS.md`'s own entry for this slice) — device-level, no MAC, same "carries no
-         *  sensitive claim" reasoning [WifiDirectCap] below already established: a forged/stale
-         *  [psm] just makes [android.bluetooth.BluetoothDevice.createInsecureL2capChannel]`(psm)`'s
-         *  `connect()` throw, never a forged transfer — nothing downstream trusts anything off the
-         *  resulting raw socket without going through this same [decode] every other frame does
-         *  (see [L2capBulkTransport]'s own class doc). Announced once per connection whenever this
-         *  device has an active listening socket — see `RelayResponder.framesToPushOnConnect`. */
+        /** "Here's the PSM to open a BLE L2CAP CoC channel to me on" (P5 item 3, decision 48,
+         *  `docs/DECISIONS.md`) — device-level, no MAC: a forged/stale [psm] just makes
+         *  [android.bluetooth.BluetoothDevice.createInsecureL2capChannel]`(psm)`'s `connect()`
+         *  throw, never a forged transfer — nothing downstream trusts anything off the resulting
+         *  raw socket without going through this same [decode] every other frame does (see
+         *  [L2capBulkTransport]'s own class doc). Announced once per connection whenever this
+         *  device has an active listening socket — see `RelayResponder.framesToPushOnConnect`.
+         *  Replaces the retired `WifiDirectCap` (decision 49) as this codec's "here's how to reach
+         *  my own bulk-transfer listener" announcement. */
         data class L2capCap(val psm: Int) : Frame()
-
-        /** "I support the WiFi Direct accelerator and my opt-in is on" — device-level, no MAC (see
-         *  [WifiDirectHandoffCoordinator]'s doc for why this carries no sensitive claim: it can
-         *  only ever cause an extra, harmless proposal attempt, never a forged transfer). */
-        data class WifiDirectCap(val version: Int) : Frame()
-
-        /** "I have a chunk deficit for this evidence item worth accelerating over WiFi Direct."
-         *  Only ever produced by a sender that holds [groupId]'s key (a blind relay can compute a
-         *  chunk deficit but can never produce a verifiable [mac] here, so a forged frame from a
-         *  non-member just fails verification and is dropped). Out of scope for decision 38's
-         *  handle-based rewrite — this is a separate, opt-in, already-mac-gated proposal frame, not
-         *  one of the always-relayed frame types that needed a blind-relay path in the first place. */
-        data class WifiDirectHandoff(
-            val evidenceId: String,
-            val groupId: String,
-            val deficitCount: Int,
-            val senderNonce: ByteArray,
-            val mac: ByteArray,
-        ) : Frame()
-
-        /** Accepts a [WifiDirectHandoff] proposal. [mac] here doubles as the handoff token
-         *  presented over the raw WFD socket — see [WifiDirectHandoffCoordinator]'s doc for why
-         *  reusing this MAC as the socket token needs no separate key-derivation step. */
-        data class WifiDirectAccept(
-            val evidenceId: String,
-            val groupId: String,
-            val senderNonce: ByteArray,
-            val receiverNonce: ByteArray,
-            val readyAtEpochMs: Long,
-            val mac: ByteArray,
-        ) : Frame()
 
         /** P4 slice 3 (`docs/DECISIONS.md` decision 43, `PLAN-v2.md` §4.2) — a courier envelope on
          *  the wire. [tag] replaces what would otherwise be a cleartext `groupId`, same role
@@ -562,30 +531,8 @@ object MeshFrameCodec {
     fun presenceMacInput(groupId: String, senderId: String, timestamp: Long): ByteArray =
         build { d -> d.writeStr(groupId); d.writeStr(senderId); d.writeLong(timestamp) }
 
-    fun wifiDirectHandoffMacInput(
-        evidenceId: String,
-        groupId: String,
-        deficitCount: Int,
-        senderNonce: ByteArray,
-    ): ByteArray = build { d ->
-        d.writeStr(evidenceId); d.writeStr(groupId); d.writeInt(deficitCount); d.write(senderNonce)
-    }
-
-    // LongParameterList: wire-protocol fields as plain scalars, matching every other MAC-input/
-    // encode function in this file (e.g. encodePosition below already has 8) rather than
-    // introducing a DTO type just for this pair of functions.
-    @Suppress("LongParameterList")
-    fun wifiDirectAcceptMacInput(
-        evidenceId: String,
-        groupId: String,
-        senderNonce: ByteArray,
-        receiverNonce: ByteArray,
-        readyAtEpochMs: Long,
-    ): ByteArray = build { d ->
-        d.writeStr(evidenceId); d.writeStr(groupId)
-        d.write(senderNonce); d.write(receiverNonce)
-        d.writeLong(readyAtEpochMs)
-    }
+    // wifiDirectHandoffMacInput/wifiDirectAcceptMacInput lived here through v0.7.15-dev — deleted
+    // by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's removal (PLAN-v2.md §4.3 item 3).
 
     // ---------- encode ----------
 
@@ -627,7 +574,11 @@ object MeshFrameCodec {
      *  every reader downstream, e.g. [RelayResponder]'s `reframeStoredSos`, treats as raw
      *  ciphertext). [signingPrivateKey] optional for the same reason [encodePosition]'s is (this
      *  device may have no sender identity for [groupId] yet). */
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    // LongParameterList: wire-protocol fields as plain scalars, matching every other MAC-input/
+    // encode function in this file (e.g. encodePosition below already has 8) rather than
+    // introducing a DTO type just for this one function — every other `@Suppress("LongParameterList")`
+    // in this file points back to this comment rather than repeating it.
+    @Suppress("LongParameterList")
     fun sealSosBody(
         key: ByteArray,
         id: String,
@@ -657,7 +608,7 @@ object MeshFrameCodec {
      *  the actual seal uses [contentKey] (the caller's already-derived `CryptoUtils.
      *  contentEpochKey(rootKey, ...)`) — this function never derives one itself, so it stays a pure
      *  function of whatever keys it's handed, same as every other function in this file. */
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     fun sealSos(
         rootKey: ByteArray,
         contentKey: ByteArray,
@@ -776,7 +727,7 @@ object MeshFrameCodec {
     // groupId dropped (decision 38) — key is already a param, and the handle it derives (via
     // groupHandle) is all the envelope needs; a caller that also needs the real groupId string
     // (e.g. for a signing-key lookup) already has it from wherever it got `key`.
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     fun encodePosition(
         rootKey: ByteArray, contentKey: ByteArray, senderId: String, lat: Double, lon: Double,
         accuracyM: Int, timestampSec: Long, hop: Int, signingPrivateKey: ByteArray? = null,
@@ -821,7 +772,7 @@ object MeshFrameCodec {
     fun reframeNicknameForRelay(frame: Frame.Nickname): ByteArray =
         encodeNicknameFrame(frame.handle, frame.senderId, frame.username, frame.updatedAt, frame.mac, frame.signature)
 
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     private fun encodeNicknameFrame(
         handle: ByteArray?,
         senderId: String,
@@ -846,7 +797,7 @@ object MeshFrameCodec {
      *  deliberately separate (decision 39, `docs/DECISIONS.md`) — [groupHandle] must keep using the
      *  permanent [rootKey], the mac uses the caller's already-derived `CryptoUtils.
      *  contentEpochKey(rootKey, ...)`. */
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     fun encodePresence(
         groupId: String,
         senderId: String,
@@ -874,7 +825,7 @@ object MeshFrameCodec {
             frame.senderPublicKey, frame.signature, hop
         )
 
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     private fun encodePresenceFrame(
         handle: ByteArray,
         senderId: String,
@@ -900,35 +851,8 @@ object MeshFrameCodec {
 
     fun encodeL2capCap(psm: Int): ByteArray = frame(FRAME_L2CAP_CAP) { d -> d.writeInt(psm) }
 
-    fun encodeWifiDirectCap(version: Int): ByteArray = frame(FRAME_WIFI_DIRECT_CAP) { d ->
-        d.writeByte(version.coerceIn(0, 255))
-    }
-
-    @Suppress("LongParameterList") // see wifiDirectAcceptMacInput's identical suppress above for why
-    fun encodeWifiDirectHandoff(
-        evidenceId: String,
-        groupId: String,
-        deficitCount: Int,
-        senderNonce: ByteArray,
-        mac: ByteArray,
-    ): ByteArray = frame(FRAME_WIFI_DIRECT_HANDOFF) { d ->
-        d.writeStr(evidenceId); d.writeStr(groupId)
-        d.writeInt(deficitCount); d.writeBlob(senderNonce); d.writeBlob(mac)
-    }
-
-    @Suppress("LongParameterList") // see wifiDirectAcceptMacInput's identical suppress above for why
-    fun encodeWifiDirectAccept(
-        evidenceId: String,
-        groupId: String,
-        senderNonce: ByteArray,
-        receiverNonce: ByteArray,
-        readyAtEpochMs: Long,
-        mac: ByteArray,
-    ): ByteArray = frame(FRAME_WIFI_DIRECT_ACCEPT) { d ->
-        d.writeStr(evidenceId); d.writeStr(groupId)
-        d.writeBlob(senderNonce); d.writeBlob(receiverNonce)
-        d.writeLong(readyAtEpochMs); d.writeBlob(mac)
-    }
+    // encodeWifiDirectCap/Handoff/Accept lived here through v0.7.15-dev — deleted by decision 49
+    // (docs/DECISIONS.md), Wi-Fi Direct's removal (PLAN-v2.md §4.3 item 3).
 
     /** Frames an already-stored/sealed courier envelope for the wire — one function suffices here
      *  (unlike SOS's `sealSos` vs. `sealSosBody`+`reframeSosForRelay` split) since a courier envelope
@@ -1043,7 +967,7 @@ object MeshFrameCodec {
      *  [sealSosBody]'s own doc gives. [key] is the caller's already-derived
      *  `CryptoUtils.contentEpochKey(rootKey, createdAt / 1000)` — this function never derives one
      *  itself, same as every other seal function in this file. */
-    @Suppress("LongParameterList") // wire-protocol scalars — see wifiDirectAcceptMacInput's suppress
+    @Suppress("LongParameterList") // wire-protocol scalars — see sealSosBody's suppress
     fun sealCourierBody(
         key: ByteArray,
         id: String,
@@ -1184,25 +1108,6 @@ object MeshFrameCodec {
                     Frame.CatalogFilter(seed, sizeBits, bits)
                 }
                 FRAME_L2CAP_CAP -> Frame.L2capCap(buf.int)
-                FRAME_WIFI_DIRECT_CAP -> {
-                    val capVersion = buf.get().toInt() and 0xFF
-                    Frame.WifiDirectCap(capVersion)
-                }
-                FRAME_WIFI_DIRECT_HANDOFF -> {
-                    val evidenceId = buf.readStr(); val groupId = buf.readStr()
-                    val deficitCount = buf.int
-                    val senderNonce = buf.readBlob() ?: return null
-                    val mac = buf.readBlob() ?: return null
-                    Frame.WifiDirectHandoff(evidenceId, groupId, deficitCount, senderNonce, mac)
-                }
-                FRAME_WIFI_DIRECT_ACCEPT -> {
-                    val evidenceId = buf.readStr(); val groupId = buf.readStr()
-                    val senderNonce = buf.readBlob() ?: return null
-                    val receiverNonce = buf.readBlob() ?: return null
-                    val readyAtEpochMs = buf.long
-                    val mac = buf.readBlob() ?: return null
-                    Frame.WifiDirectAccept(evidenceId, groupId, senderNonce, receiverNonce, readyAtEpochMs, mac)
-                }
                 FRAME_COURIER -> {
                     val tag = buf.readBlob() ?: return null
                     val id = buf.readStr()

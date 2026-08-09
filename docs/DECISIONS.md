@@ -3112,3 +3112,69 @@ outright is decision 49, landed as a separate commit/version bump in the same se
 not bundled into this one so each stays independently revertible (mirrors decisions 43/44's own
 GATT-wiring-vs-handover-mechanics split — two genuinely separate units of behavior change that
 happened to ship back to back, not one change artificially split in two).
+
+## 49. P5 item 3 — Wi-Fi Direct removed outright
+
+Second half of §4.3 item 3, same session as decision 48. Wi-Fi Direct's propose-a-handoff direction
+was already functionally dead as of decision 47 (nothing called `maybeAccelerateOverWifiDirect`,
+which no longer existed); decision 48 shipped BLE L2CAP CoC as its replacement bulk pipe. This
+decision removes the subsystem outright, per `PLAN-v2.md` §9.3 item 2's own already-stated plan
+("remove at P5 when [the replacement] arrives, not before").
+
+**Deleted outright**: all 5 files under `transport/wifidirect/` (`WifiDirectAccelerator.kt`,
+`WifiDirectCapabilities.kt`, `WifiDirectHandoffCoordinator.kt`, `WifiDirectTransport.kt`,
+`WifiDirectTuning.kt`), `ui/WifiDirectSettings.kt`, and the two WFD-specific test files
+(`WifiDirectAcceleratorSocketTest.kt`, `WifiDirectHandoffCoordinatorTest.kt`).
+
+**`MeshFrameCodec.kt`**: `FRAME_WIFI_DIRECT_CAP`/`HANDOFF`/`ACCEPT` (0x19/0x1A/0x1B) join the
+existing "never reuse these bytes" retirement block (alongside 0x10/0x14); `Frame.WifiDirectCap`/
+`WifiDirectHandoff`/`WifiDirectAccept` and their `encode*` functions and `decode()` branches
+deleted. `wifiDirectHandoffMacInput`/`wifiDirectAcceptMacInput` deleted too — the latter had been
+the canonical `@Suppress("LongParameterList")` reference comment for ~8 unrelated functions
+throughout this file (`sealSosBody`, `encodePosition`, etc.); moved that canonical reasoning to
+`sealSosBody` (the next survivor in file order) and repointed every other reference to it, rather
+than leaving them dangling. No `VERSION` bump — this decision's own removal isn't independently
+load-bearing (an old build's `decode()` already safely no-ops on any unrecognized byte, and the
+bytes were already retired-not-reused as of decision 48's own v12 bump, which anticipated this
+exact removal).
+
+**Wiring removed**: `RelayResponder`'s `wifiDirectCoordinator` constructor param (and its import),
+`peerWfdCapable`/`markWfdCapable`, the CAP-announcement block in `framesToPushOnConnect`,
+`handleWifiDirectCap`/`Handoff`/`Accept`, the three `handleIncoming` dispatch branches, and
+`MAX_TRACKED_WFD_PEERS`/`WFD_PEER_MAP_INITIAL_CAPACITY`/`WFD_PEER_MAP_LOAD_FACTOR`.
+`RelayEngine.symbolsByEsi` (existed only for `WifiDirectHandoffCoordinator`'s own positional-index
+handoff path, per decision 47's own note) deleted alongside its only caller. `MeshService`'s
+`wifiDirectAccelerator` field, its construction, the `wifiDirectCoordinator` local, and both
+`abortCurrent()` call sites (`setMeshActive(false)`/`onDestroy`) removed — `l2capTransport.
+closeAll()`, already added in decision 48, was already covering the equivalent "close radio
+resources on teardown" role for the replacement transport at both sites.
+
+**UI**: `HomeScreen.kt`'s `WifiDirectRow`/`handleWifiDirectToggle` and their call site deleted — the
+opt-in switch had no replacement to wire in its place; L2CAP CoC (decision 48) has no user-facing
+toggle at all, it activates automatically whenever both peers' builds support it.
+
+**Manifest**: `ACCESS_WIFI_STATE`/`CHANGE_WIFI_STATE`/`NEARBY_WIFI_DEVICES` and the `wifi.direct`
+`<uses-feature>` all removed. `NEARBY_WIFI_DEVICES` deliberately NOT kept in anticipation of the
+still-unimplemented Wi-Fi Aware slice §4.3 item 3 also names — that slice should check its own
+actual permission requirements against current Play policy when it's real, not inherit whatever WFD
+happened to need. BLE L2CAP CoC itself needs no Wi-Fi permission at all.
+
+505 tests (down from 522 — decision 48's own count after its 11 new tests — two whole WFD test
+files deleted, `WifiDirectAcceleratorSocketTest` 6 and `WifiDirectHandoffCoordinatorTest` 8, plus 3
+retired WFD frame round-trip tests inside `MeshFrameCodecTest`; decision 48's own 11 new tests are
+unaffected). detekt clean on the first pass — no new suppressions needed, removing code and
+permissions rather than adding them. Both variants compile/test/assemble green
+(`assembleDebug`/`assembleRelease`, `lintVitalRelease`, R8-minified), no `missing_rules.txt`.
+Version bumped to v0.7.16-dev, fresh debug APK built and `aapt`-confirmed (`versionCode='27'
+versionName='0.7.16-dev'`). No wire-format change, so nothing new to hardware-confirm from this
+decision specifically — it rides on decision 48's own already-unconfirmed `VERSION` 12 bump.
+
+**§4.3 item 3 status: BLE L2CAP CoC done (decision 48), Wi-Fi Direct removed (this decision), Wi-Fi
+Aware itself not started — deferred to a later slice** (materially more novel: new radio, an
+unverified "no system dialog" disguise claim that specifically needs real hardware per decision
+48's own honest assessment, and no local/Robolectric test story for the actual data-path mechanics
+the way L2CAP CoC at least partially has via `BulkFraming`). P5 (Media) is otherwise now fully
+code-complete across all three items. Per the user's own explicit instruction this session: next is
+a device-test round (covering the accumulated backlog since P3, plus this session's own
+`VERSION` 11/12 wire breaks and the first-ever L2CAP CoC connection-establishment check), then P7
+(bitchat bridge) — the last phase before the project's sustained field-test milestone.

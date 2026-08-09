@@ -38,9 +38,6 @@ import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
 import org.offlinemesh.app.sensors.CompassTracker
 import org.offlinemesh.app.sensors.LocationTracker
-import org.offlinemesh.app.transport.wifidirect.WifiDirectAccelerator
-import org.offlinemesh.app.transport.wifidirect.WifiDirectCapabilities
-import org.offlinemesh.app.transport.wifidirect.WifiDirectHandoffCoordinator
 import org.offlinemesh.app.ui.MainActivity
 
 /**
@@ -81,13 +78,11 @@ class MeshService : Service() {
     private lateinit var gattServer: MeshGattServer
     private lateinit var gattClient: MeshGattClient
     // A class field (not a local val in onCreate, which it started as) specifically so
-    // setMeshActive(false) can reach it — a WFD transfer that happens to be mid-flight (socket
-    // open, group formed) the moment "Offline" is flipped on would otherwise keep running in the
-    // background, silently breaking that toggle's "no radio activity" promise. Found by an
-    // automated regression scan of this session's changes, fixed here rather than left as a gap.
-    private lateinit var wifiDirectAccelerator: WifiDirectAccelerator
-    // Same "reachable from setMeshActive(false)" reasoning as wifiDirectAccelerator above — P5
-    // item 3 (docs/DECISIONS.md's own entry for this slice).
+    // setMeshActive(false) can reach it — a bulk transfer that happens to be mid-flight the moment
+    // "Offline" is flipped on would otherwise keep running in the background, silently breaking
+    // that toggle's "no radio activity" promise. P5 item 3 (docs/DECISIONS.md's own entry for this
+    // slice) — through v0.7.15-dev this same reasoning also covered a WifiDirectAccelerator field
+    // here, removed by decision 49 (Wi-Fi Direct's outright removal).
     private lateinit var l2capTransport: L2capBulkTransport
 
     // Power tier: ACTIVE while the app is actually on-screen (favors responsiveness — you're
@@ -134,7 +129,6 @@ class MeshService : Service() {
             stopRadios()
             locationTracker.stop()
             compassTracker.stop()
-            wifiDirectAccelerator.abortCurrent()
             l2capTransport.closeAll()
             stopForeground(STOP_FOREGROUND_REMOVE)
         }
@@ -239,17 +233,6 @@ class MeshService : Service() {
         locationTracker = LocationTracker(applicationContext).also { it.start() }
         compassTracker = CompassTracker(applicationContext, locationTracker).also { it.start() }
         createSosNotificationChannel()
-        // Experimental, opt-in (default OFF), see WifiDirectAccelerator's class doc — constructed
-        // unconditionally (cheap: WifiP2pManager.initialize just registers a callback channel, no
-        // radio activity starts) but never actually does anything unless WifiDirectSettings.
-        // isEnabled is true, checked fresh on every connection by RelayResponder.
-        wifiDirectAccelerator = WifiDirectAccelerator(applicationContext)
-        val wifiDirectCoordinator = WifiDirectHandoffCoordinator(
-            relay,
-            wifiDirectAccelerator,
-            serviceScope,
-            capabilityCheck = { WifiDirectCapabilities.supported(applicationContext) },
-        )
         // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — constructed before responder
         // deliberately: RelayResponder's bulkChannelOpener param is a plain method reference
         // (l2capTransport::openFor), not a capturing lambda, so there's no construction-order cycle
@@ -258,7 +241,7 @@ class MeshService : Service() {
         l2capTransport = L2capBulkTransport(serviceScope)
         responder = RelayResponder(
             repo, relay, hopTracker, positionTracker, locationTracker, peerIdentity, connectionRegistry,
-            wifiDirectCoordinator, l2capTransport::openFor, { l2capTransport.advertisedPsm },
+            bulkChannelOpener = l2capTransport::openFor, localL2capPsm = { l2capTransport.advertisedPsm },
         ) { sos, groupName -> notifySos(sos, groupName) }
         l2capTransport.onFrame = { address, bytes, respond -> responder.handleIncoming(bytes, address, respond) }
 
@@ -319,21 +302,20 @@ class MeshService : Service() {
         radarTickJob?.cancel()
         try { unregisterReceiver(bluetoothStateReceiver) } catch (_: Exception) {}
         beaconRadio.stop()
-        // Same reasoning as the WFD abort two lines down, and the same gap it was already fixed
-        // for: serviceScope.cancel() below stops the coroutines holding P3's persistent links open
-        // but does not itself call gatt.disconnect()/close() on them — without this, process
-        // teardown would leak every currently-held client connection past the service's lifetime.
+        // Same reasoning as the bulk-transport close two lines down, and the same gap it was
+        // already fixed for: serviceScope.cancel() below stops the coroutines holding P3's
+        // persistent links open but does not itself call gatt.disconnect()/close() on them —
+        // without this, process teardown would leak every currently-held client connection past
+        // the service's lifetime.
         gattClient.disconnectAll()
         gattServer.stop()
         locationTracker.stop()
         compassTracker.stop()
-        // WFD groups left open are a real cost beyond just this service (see
-        // WifiDirectAccelerator.teardown's own doc) — setMeshActive(false) already aborts this on
-        // the "go offline" path, but process teardown (onDestroy) previously didn't, so a transfer
-        // mid-flight at the exact moment the service is destroyed could leave a WFD group open
-        // past the service's own lifetime. Found while reviewing this method for the radar-tick
-        // job cleanup above; fixed alongside it rather than left as a separate pass.
-        wifiDirectAccelerator.abortCurrent()
+        // A bulk channel/listening socket left open is a real cost beyond just this service —
+        // setMeshActive(false) already closes this on the "go offline" path, but process teardown
+        // (onDestroy) previously didn't for the WFD accelerator this once covered too, so a
+        // transfer mid-flight at the exact moment the service is destroyed could leave a radio
+        // resource open past the service's own lifetime.
         l2capTransport.closeAll()
         serviceScope.cancel()
         super.onDestroy()

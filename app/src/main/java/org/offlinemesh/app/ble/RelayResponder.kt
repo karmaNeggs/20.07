@@ -12,8 +12,6 @@ import org.offlinemesh.app.data.PeerKeyEntity
 import org.offlinemesh.app.data.SosEntity
 import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.sensors.LocationTracker
-import org.offlinemesh.app.transport.wifidirect.WifiDirectHandoffCoordinator
-import org.offlinemesh.app.transport.wifidirect.WifiDirectTuning
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -27,8 +25,8 @@ import java.util.concurrent.ConcurrentHashMap
 // every other class in this file with (BeaconRadio/MeshGattClient/MeshGattServer all take a
 // comparable number) — not a candidate for a params-object without adding an abstraction this
 // codebase doesn't otherwise use. TooManyFunctions: one small handler per wire frame type (see the
-// "per-frame handlers" section) mirrors WifiDirectAccelerator's own identical suppress for the same
-// reason — many small, single-purpose functions instead of one large dispatcher.
+// "per-frame handlers" section) — many small, single-purpose functions instead of one large
+// dispatcher.
 class RelayResponder(
     private val repo: GroupRepository,
     private val relay: RelayEngine,
@@ -44,28 +42,19 @@ class RelayResponder(
     // the current open-link count (ForwardingPolicy's degree signal) and to push a flood-forward
     // to every other currently-open link. See ConnectionRegistry's class doc.
     private val connectionRegistry: ConnectionRegistry,
-    // Optional, default-null — so nothing that constructs a RelayResponder outside MeshService
-    // (e.g. a future test) needs to change. See the WifiDirectCap/WifiDirectHandoff/
-    // WifiDirectAccept cases in handleIncoming — as of decision 47 (docs/DECISIONS.md), nothing
-    // proposes a handoff anymore (handleSymbolRequest doesn't call maybeAccelerateOverWifiDirect,
-    // see that function's own doc), so this field's only live effect now is advertising WFD
-    // capability and accepting/responding to a proposal from a hypothetical still-old-mechanism
-    // peer — asymmetrically inert, pending PLAN-v2.md §4.3 item 3's planned removal of WFD outright.
-    // Placed before onSosReceived, not after, so onSosReceived stays the last constructor param —
-    // MeshService's existing call site uses trailing-lambda syntax for it.
-    private val wifiDirectCoordinator: WifiDirectHandoffCoordinator? = null,
     // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — L2capBulkTransport.openFor,
     // wired post-construction-order-agnostic (a plain method reference, not a capturing lambda, so
     // no cycle with L2capBulkTransport needing to exist before RelayResponder can reference it).
-    // Optional/default-null for the same "don't force every RelayResponder construction site to
-    // change" reason wifiDirectCoordinator above already established. Called from handleL2capCap
-    // once a peer's advertised PSM is known; the resulting channel (if any) is what
-    // handleSymbolRequest prefers over GATT's own respond.
+    // Optional, default-null — so nothing that constructs a RelayResponder outside MeshService
+    // (e.g. a future test) needs to change. Called from handleL2capCap once a peer's advertised
+    // PSM is known; the resulting channel (if any) is what handleSymbolRequest prefers over GATT's
+    // own respond. Placed before onSosReceived, not after, so onSosReceived stays the last
+    // constructor param — MeshService's existing call site uses trailing-lambda syntax for it.
     private val bulkChannelOpener: (suspend (peerAddress: String, psm: Int) -> BulkChannel?)? = null,
     // This device's own currently-advertised L2CAP PSM, or null if not listening (pre-API-29, no
     // adapter, or the listen call itself failed) — read fresh every connection in
-    // framesToPushOnConnect, same "check live, not once" style every other capability check in this
-    // file already follows (see wifiDirectCoordinator's own CAP-announcement precedent).
+    // framesToPushOnConnect, same "check live, not once" style every other capability check in
+    // this file follows.
     private val localL2capPsm: () -> Int? = { null },
     // Fires once per newly-received (not duplicate/relayed-again), authenticated SOS in a group
     // we're actually a member of — MeshService uses this to post the system notification. No-op
@@ -156,36 +145,16 @@ class RelayResponder(
     private val maxCatalogItemsPerSession = MAX_CATALOG_ITEMS_PER_SESSION
     private val catalogItemBudget = ConcurrentHashMap<String, Int>()
 
-    // Whether a peer has told us (this connection) it supports the WiFi Direct accelerator — see
-    // Frame.WifiDirectCap below. Cleared in resetSessionBudget, already called at the start of
-    // every connection by both MeshGattServer/MeshGattClient — zero new wiring needed there.
-    // LRU-bounded, same reasoning and shape as ConnectionAttemptTracker's cooldownUntil: a BLE
-    // address isn't a stable identity (rotates every ~15min), so an unbounded map here would leak
-    // one entry per address ever seen, forever, most of which are never seen again — found by an
-    // automated regression scan of this session's changes, fixed the same way that one was.
-    private val peerWfdCapable = object : LinkedHashMap<String, Boolean>(
-        WFD_PEER_MAP_INITIAL_CAPACITY, WFD_PEER_MAP_LOAD_FACTOR, true
-    ) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > MAX_TRACKED_WFD_PEERS
-    }
-
-    // isWfdCapable (the read side) lived here through v0.7.13-dev, used only by the now-deleted
-    // maybeAccelerateOverWifiDirect — removed by decision 47 (docs/DECISIONS.md). markWfdCapable
-    // itself stays: FRAME_WIFI_DIRECT_CAP is still received and recorded (a peer's own capability
-    // announcement is still part of the still-partially-alive advertise/accept side of this
-    // protocol — see the comment above handleSymbolRequest), it just has no reader anymore on this
-    // device's OWN propose side.
-    @Synchronized
-    private fun markWfdCapable(address: String) {
-        peerWfdCapable[address] = true
-    }
+    // peerWfdCapable/markWfdCapable/isWfdCapable (Wi-Fi Direct capability tracking) lived here
+    // through v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's removal.
+    // peerBulkChannel below is this slice's own, unrelated equivalent for L2CAP CoC.
 
     // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — the L2CAP bulk channel opened
     // (if any) for a given peer this connection, set by handleL2capCap and read by
-    // handleSymbolRequest. Plain ConcurrentHashMap, not LRU-bounded like peerWfdCapable: cleared on
-    // every resetSessionBudget call (start of the NEXT connection for this address), and the actual
-    // socket teardown lives in L2capBulkTransport.closeFor, called directly from both GATT roles'
-    // own disconnect handling — this map is just a reference, not the resource itself.
+    // handleSymbolRequest. Plain ConcurrentHashMap, cleared on every resetSessionBudget call (start
+    // of the NEXT connection for this address) — the actual socket teardown lives in
+    // L2capBulkTransport.closeFor, called directly from both GATT roles' own disconnect handling;
+    // this map is just a reference, not the resource itself.
     private val peerBulkChannel = ConcurrentHashMap<String, BulkChannel>()
 
     @Synchronized
@@ -198,7 +167,6 @@ class RelayResponder(
         // treat a missing entry as 0 via getOrDefault, so this changes memory footprint only.
         symbolSessionBudget.remove(address)
         catalogItemBudget.remove(address)
-        peerWfdCapable.remove(address)
         peerBulkChannel.remove(address)
     }
 
@@ -394,17 +362,11 @@ class RelayResponder(
                 for (n in relay.nicknamesForGroup(g.id)) frames += MeshFrameCodec.encodeNickname(n)
             }
         }
-        // Experimental, opt-in WiFi Direct accelerator — see WifiDirectAccelerator's class doc.
-        // Announced fresh every connection (never cached), same "check live, not once" style every
-        // group-key check in this file follows, so flipping the opt-in toggle mid-session takes
-        // effect immediately.
-        if (wifiDirectCoordinator?.capabilityAdvertisable() == true) {
-            frames += MeshFrameCodec.encodeWifiDirectCap(version = 1)
-        }
-        // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — same "check live, not once"
-        // style as the WFD announcement above: localL2capPsm() re-reads L2capBulkTransport's own
-        // current listening state every connection, so a listen failure/adapter toggle mid-session
-        // is reflected immediately rather than cached from connect time.
+        // P5 item 3 (docs/DECISIONS.md's own entry for this slice) — announced fresh every
+        // connection (never cached): localL2capPsm() re-reads L2capBulkTransport's own current
+        // listening state every time, so a listen failure/adapter toggle mid-session is reflected
+        // immediately rather than cached from connect time, same "check live, not once" style every
+        // group-key check in this file already follows.
         localL2capPsm()?.let { psm -> frames += MeshFrameCodec.encodeL2capCap(psm) }
         frames += presenceAndPositionFrames(toPeer)
         // P5 slice 1 (docs/DECISIONS.md decision 45): fullResRelayable, NOT relayableEvidenceMeta —
@@ -562,15 +524,10 @@ class RelayResponder(
         return frames
     }
 
-    // maybeAccelerateOverWifiDirect (proposed a WFD handoff for a chunk deficit) lived here through
-    // v0.7.13-dev — deleted by decision 47 (docs/DECISIONS.md): its one call site, inside the
-    // retired handleManifest, no longer exists, and fountain coding's SymbolRequest has no
-    // positional deficit list to hand it in the first place (see handleSymbolRequest's own doc for
-    // why adapting it would be throwaway work against PLAN-v2.md §4.3 item 3's already-planned
-    // removal of Wi-Fi Direct outright). WifiDirectHandoffCoordinator itself is NOT fully dead —
-    // onHandoffProposalReceived/onHandoffAccepted stay reachable via handleWifiDirectHandoff/
-    // handleWifiDirectAccept below, for a hypothetical still-old-mechanism peer proposing TO us;
-    // only the "propose a new handoff ourselves" direction is now unreachable.
+    // maybeAccelerateOverWifiDirect/handleWifiDirectCap/handleWifiDirectHandoff/
+    // handleWifiDirectAccept and the whole Wi-Fi Direct accelerator subsystem lived here through
+    // v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), PLAN-v2.md §4.3 item 3's own
+    // already-planned removal, once decision 48 shipped BLE L2CAP CoC as its replacement.
 
     // ---------- per-frame handlers ----------
     // One private handler per frame type, dispatched from handleIncoming below. Each handler's own
@@ -1337,11 +1294,9 @@ class RelayResponder(
      *  peer's next `SymbolRequest`, the same "worst case is wasted bandwidth, never incorrectness"
      *  framing [FountainCode]'s own class doc already gives the primitive this rides on.
      *
-     *  Does NOT call [maybeAccelerateOverWifiDirect] — that function, and the whole WFD accelerator
-     *  subsystem, is now unreachable dead code pending PLAN-v2.md §4.3 item 3's already-planned
-     *  removal of Wi-Fi Direct outright (adapting its positional `deficit: List<Int>` API to a
-     *  symbol-count world would be throwaway work against that already-scheduled deletion — see
-     *  decision 47's own entry). */
+     *  Wi-Fi Direct's own accelerator subsystem is gone entirely (decision 49, docs/DECISIONS.md,
+     *  PLAN-v2.md §4.3 item 3) — this function never had, and now could not have, any equivalent
+     *  call into it. */
     private suspend fun handleSymbolRequest(
         frame: MeshFrameCodec.Frame.SymbolRequest,
         peerAddress: String,
@@ -1376,24 +1331,8 @@ class RelayResponder(
         opener(peerAddress, frame.psm)?.let { channel -> peerBulkChannel[peerAddress] = channel }
     }
 
-    private fun handleWifiDirectCap(peerAddress: String) {
-        markWfdCapable(peerAddress)
-    }
-
-    private suspend fun handleWifiDirectHandoff(
-        frame: MeshFrameCodec.Frame.WifiDirectHandoff,
-        peerAddress: String,
-        respond: suspend (ByteArray) -> Unit,
-    ) {
-        // not a member of this group — can't verify, drop (see class doc)
-        val key = repo.getGroupKey(frame.groupId) ?: return
-        wifiDirectCoordinator?.onHandoffProposalReceived(frame, peerAddress, key, respond)
-    }
-
-    private suspend fun handleWifiDirectAccept(frame: MeshFrameCodec.Frame.WifiDirectAccept, peerAddress: String) {
-        val key = repo.getGroupKey(frame.groupId) ?: return
-        wifiDirectCoordinator?.onHandoffAccepted(frame, peerAddress, key)
-    }
+    // handleWifiDirectCap/handleWifiDirectHandoff/handleWifiDirectAccept lived here through
+    // v0.7.15-dev — deleted by decision 49 (docs/DECISIONS.md), Wi-Fi Direct's removal.
 
     /** May call [respond] zero, one, or many times (a `SymbolRequest` can trigger a whole run of
      *  symbol frames) — the caller supplies how a response frame actually reaches the peer. */
@@ -1410,9 +1349,6 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.CatalogFilter -> handleCatalogFilter(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.SymbolRequest -> handleSymbolRequest(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.L2capCap -> handleL2capCap(frame, peerAddress)
-                is MeshFrameCodec.Frame.WifiDirectCap -> handleWifiDirectCap(peerAddress)
-                is MeshFrameCodec.Frame.WifiDirectHandoff -> handleWifiDirectHandoff(frame, peerAddress, respond)
-                is MeshFrameCodec.Frame.WifiDirectAccept -> handleWifiDirectAccept(frame, peerAddress)
                 is MeshFrameCodec.Frame.Courier -> handleCourier(frame, peerAddress)
             }
         } catch (e: Exception) {
@@ -1429,7 +1365,6 @@ class RelayResponder(
          *  (decision 39, `docs/DECISIONS.md`). */
         private const val MILLIS_PER_SECOND = 1000L
 
-        private const val MAX_TRACKED_WFD_PEERS = 200
         private const val MAX_CATALOG_ITEMS_PER_SESSION = 200
 
         /** Per-connection cap on blind-carried frames, per store. Deliberately close to
@@ -1437,8 +1372,6 @@ class RelayResponder(
          *  serving one of our own does, not 16x more. OpaqueFrameRelay rotates its window, so a
          *  full 200-entry store still drains completely over successive connections. */
         private const val MAX_OPAQUE_FRAMES_PER_SESSION = 16
-        private const val WFD_PEER_MAP_INITIAL_CAPACITY = 16
-        private const val WFD_PEER_MAP_LOAD_FACTOR = 0.75f
 
         // See defaultMaxFrameBytes' doc — matches the MTU MeshGattClient always requests on
         // connect, i.e. "assume negotiation succeeds" rather than a conservative pre-negotiation

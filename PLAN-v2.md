@@ -6,9 +6,29 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 49 (`docs/DECISIONS.md`): §4.3 item 3 — Wi-Fi Direct removed outright.
+  Item 3 status: L2CAP CoC done (48), WFD removed (this one), Wi-Fi Aware deferred to a later
+  slice — item 3 is otherwise done; P5 (Media) is now fully code-complete across all 3 items.**
+  Deleted all 5 `transport/wifidirect/` files, `ui/WifiDirectSettings.kt`, both WFD test files,
+  every `FRAME_WIFI_DIRECT_CAP`/`HANDOFF`/`ACCEPT` frame/encode/decode/wiring reference, the
+  `HomeScreen` opt-in toggle, and the WFD-only manifest permissions/feature (`ACCESS_WIFI_STATE`/
+  `CHANGE_WIFI_STATE`/`NEARBY_WIFI_DEVICES`/`wifi.direct` — `NEARBY_WIFI_DEVICES` deliberately not
+  kept in anticipation of the still-unimplemented Aware slice; that slice should check its own real
+  requirement, not inherit WFD's). No `VERSION` bump — pure removal isn't independently load-bearing
+  (decode() already safely no-ops on any unrecognized byte, and decision 48's own v12 bump already
+  retired these bytes in anticipation). 505 tests (down from 522 — two whole WFD test files plus 3
+  WFD-specific round-trip tests deleted; decision 48's own 11 new tests unaffected). detekt clean on
+  the first pass. Both variants green, no `missing_rules.txt`. Version v0.7.16-dev, committed
+  locally, **not pushed**. Full detail in decision 49's own entry.
+
+  **Per the user's own explicit instruction this session: next is a device-test round** (covering
+  the accumulated backlog since P3, this session's `VERSION` 11/12 wire breaks, and the first-ever
+  L2CAP CoC connection-establishment check — nothing in the automated suite touches the real
+  `listenUsingInsecureL2capChannel`/`createInsecureL2capChannel` calls), **then P7 (bitchat bridge)**
+  — the last phase before the project's sustained field-test milestone.
+
 - **2026-08-09, decision 48 (`docs/DECISIONS.md`): §4.3 item 3 (bulk pipe) — BLE L2CAP CoC,
-  additive, DONE. Wi-Fi Direct removal is decision 49, a separate commit/version bump in this
-  same session.** Per the user's explicit instruction: complete item 3 now, device-test round
+  additive, DONE.** Per the user's explicit instruction: complete item 3 now, device-test round
   before P7. New `ble/BulkChannel.kt`/`L2capBulkTransport.kt` — a real bulk pipe for
   `FRAME_SYMBOL_REQUEST`/`FRAME_EVID_SYMBOL` traffic only (every other frame type stays on GATT),
   negotiated via new `FRAME_L2CAP_CAP` (0x1F). **Real, confirmed gap**: this project's `minSdk` 26
@@ -23,10 +43,10 @@ what's stale.
   would defeat the whole throughput point). **NOT device-tested** — a Robolectric spike this
   session (not kept) found `listenUsingInsecureL2capChannel()` returns a non-functional stub
   (`psm=-1`) under test, no real loopback simulation exists for this API; `BulkFraming`'s pure
-  stream-framing logic is what's actually unit-tested (19 new tests total), connection
-  establishment itself is compile-verified only. `MeshFrameCodec.VERSION` 11 → 12. detekt clean,
-  both variants green, no `missing_rules.txt`. Version v0.7.15-dev, committed locally, **not
-  pushed**. Full detail in decision 48's own entry.
+  stream-framing logic is what's actually unit-tested (11 new tests), connection establishment
+  itself is compile-verified only. `MeshFrameCodec.VERSION` 11 → 12. detekt clean, both variants
+  green, no `missing_rules.txt`. Version v0.7.15-dev. Full detail in decision 48's own entry.
+  (Wi-Fi Direct itself was left untouched by this step, removed separately in decision 49 above.)
 
 - **2026-08-09, decision 47 (`docs/DECISIONS.md`): §4.3 item 2 (fountain coding) slice 2 —
   wiring, DONE. Item 2 is now fully code-complete end to end**, continuing the same autonomous
@@ -1315,10 +1335,11 @@ unchanged from slice 3, only what value the already-existing `copiesRemaining` f
 **P5 — Media (§4.3).** Thumbnail-first + pull-on-demand **first** (§9.2 item 8 — it is what makes
 48 h retention viable at 400), then fountain coding, then L2CAP CoC and Wi-Fi Aware as bulk pipes.
 Wi-Fi Direct removed.
-**STATUS (2026-08-09): item 1 (thumbnail-first) done; item 2 (fountain coding) fully done, both
-slices — see `docs/DECISIONS.md` decisions 45-47. Item 3 (bulk pipe): BLE L2CAP CoC step done
-(decision 48); Wi-Fi Direct removal in progress (decision 49); Wi-Fi Aware itself deferred to a
-later slice, not started, not designed.**
+**STATUS (2026-08-09): P5 is fully code-complete across items 1 and 2, and item 3's own two
+completed steps — thumbnail-first (45), fountain coding both slices (46-47), BLE L2CAP CoC (48),
+Wi-Fi Direct removed (49). Only Wi-Fi Aware itself remains within item 3, deferred to a later
+slice — not started, not designed.** Next: a device-test round (per the user's own explicit
+instruction), then P7 (bitchat bridge).
 
 **Slice 1 (45) — thumbnail-first, full-res pull-on-demand.** `RelayEngine.fullResRelayable()`
 (own-authored, or explicitly `wantsFullRes`-requested) replaces `relayableEvidenceMeta()` as what
@@ -1388,10 +1409,26 @@ sides is a harmless duplicate channel, collapsed via a per-address `Mutex`, not 
 `RelayResponder.handleSymbolRequest` prefers an open bulk channel over GATT, without GATT's own
 `delay(15)` pacing (a real socket already has flow control). **NOT device-tested** — a Robolectric
 spike this session found `listenUsingInsecureL2capChannel()` returns a non-functional stub
-(`psm=-1`) under test; `BulkFraming`'s pure stream-framing logic is what's actually unit-tested (19
+(`psm=-1`) under test; `BulkFraming`'s pure stream-framing logic is what's actually unit-tested (11
 new tests), connection establishment is compile-verified only. `MeshFrameCodec.VERSION` 11 → 12.
 detekt clean, both variants green, no `missing_rules.txt`. Version v0.7.15-dev. Full detail in
 decision 48's own entry.
+
+**Item 3 step 2 (49) — Wi-Fi Direct removed outright.** All 5 `transport/wifidirect/` files,
+`ui/WifiDirectSettings.kt`, both WFD test files, every `FRAME_WIFI_DIRECT_CAP`/`HANDOFF`/`ACCEPT`
+frame/encode/decode/wiring reference, the `HomeScreen` opt-in toggle, and the WFD-only manifest
+permissions/feature (`ACCESS_WIFI_STATE`/`CHANGE_WIFI_STATE`/`NEARBY_WIFI_DEVICES`/`wifi.direct`)
+all deleted. `NEARBY_WIFI_DEVICES` deliberately not kept in anticipation of the still-unimplemented
+Wi-Fi Aware slice — that slice checks its own real requirement when it exists, rather than
+inheriting WFD's. No `VERSION` bump (pure removal isn't independently load-bearing; decision 48's
+own v12 already retired these bytes in anticipation). 505 tests (down from 522 — two whole WFD test
+files plus 3 WFD-specific round-trip tests deleted). detekt clean on the first pass. Both variants
+green, no `missing_rules.txt`. Version v0.7.16-dev. Full detail in decision 49's own entry.
+
+**§4.3 item 3: L2CAP CoC done, Wi-Fi Direct removed, Wi-Fi Aware itself deferred to a later slice
+(materially more novel — new radio, an unverified "no system dialog" disguise claim needing real
+hardware, no local test story for the actual data-path mechanics).** P5 (Media) is otherwise now
+fully code-complete across all three items.
 
 *Sim gate: n/a (transport-layer change, no protocol-level behavior to simulate).*
 *Hardware gate: 3 phones — confirm `listenUsingInsecureL2capChannel`/`createInsecureL2capChannel`

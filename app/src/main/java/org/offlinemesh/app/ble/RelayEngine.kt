@@ -584,17 +584,15 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
 
     suspend fun heldEvidenceIds(): List<String> = evidenceDao.allIds()
 
-    /** Looks up one evidence item's header by id — used by [WifiDirectHandoffCoordinator] to
-     *  re-derive a `groupId`/`mimeType` from just the `evidenceId` a Manifest frame used to carry
-     *  (that frame type is retired — see decision 47 — this lookup's own callers are unaffected). */
+    /** Looks up one evidence item's header by id — used by `RelayResponder.pushFullResRequestNow`
+     *  to re-derive a `groupId` from just an `evidenceId`. (Through v0.7.15-dev this doc also named
+     *  `WifiDirectHandoffCoordinator` as a caller; decision 49, docs/DECISIONS.md, removed Wi-Fi
+     *  Direct outright, so this is now this function's only caller.) */
     suspend fun evidenceMeta(id: String): EvidenceEntity? = evidenceDao.get(id)
 
-    /** Fetches whichever of [esiList] this device happens to hold, if any — mirrors the retired
-     *  `chunksByIndexes`' exact shape. Used only by [WifiDirectHandoffCoordinator]'s own positional-
-     *  index handoff path, which nothing calls into anymore as of decision 47 (see that class's own
-     *  doc) — kept purely so that dead-but-still-compiling path has something real to call. */
-    suspend fun symbolsByEsi(evidenceId: String, esiList: List<Int>): List<Symbol> =
-        esiList.mapNotNull { symbolDao.getSymbol(evidenceId, it) }.map { Symbol(it.esi, it.data) }
+    // symbolsByEsi (mirrored the retired chunksByIndexes' shape) lived here through v0.7.15-dev —
+    // deleted by decision 49 (docs/DECISIONS.md) alongside its only caller,
+    // WifiDirectHandoffCoordinator's own positional-index handoff path.
 
     suspend fun nicknamesForGroup(groupId: String): List<NicknameEntity> = nicknameDao.getForGroup(groupId)
 
