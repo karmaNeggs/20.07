@@ -6,6 +6,20 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 51 (`docs/DECISIONS.md`): P7 planning pass, no code.** Resolved 3 stale/
+  open `§9.3` items (blind-relay budget stays unbounded for now; content lifetime stays 48h/24h
+  deliberately separate — locked; a newly-found L2CAP bulk-pipe padding gap accepted as known for
+  now) plus confirmed test phones (Android 12-13/14+) clear the L2CAP API-29 floor. **Designed P7
+  itself**, grounded in fresh research against bitchat's actual current source (not the week-old
+  summary table): inject via bitchat's `groupMessage` (0x25) packet type, which their own relay
+  logic forwards unconditionally with no real handshake/identity needed; route a bitchat-received
+  message through the SAME existing frame-ingestion pipeline a GATT frame already uses, so P1's
+  flood-forward gives free multi-hop bridging between two separated 20.07 clusters with zero new
+  relay logic. **Hard dependency before any implementation: a live spike against a real bitchat
+  build** — this design is from reading their source, not testing against a running instance.
+  See P7's own rewritten section in Part 7 below for the full design. Still no code — implementation
+  waits on the device-test round per the user's own sequencing.
+
 - **2026-08-09, decision 50 (`docs/DECISIONS.md`): diagnostics logging widened ahead of the
   device-test round — no behavior change.** The user asked, before greenlighting the test round
   below: is the exportable `DiagnosticsLog` actually capturing this session's own changes and their
@@ -1530,9 +1544,65 @@ ride the same round).
 frame sizes cluster on the four padding buckets rather than varying with content.*
 
 **P7 — bitchat bridge (§3 Level 1). Confirmed in scope**, opt-in and off by default.
-*Sim gate: n/a.*
-*Hardware gate: a 20.07 message relayed through a bitchat-only device and received by a second
-20.07 device.*
+**STATUS (2026-08-09): planning only, no code written yet — design pass completed ahead of the
+device-test round, per the user's own explicit sequencing (device test first, then P7). See
+`docs/DECISIONS.md` decision 51 for the research this rests on.**
+
+**What it is.** A separate, user-toggled advertiser/scanner pair on bitchat's own BLE UUIDs
+(service `F47B5E2D-4A9E-4C5A-9B3F-8E1D2C3A4B5C`, characteristic `A1B2C3D4-E5F6-4A5B-8C9D-
+0E1F2A3B4C5D` — confirmed current against bitchat's own source this pass, not just restated from
+Part 3's original table). A bridge-enabled device is simultaneously an **injector** (puts our own
+sealed group traffic onto bitchat's mesh) and a **listener** (watches bitchat's mesh for OUR OWN
+traffic, recognisable only to us because we hold the group key to open it — every other bitchat
+node just sees opaque bytes and relays them per their own design, exactly like our own blind-relay
+pillar in reverse). We never become a bitchat client, never run their Noise handshake, never adopt
+their peer ID.
+
+**The concrete mechanism, grounded in this pass's research against bitchat's actual source (not
+just the week-old summary table in Part 2):** bitchat has a packet type built almost exactly for
+this — `groupMessage` (`0x25`, "group-encrypted broadcast, cleartext group ID + ChaChaPoly body").
+Unlike `noiseEncrypted` (session-addressed, 1:1, needs a real handshake), `groupMessage` is
+broadcast-addressed and — critically — bitchat's own relay-scheduling logic forwards it
+**unconditionally**: no group recognition, no signature, no real identity required to be relayed.
+The only hard structural requirement found is a receive-side ingress guard rejecting anything more
+than 120 s of clock skew from the timestamp field — trivial to satisfy (use real device time). A
+forged, unsigned `groupMessage` packet — broadcast `recipientID`, current timestamp, default TTL
+7, an arbitrary 8-byte `senderID`, our own already-sealed ciphertext as payload — appears to
+satisfy every check a relaying bitchat node applies.
+
+**The free multi-hop insight.** A device that receives one of our own messages via the bitchat
+listener should feed it into the **exact same ingestion pipeline** an ordinary received GATT frame
+already goes through (`RelayResponder.handleSos`'s dedup → hop-track → `floodForwardSos`), just
+with the bitchat mesh as the "arrival link" instead of a GATT connection. If it does, P1's existing
+flood-forward logic (already built, already tested) automatically re-floods the message onto that
+device's own currently-open BLE links to other 20.07 devices — meaning a message can cross a real
+gap between two separate physical clusters of 20.07 users, bridged by ordinary bitchat traffic in
+between, **with no new relay logic to write**. The only new engineering is the injection/listening
+layer and mapping "arrived via bitchat" onto whatever identity `excludeKey`/hop-tracking currently
+expects a `peerAddress` to be — a real design detail for the implementation slice itself, not
+resolved here.
+
+**Hard dependency before any of this becomes production code: a live spike against a real,
+current bitchat build.** Everything above comes from reading bitchat's own source this session,
+not from testing against a running instance — the research agent's own words: *"a strong lead, not
+a proven-safe conclusion."* bitchat is also more developed than Part 2's table assumed: real
+signature verification on several other packet types, a `NoiseRateLimiter`, `VouchAttestation`
+(a web-of-trust layer), and an in-progress peer-ID-rotation effort not yet live. None of it
+contradicts this design, but whether any of it quietly deprioritises traffic from a `senderID`
+bitchat has never seen before is genuinely unknown until tested against a real device running a
+real bitchat build. **First implementation task, not skippable: confirm a forged `groupMessage`
+packet actually gets relayed by a real bitchat node, before writing anything else.**
+
+**Standing constraints carried over from Part 3, unchanged:** off by default, clearly labelled —
+advertising bitchat's own service UUID is a public "this device runs bitchat" signature, a real
+problem in any jurisdiction where bitchat itself is restricted. Battery/radio cost of a second
+advertise+scan session running alongside our own is real and unmeasured; expect this to need its
+own hardware round once built, separate from the P0b-P6 backlog.
+
+*Sim gate: n/a — this is entirely about a third party's live radio behaviour, nothing to simulate.*
+*Hardware gate (two-stage): (1) the spike above — a forged packet from a 20.07 device is actually
+relayed by a real, unmodified bitchat install; (2) once (1) holds, the full gate — a 20.07 message
+relayed through a bitchat-only device and received by a second 20.07 device.*
 
 ---
 
@@ -1663,17 +1733,22 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    capped at ~30 % of radio time and ~30 % of content storage, with SOS exempt from the cap in both
    directions. This weakens a stated pillar under load and is therefore a product decision, not an
    engineering one — the honest framing is *"we relay for strangers, but never at the cost of our own
-   group's emergency traffic."*
+   group's emergency traffic."* **Decision (2026-08-09, user): leave unbounded for now.** Revisit
+   once the device-test round (and, later, P7's own bitchat-mesh injection — a second relay surface
+   that makes this more pressing, not less) produces real numbers on how much blind-relay traffic
+   actually accumulates. Not blocking P7.
 2. ~~Wi-Fi Direct: remove now or after P5?~~ **Resolved (2026-08-09, decision 49): removed
    outright at P5**, alongside L2CAP CoC landing as its replacement bulk pipe (decision 48) —
    see the P5 write-up above.
-3. **Do we accept a stable *local* identity (§5.2)?** Nothing new goes on the wire, but it does mean
-   the device holds a per-group durable key that survives address rotation. Recommendation: yes —
-   it is a key we already generate and pin today.
-4. **Is 48 h still the right content lifetime** once couriers exist and groups expire by join code?
-   Courier envelopes at 24 h and content at 48 h may want to converge. In regime R2 this is also a
-   storage question: a blind relay carrying 400 people's traffic for 48 h is a different proposition
-   from carrying three people's. Interacts with item 1.
+3. ~~Do we accept a stable *local* identity (§5.2)?~~ **Resolved (2026-08-05, decision 15,
+   P0b): yes.** `GroupRepository.ensureSenderIdentity` + `PeerIdentityResolver` already ship this —
+   state keys on the per-group Ed25519 pubkey, not the rotating BLE address. Nothing new went on
+   the wire, per the original recommendation.
+4. ~~Is 48 h still the right content lifetime~~ once couriers exist and groups expire by join code?
+   Courier envelopes at 24 h and content at 48 h may want to converge. **Decision (2026-08-09,
+   user): keep them deliberately separate — locked in as the final answer, not a placeholder.**
+   Couriers stay short-lived/urgent-focused at 24h; content stays 48h as a genuinely different kind
+   of data. No further revisit needed on this specific question.
 5. **Manual relay-pattern tuning knobs, user-facing (proposed 2026-08-06, not yet built).** A
    settings section exposing the actual §5.4/§5.1 tuning constants (Trickle intervals/redundancy
    constant, fanout subsetting thresholds, connection counts, TTL) as user-adjustable, for someone
@@ -1687,3 +1762,13 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    system would have given them for free (the whole point of §5.4's "adapt from measured degree,
    not a fixed schedule" design). Revisit once P2 ships and the sustained-session gate (§6.4) is
    cleared for P1+P3, not before.
+6. **Bulk-pipe (L2CAP CoC) traffic is not size-padded, unlike everything else (found 2026-08-09,
+   planning pass ahead of P7).** P6 slice 4 (decision 40)'s `padGattFrame`/`unpadGattFrame` wraps
+   every frame at the GATT transport choke point (`MeshGattClient.write`/`MeshGattServer.notify`);
+   decision 48's L2CAP bulk channel is a separate raw socket (`BulkFraming`, plain 4-byte length
+   prefix, no bucket rounding) that bypasses that choke point entirely by construction — see
+   `BulkChannel.kt`'s own doc for why padding was deliberately not silently bolted on there. Net
+   effect: fountain-code symbol traffic over L2CAP leaks its exact size, while every other frame
+   type doesn't. **Decision (2026-08-09, user): accept as a known gap for now.** A bulk transfer is
+   already visible as "a transfer is happening" regardless of padding, and L2CAP itself hasn't even
+   been hardware-confirmed yet — revisit once the pipe is proven to actually work at all.
