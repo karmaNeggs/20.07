@@ -1637,9 +1637,9 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    directions. This weakens a stated pillar under load and is therefore a product decision, not an
    engineering one — the honest framing is *"we relay for strangers, but never at the cost of our own
    group's emergency traffic."*
-2. **Wi-Fi Direct: remove now or after P5?** It is compile-verified only and its system dialog
-   breaks the disguise. Recommendation: remove at P5 when Aware replaces it, not before, so the
-   removal is one change rather than a regression window.
+2. ~~Wi-Fi Direct: remove now or after P5?~~ **Resolved (2026-08-09, decision 49): removed
+   outright at P5**, alongside L2CAP CoC landing as its replacement bulk pipe (decision 48) —
+   see the P5 write-up above.
 3. **Do we accept a stable *local* identity (§5.2)?** Nothing new goes on the wire, but it does mean
    the device holds a per-group durable key that survives address rotation. Recommendation: yes —
    it is a key we already generate and pin today.
