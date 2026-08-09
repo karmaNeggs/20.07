@@ -3319,3 +3319,85 @@ how developed bitchat's codebase now is: real signature verification on several 
 No wire/schema/code change — `PLAN-v2.md`'s Part 7 P7 section rewritten from a 4-line stub into the
 above, §9.3 updated with the three resolutions plus the new item 6. Nothing to test/build/version-
 bump; this decision is pure documentation. Not pushed.
+
+## 52. Hardware round (3 phones, group delete mid-session) + 4 §9.3 follow-ups + L2CAP padding shipped
+
+**The hardware round itself, first since decision 49/50's v0.7.17-dev build.** Setup: group created
+by relay + eg1, eg3 added later. Relay then deleted the group mid-session while eg3's phone
+independently crashed/restarted (hardware issue, unrelated to the app) and had to rejoin via eg1's
+QR code. Confirmed from the three exported `DiagnosticsLog` files (cross-referenced by message id,
+the tracing capability decision 50 built specifically for this):
+
+- **Blind-relay pillar confirmed working on real hardware for the first time this concretely**: once
+  relay deleted the group, its entire remaining log (~26 minutes) shows nothing but
+  `carrying opaque presence/position/sos (not a member)` — it kept physically forwarding eg1↔eg3
+  traffic it could no longer decrypt. This is why the two edge phones stayed in contact after
+  deletion.
+- **L2CAP CoC confirmed working on real hardware for the first time** (decision 48 shipped it
+  compile-verified only) — both edge phones completed real bulk symbol transfers over L2CAP
+  (`l2cap channel ready`, `sending N symbol(s)...via l2cap`), and one real failure was captured
+  cleanly by decision 50's own widened logging (`l2cap send failed mid-run, dropped channel:
+  ...Connection reset by peer`) — the diagnostics work done immediately before this round paid off
+  directly.
+- **Multi-second-to-two-minute delays on messages routed through the now-deleted-group relay
+  phone, traced to a real, previously-undocumented mechanism**: `RelayResponder`'s blind/opaque
+  custody paths (`takeOpaqueSosCustody` etc.) never call `floodForwardSos` — only a group member's
+  own traffic gets P1's immediate forward. A blind carrier only offers what it holds via
+  `framesToPushOnConnect` at its *next* fresh connection with a peer, and P3 deliberately keeps
+  links open for long stretches, so that wait can be real. Confirmed by timestamp correlation across
+  all three exported logs (17–113s delays, all through the blind-relay hop). Not a bug — an inherent
+  consequence of today's design, not previously written down anywhere.
+- **Presence-reject bursts explained, not a clock-sync problem**: the *receiver's* skew check already
+  scales with hop count (`PRESENCE_MAX_SKEW_MS` 120s + `PRESENCE_PER_HOP_SLACK_MS` 45s/hop), but the
+  *relay's own* `opaquePresence` custody window is a flat 120s, not hop-scaled — combined with the
+  connection-cycle delay above, some relayed heartbeats arrive just past what the receiver will still
+  accept.
+- **Radar staleness already has a graceful fade** (decision 33) — 30s fade-start, dimming to 20%
+  opacity by the dot's own max-age budget (180s base + 45s/hop). Not a gap; explains the "still on
+  radar for a while" observation as expected, not a bug.
+- Two hop-count values seen "at the same time" for the same peer, differing between observers:
+  confirmed as expected — P1's fanout sends the same message down multiple redundant paths, and raw
+  log lines show the identical peer's position arriving 3x within milliseconds at different hop
+  counts, repeatedly, on the same phone. Same category as decision 22's prior finding.
+
+**Four follow-up decisions from the user, asked fresh with this round's findings as context (not a
+re-ask of stale info):**
+
+1. **Blind-relay budget cap (§9.3 item 1)**: still unbounded, no radio contention observed in a real
+   26-minute blind-relay session — explained by the connection-cycle throttling found above, which
+   is itself a natural cap on how much radio time blind relay can consume. **Decision: fold into
+   P7's own implementation** rather than a standalone slice — P7 is the next thing touching
+   blind-relay-adjacent code (bitchat-mesh injection).
+2. **Content lifetime (§9.3 item 4)**: re-raised a real follow-up question — does content need
+   clamping to its group's own remaining expiry, so it can't outlive a group that expires sooner
+   than 24-48h out? Checked against the actual code (`GroupRepository.expireGroups`,
+   `MeshService.startPruning`) before answering: **already handled** — `expireGroups()` runs at
+   every service start AND every 30 minutes while active, and `dismantleGroup` deletes a group's
+   content immediately, not on the independent 24h/48h cadence. Content can outlive its own group by
+   at most ~30 minutes (the sweep interval), not by anything close to the TTL window. No code
+   change needed; this was a real question worth checking, and the code already does the right
+   thing. The 24h/48h split itself stays locked as-is (priority-based, per the user's own framing).
+3. **L2CAP bulk-pipe padding gap (§9.3 item 6)**: the stated trigger condition ("revisit once L2CAP
+   is proven to work") was met by this round. **Decision: add it now.** Shipped this same commit —
+   see below.
+4. **New finding, blind-relay speed (§9.3 item 7, new)**: whether to also give blind custody
+   immediate-forward treatment. **Decision: decide once P7 is actually being built**, not now — P7's
+   own design (decision 51) already avoids inheriting this, since bitchat-bridged content a device
+   can decrypt is ingested via the normal member path, which already gets immediate forward.
+
+**L2CAP bulk-pipe padding, shipped this commit.** `L2capBulkTransport.kt`'s `RealBulkChannel.send`
+now wraps each frame with `MeshFrameCodec.padGattFrame` before handing it to `BulkFraming.writeFrame`;
+`receiveLoop` unwraps with `unpadGattFrame` after `BulkFraming.readFrame` returns a complete blob.
+Safe reuse of the existing GATT padding despite `BulkChannel.kt`'s own doc originally ruling it out —
+that objection was about a raw byte stream having no frame boundary at all, which `BulkFraming`'s own
+length-prefix framing already solves independently; by the time padding is applied, a complete
+in-memory frame already exists, same precondition `padGattFrame` needs. One detekt fix needed
+(`LoopWithTooManyJumpStatements` — the receive loop's `break`-on-read-failure and what would have
+been a second jump for the unpad check collapsed into a single `?: break` via `?.let`). No new
+tests — same "connection establishment is compile-verified only" limitation decision 48 already
+documented; this wiring can't be exercised without a real `BluetoothSocket`.
+
+505 tests (unchanged — pure wiring, no new test surface). detekt clean after the one fix above. Both
+variants green (`assembleDebug`/`assembleRelease`, `lintVitalRelease`), no `missing_rules.txt`.
+Version bumped to v0.7.18-dev (versionCode 29), fresh debug APK built and `aapt`-confirmed. This is
+the build that should carry padded bulk-pipe traffic into the next hardware round. Not pushed.

@@ -215,7 +215,8 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
 
     private inner class RealBulkChannel(private val socket: BluetoothSocket) : BulkChannel {
         override suspend fun send(frame: ByteArray): Boolean = try {
-            withContext(Dispatchers.IO) { BulkFraming.writeFrame(socket.outputStream, frame) }
+            val padded = MeshFrameCodec.padGattFrame(frame)
+            withContext(Dispatchers.IO) { BulkFraming.writeFrame(socket.outputStream, padded) }
             true
         } catch (_: IOException) {
             false
@@ -234,7 +235,7 @@ class L2capBulkTransport(private val serviceScope: CoroutineScope) {
                 while (true) {
                     val frame = withContext(Dispatchers.IO) {
                         BulkFraming.readFrame(socket.inputStream)
-                    } ?: break
+                    }?.let { MeshFrameCodec.unpadGattFrame(it) } ?: break
                     onFrame(peerAddress, frame) { resp -> send(resp) }
                 }
             } catch (e: IOException) {

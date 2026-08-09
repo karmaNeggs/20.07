@@ -6,6 +6,21 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
+- **2026-08-09, decision 52 (`docs/DECISIONS.md`): first hardware round since v0.7.17-dev + 4
+  follow-up decisions + L2CAP padding shipped.** Blind-relay pillar and L2CAP CoC both confirmed
+  working on real hardware for the first time (3 phones, relay deleted its own group mid-session).
+  Found and documented a real, previously-unwritten mechanism: blind/opaque custody only propagates
+  at the next connection cycle, not immediately like member traffic — this fully explains the
+  round's SOS/presence delays (17-113s) and presence-skew-reject bursts, not a bug. Radar staleness
+  and multi-path hop-count variance both confirmed as already-expected behavior, not gaps. Four
+  follow-ups decided with the user: blind-relay budget cap folded into P7's own work (not standalone);
+  content-lifetime clamp-to-group-expiry question checked against actual code and found **already
+  handled** (`expireGroups` runs every ≤30 min, no gap); L2CAP bulk-pipe padding **shipped this
+  commit** (trigger condition — L2CAP proven working — was met); blind-relay speed itself deferred
+  to decide during P7's actual build (P7 doesn't inherit it by design). Version v0.7.18-dev
+  (versionCode 29), 505 tests, detekt clean, both variants green, fresh debug APK built and
+  `aapt`-confirmed. Full detail in decision 52's own entry.
+
 - **2026-08-09, decision 51 (`docs/DECISIONS.md`): P7 planning pass, no code.** Resolved 3 stale/
   open `§9.3` items (blind-relay budget stays unbounded for now; content lifetime stays 48h/24h
   deliberately separate — locked; a newly-found L2CAP bulk-pipe padding gap accepted as known for
@@ -1733,10 +1748,14 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    capped at ~30 % of radio time and ~30 % of content storage, with SOS exempt from the cap in both
    directions. This weakens a stated pillar under load and is therefore a product decision, not an
    engineering one — the honest framing is *"we relay for strangers, but never at the cost of our own
-   group's emergency traffic."* **Decision (2026-08-09, user): leave unbounded for now.** Revisit
-   once the device-test round (and, later, P7's own bitchat-mesh injection — a second relay surface
-   that makes this more pressing, not less) produces real numbers on how much blind-relay traffic
-   actually accumulates. Not blocking P7.
+   group's emergency traffic."* **Decision (2026-08-09, user, revisited after the hardware round):
+   fold into P7's own implementation work, not a standalone slice.** The hardware round gave real
+   data first: relay ran as a pure blind (non-member) carrier for a full ~26-minute session with no
+   observed radio contention or starvation — explained by decision 52's own finding (item 7 below):
+   blind custody only pushes at the next connection cycle, not immediate flood, which is itself a
+   natural throttle on how much radio time it can consume. Given that self-throttling, a hard cap
+   isn't urgent — but P7 is the next thing touching blind-relay-adjacent code (bitchat-mesh
+   injection), so design both together rather than as two separate passes.
 2. ~~Wi-Fi Direct: remove now or after P5?~~ **Resolved (2026-08-09, decision 49): removed
    outright at P5**, alongside L2CAP CoC landing as its replacement bulk pipe (decision 48) —
    see the P5 write-up above.
@@ -1746,9 +1765,17 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    the wire, per the original recommendation.
 4. ~~Is 48 h still the right content lifetime~~ once couriers exist and groups expire by join code?
    Courier envelopes at 24 h and content at 48 h may want to converge. **Decision (2026-08-09,
-   user): keep them deliberately separate — locked in as the final answer, not a placeholder.**
-   Couriers stay short-lived/urgent-focused at 24h; content stays 48h as a genuinely different kind
-   of data. No further revisit needed on this specific question.
+   user): keep them deliberately separate — locked in.** Couriers stay short-lived/urgent-focused at
+   24h; content stays 48h as a genuinely different kind of data (bounding storage/radio cost, not a
+   membership question) — that reasoning holds regardless of how long any one group itself lives.
+   **Follow-up question raised (2026-08-09, revisited): does content need to be clamped to the
+   group's own remaining expiry, so it can't meaningfully outlive a group that expires sooner than
+   24-48h out?** Checked against the actual code before answering: **already handled, no gap.**
+   `GroupRepository.expireGroups()` runs both at every service start AND every 30 minutes while
+   active (`MeshService.startPruning`), and `dismantleGroup` deletes a group's SOS/evidence/courier
+   rows immediately, not on the 24h/48h independent cadence. So content can outlive its own group by
+   at most the ~30-minute sweep interval, not by anything close to the full TTL window — this was a
+   real question worth checking, but the code already does the right thing.
 5. **Manual relay-pattern tuning knobs, user-facing (proposed 2026-08-06, not yet built).** A
    settings section exposing the actual §5.4/§5.1 tuning constants (Trickle intervals/redundancy
    constant, fanout subsetting thresholds, connection counts, TTL) as user-adjustable, for someone
@@ -1769,6 +1796,25 @@ Fold these into the relevant phases before starting them. Numbers below assume D
    prefix, no bucket rounding) that bypasses that choke point entirely by construction — see
    `BulkChannel.kt`'s own doc for why padding was deliberately not silently bolted on there. Net
    effect: fountain-code symbol traffic over L2CAP leaks its exact size, while every other frame
-   type doesn't. **Decision (2026-08-09, user): accept as a known gap for now.** A bulk transfer is
-   already visible as "a transfer is happening" regardless of padding, and L2CAP itself hasn't even
-   been hardware-confirmed yet — revisit once the pipe is proven to actually work at all.
+   type doesn't. **Resolved (2026-08-09, decision 52): the trigger condition (L2CAP proven to work)
+   was met by the hardware round** — both edge phones completed real L2CAP bulk symbol transfers.
+   Padding added: `RealBulkChannel.send`/`receiveLoop` now wrap/unwrap each frame through the same
+   `MeshFrameCodec.padGattFrame`/`unpadGattFrame` GATT already uses, applied before `BulkFraming`'s
+   own length-prefix framing — safe reuse since by that point a complete in-memory frame already
+   exists (the original objection in `BulkChannel.kt`'s doc was about a raw stream having no frame
+   boundary at all, which `BulkFraming` already solves independently of padding). Full detail in
+   decision 52.
+7. **New finding (2026-08-09, hardware round): blind-relay (non-member) traffic only propagates at
+   the next connection cycle, not immediately.** `RelayResponder`'s opaque/blind custody paths
+   (`takeOpaqueSosCustody`/position/presence) never call `floodForwardSos`-style immediate forward —
+   only a group MEMBER's own traffic gets that. A blind carrier only offers what it's holding via
+   `framesToPushOnConnect` at its next fresh connection with a peer, and P3 deliberately keeps links
+   open for long stretches, so "next connection" can be a real wait. This is what caused this
+   round's multi-second-to-two-minute SOS/presence delays once the relay phone deleted its own group
+   and became a blind carrier for eg1↔eg3 traffic — confirmed from the exported diagnostics, not
+   speculation. Not a bug — an inherent, currently-unaddressed consequence of the existing design.
+   **Decision (2026-08-09, user): decide once P7 is actually being built**, not now — P7's own design
+   already avoids inheriting this (bitchat-bridged content a device can decrypt is ingested via the
+   normal MEMBER path, not blind custody, so it gets immediate forward already), but whether to also
+   speed up blind custody itself is a real open question to weigh during P7's implementation, not
+   before it.
