@@ -3032,16 +3032,13 @@ CR-33's hardware round.
       together.
 - [x] AAB (Android App Bundle) build confirmed working (`./gradlew bundlePlaystoreRelease`) — Play
       Store requires this format for new apps, a bare APK isn't accepted.
+- [x] **Release signing keystore + Gradle signing config** (decision 64, v0.7.28-dev) — generated,
+      backed up by the user outside git, wired into `release`/`playstoreRelease`, verified with
+      `apksigner verify`. Not yet using Google Play App Signing's upload-key flow specifically
+      (that's a Play Console-side choice made at first submission, not a local build change) — the
+      key that exists now can serve as the upload key when that happens.
 
 ### Still needed — code/repo work (executable without a live Play Console session)
-- [ ] **Release signing keystore + Gradle signing config.** Deliberately not generated
-      speculatively — this is genuinely high-stakes (once a keystore signs an AAB uploaded to Play
-      Console, that exact key is required for every future update to that app; losing it means
-      losing the ability to ever update the listing again). Needs the user present to receive and
-      back up the `.jks` file and its passwords the same session it's generated, kept out of git
-      (`.gitignore` already excludes `*.jks`/`*.keystore`). Google Play App Signing (the modern
-      recommended flow, where Google holds the actual distribution key and you only need an upload
-      key locally) softens this risk somewhat and should be the default choice when this happens.
 - [ ] **Privacy Policy page**, required by Play Console for any app requesting sensitive
       permissions (this app requests several — location, camera, Bluetooth). Can be written from
       README's existing Security Model / Known Limitations sections (the actual data-handling
