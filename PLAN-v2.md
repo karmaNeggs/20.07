@@ -3014,3 +3014,69 @@ Tick these in order; each is independently committable.
 - [ ] Round 4 device-test round against v0.7.25-dev — confirm CR-33's fix specifically (group row's
       hop number should rise as a phone walks away, then read "no one nearby," not stay pinned).
 - [ ] Once that round is clean, P7 (real bitchat bridge)
+
+---
+
+## Part 11 — Google Play Store publishing checklist
+
+Started 2026-08-10 (decision 62, `docs/DECISIONS.md`), user-requested. Tracked here rather than as
+CR items since it's not mesh-protocol work — separate track, doesn't block or get blocked by P7/
+CR-33's hardware round.
+
+### Done
+- [x] **Disguise feature stripped for Play Store specifically** — new `playstoreRelease` build type
+      (not a flavor, to avoid renaming every existing Gradle task), manifest override removes the 4
+      decoy `activity-alias` entries, `BuildConfig.DISGUISE_SUPPORTED` gates the Home screen toggle
+      to match. Verified against the actual merged manifest output, not just assumed. v0.7.27-dev,
+      versionCode 38. See decision 62 for the full reasoning and why both changes were needed
+      together.
+- [x] AAB (Android App Bundle) build confirmed working (`./gradlew bundlePlaystoreRelease`) — Play
+      Store requires this format for new apps, a bare APK isn't accepted.
+
+### Still needed — code/repo work (executable without a live Play Console session)
+- [ ] **Release signing keystore + Gradle signing config.** Deliberately not generated
+      speculatively — this is genuinely high-stakes (once a keystore signs an AAB uploaded to Play
+      Console, that exact key is required for every future update to that app; losing it means
+      losing the ability to ever update the listing again). Needs the user present to receive and
+      back up the `.jks` file and its passwords the same session it's generated, kept out of git
+      (`.gitignore` already excludes `*.jks`/`*.keystore`). Google Play App Signing (the modern
+      recommended flow, where Google holds the actual distribution key and you only need an upload
+      key locally) softens this risk somewhat and should be the default choice when this happens.
+- [ ] **Privacy Policy page**, required by Play Console for any app requesting sensitive
+      permissions (this app requests several — location, camera, Bluetooth). Can be written from
+      README's existing Security Model / Known Limitations sections (the actual data-handling
+      behavior is already fully documented there, this is a matter of presenting it in the format
+      Play requires) and hosted on the existing GitHub Pages site (`docs/`) — no new infrastructure
+      needed.
+- [ ] **Play Store listing copy** (short description ≤80 chars, full description, matching the
+      current README/index.html positioning) — draftable without a live Console session.
+- [ ] **Data Safety form answers**, drafted as a reference doc from README's Security Model (what's
+      collected: GPS position (in-memory only, never persisted), photos (encrypted, user-initiated),
+      Bluetooth identifiers (rotating); what's shared: nothing to any server, since there is none;
+      what's retained: nothing beyond the ephemeral group's own lifetime) — pasted into Console by
+      the user when they get there, not submittable by anyone else.
+
+### Still needed — only the user can do these (external, not automatable)
+- [ ] Google Play Console developer account ($25 one-time fee, ID verification).
+- [ ] Actual screenshots from a running device/emulator (phone screenshots, required sizes per
+      Play's current spec) — needs a real device session.
+- [ ] Feature graphic (1024×500) and confirm the app icon meets the 512×512 store-listing
+      requirement (distinct from the in-app launcher icon assets already in `res/mipmap-*`).
+- [ ] Content rating questionnaire, Target audience declaration, and the
+      `ACCESS_BACKGROUND_LOCATION` justification form specifically — background location access
+      gets its own extra Play review gate, sometimes multi-week, independent of the rest of the
+      submission timeline.
+- [ ] Final submission and review.
+
+### Flagged, not yet decided
+- **`targetSdk`/`compileSdk` currency** — currently 34; Play Console enforces a minimum target API
+  level that moves forward roughly annually. Worth checking Play's current requirement against 34
+  right before actually submitting (not now — no reason to bump speculatively ahead of an actual
+  submission window), since compileSdk/targetSdk bumps have their own real regression risk this
+  project treats seriously (see any `compileSdk`-adjacent decision for precedent).
+- **F-Droid, as an additional (not alternative) channel** — raised as one option when the disguise-
+  feature conflict came up; the user chose the build-type-split path over dropping Play Store, but
+  F-Droid remains a natural fit for this project specifically (already zero Play Services
+  dependency, MIT licensed, matches their inclusion criteria) and could still carry the
+  full-featured (disguise-included) build alongside a stripped Play Store submission. Not started;
+  worth a real decision once the Play Store track is further along, not competing for attention now.

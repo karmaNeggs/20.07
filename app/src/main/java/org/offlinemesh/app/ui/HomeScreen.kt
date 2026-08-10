@@ -264,12 +264,13 @@ private const val EXPIRING_SOON_THRESHOLD_MS = 2 * 60 * 60 * 1000L // 2 hours
  *   below, without giving up "reachable in one tap from anywhere on this screen."
  * - **Power**: off (default) auto-favors responsiveness while the app is open, on pins the
  *   battery-saving tier permanently, even in the foreground.
- * - **Disguise**: switches which launcher `<activity-alias>` entry is active (see [AppIdentity])
- *   — off shows "20.07," on shows one of a small library of plausible decoy identities instead
- *   (picked at random per install, held stable after that), so a glance at the home screen
- *   doesn't reveal this app is installed. See README's Security model for exactly what this does
- *   and does not protect (home screen/app switcher only — not the package name, permissions, or
- *   its entry in Android Settings > Apps).
+ * - **Disguise** (sideload/GitHub-release build only, [BuildConfig.DISGUISE_SUPPORTED] —
+ *   omitted entirely from the Play Store build type, see that field's own doc): switches which
+ *   launcher `<activity-alias>` entry is active (see [AppIdentity]) — off shows "20.07," on shows
+ *   one of a small library of plausible decoy identities instead (picked at random per install,
+ *   held stable after that), so a glance at the home screen doesn't reveal this app is installed.
+ *   See README's Security model for exactly what this does and does not protect (home screen/app
+ *   switcher only — not the package name, permissions, or its entry in Android Settings > Apps).
  * - **Offline**: the mesh's actual on/off switch (see [MeshService.setMeshActive]) — off (default)
  *   is normal operation, on stops both radios and both sensors and removes the persistent
  *   notification entirely. Before this existed there was no way to stop any of that short of
@@ -292,16 +293,27 @@ private fun QuickToggleTiles(meshService: MeshService?, onGeneralSos: () -> Unit
             onToggle = { meshService?.setPowerSaverForced(it) }
         )
 
-        var decoyActive by remember { mutableStateOf(AppIdentity.isDecoyActive(context)) }
-        val decoyDesc =
-            if (decoyActive) "Disguise app icon, on, shows as a decoy app" else "Disguise app icon, off, shows as 20.07"
-        ToggleTile(
-            spec = TileSpec(Icons.Filled.VisibilityOff, "Disguise", AppColors.Warning),
-            active = decoyActive,
-            contentDescription = decoyDesc,
-            modifier = Modifier.weight(1f),
-            onToggle = { AppIdentity.setDecoyActive(context, it); decoyActive = it }
-        )
+        // Play Store build (buildTypes.playstoreRelease) strips the decoy launcher-alias entries
+        // from the manifest entirely — see that build type's own AndroidManifest.xml override and
+        // build.gradle.kts's DISGUISE_SUPPORTED field for why (Play's Deceptive Behavior policy).
+        // Gating the tile itself, not just relying on the manifest change, matters here: without
+        // this, tapping it on that build would call AppIdentity.setDecoyActive against a component
+        // that no longer exists and crash with IllegalArgumentException.
+        if (BuildConfig.DISGUISE_SUPPORTED) {
+            var decoyActive by remember { mutableStateOf(AppIdentity.isDecoyActive(context)) }
+            val decoyDesc = if (decoyActive) {
+                "Disguise app icon, on, shows as a decoy app"
+            } else {
+                "Disguise app icon, off, shows as 20.07"
+            }
+            ToggleTile(
+                spec = TileSpec(Icons.Filled.VisibilityOff, "Disguise", AppColors.Warning),
+                active = decoyActive,
+                contentDescription = decoyDesc,
+                modifier = Modifier.weight(1f),
+                onToggle = { AppIdentity.setDecoyActive(context, it); decoyActive = it }
+            )
+        }
 
         val meshActive by (meshService?.meshActive?.collectAsState() ?: remember { mutableStateOf(true) })
         val offlineDesc = if (!meshActive) "Mesh offline, radios and sensors stopped" else "Mesh active, off"

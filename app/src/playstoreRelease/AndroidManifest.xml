@@ -1,0 +1,16 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Play Store build type only (app/build.gradle.kts's buildTypes.playstoreRelease). Removes
+         the decoy launcher-alias library outright — Google Play's Deceptive Behavior/impersonation
+         policy specifically targets apps that change identity to hide their true nature from the
+         user, which src/main's LauncherDecoy(2-4) aliases are close to a textbook case of. See
+         BuildConfig.DISGUISE_SUPPORTED's own doc (build.gradle.kts) for why the Home screen toggle
+         is ALSO gated, not just this manifest removal — the two are meant to travel together. -->
+    <application>
+        <activity-alias android:name=".LauncherDecoy" tools:node="remove" />
+        <activity-alias android:name=".LauncherDecoy2" tools:node="remove" />
+        <activity-alias android:name=".LauncherDecoy3" tools:node="remove" />
+        <activity-alias android:name=".LauncherDecoy4" tools:node="remove" />
+    </application>
+</manifest>

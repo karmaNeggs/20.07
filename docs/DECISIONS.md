@@ -4028,3 +4028,55 @@ variants + `lintVitalRelease` green. Version bumped to v0.7.26-dev (versionCode 
 APK `aapt`-confirmed. Release notes for this version deliberately kept generic ("docs, READMEs, and
 small text updates") at the user's explicit request — this decision entry is the actual record of
 what changed and why; the public release notes are not.
+
+## 62. Google Play Store prep, phase 1: a third build type strips the disguise feature entirely
+
+User wants to publish on Google Play eventually. Google Play's Deceptive Behavior/impersonation
+policy specifically targets apps that change their identity to hide their true nature from the
+user — the "Disguise app icon" feature (4 decoy launcher identities: Notes/Files/Weather/
+Calculator, `AppIdentity.kt`) is close to a textbook case of exactly that. Flagged to the user
+before building anything; their call was to keep the feature for sideloaded/GitHub-release builds
+and strip it entirely for a Play Store submission, rather than accept the rejection/suspension risk
+or drop Play Store for F-Droid instead.
+
+**Mechanism: a third Gradle build type (`playstoreRelease`), not a product flavor.** Flavors rename
+every existing task (`assembleDebug` → `assembleXDebug`, etc.), which would have broken every
+documented command in README.md/TESTING.md/CONTRIBUTING.md and this project's own established
+build/test invocations throughout this file. A build type only *adds* new task names
+(`assemblePlaystoreRelease`, `bundlePlaystoreRelease`) — `assembleDebug`/`assembleRelease`/
+`testDebugUnitTest` are byte-for-byte unaffected, confirmed by re-running them after the change.
+
+Two coordinated changes, deliberately not just one:
+1. **`app/src/playstoreRelease/AndroidManifest.xml`** (a build-type-specific manifest source set,
+   merged over `main`) removes the 4 decoy `<activity-alias>` entries via `tools:node="remove"`.
+   Verified directly against the merged manifest output (`packaged_manifests/playstoreRelease/...`,
+   not just assumed from the Gradle file compiling): 0 decoy aliases in that build,
+   `packaged_manifests/release/...` still has all 4, unchanged. `isShrinkResources` (inherited from
+   `release` via `initWith`) drops the now-unreferenced decoy icon/string resources from the
+   built APK/AAB on its own, since nothing (manifest or Kotlin — `AppIdentity.kt` only ever
+   references the aliases by raw component-name string, never `R.string`/`R.mipmap` directly)
+   points at them anymore once the alias declarations are gone.
+2. **`HomeScreen.kt`'s "Disguise" tile** is gated behind a new `BuildConfig.DISGUISE_SUPPORTED`
+   field (`true` by default in `defaultConfig`, overridden to `false` in `playstoreRelease`).
+   Necessary *in addition to* the manifest change, not instead of it: without this, tapping the
+   tile on a Play Store build would call `AppIdentity.setDecoyActive` against a component name that
+   no longer exists in that build's manifest and crash with `IllegalArgumentException`. Without the
+   manifest change and relying on the UI gate alone, a reviewer (automated or manual) inspecting the
+   manifest/resources directly — which Play's review process does — would still see the full decoy
+   library sitting there unreachable, which doesn't actually resolve the policy concern the removal
+   is for.
+
+**Verification.** `./gradlew testDebugUnitTest detekt` (unaffected — same 525 tests, same task
+names). `assembleDebug`/`assembleRelease`/`assemblePlaystoreRelease`/`lintVitalRelease`/
+`lintVitalPlaystoreRelease` all green. `bundlePlaystoreRelease` (the `.aab` format Play Store
+requires, not a bare APK) also builds clean — first time this project has produced an AAB at all.
+Manifest merge output checked directly (see above), not just trusted. Version bumped to v0.7.27-dev
+(versionCode 38), fresh debug APK `aapt`-confirmed.
+
+**Explicitly not done in this pass** (tracked as the rest of the Play Store checklist, per the
+user's own request for a full plan): release signing key generation (high-stakes — once a keystore
+signs an AAB uploaded to Play Console, that same key is required for every future update; not
+generated speculatively without the user present to receive and back it up), Privacy Policy page,
+Play Store listing copy, Data Safety form answers, actual Play Console account/submission (all
+external/manual steps only the user can do). See `PLAN-v2.md`'s own Play Store checklist,
+added alongside this decision, for the full remaining list.

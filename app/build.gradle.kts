@@ -13,8 +13,16 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 37
-        versionName = "0.7.26-dev"
+        versionCode = 38
+        versionName = "0.7.27-dev"
+        // True for every build type except playstoreRelease below, which overrides it to false.
+        // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
+        // Play's Deceptive Behavior / impersonation policy specifically targets apps that change
+        // their identity to hide their true nature, which the decoy-launcher-icon feature is close
+        // to a textbook case of. Sideloaded/GitHub-release builds keep it; a Play Store submission
+        // doesn't carry it at all (see playstoreRelease's own manifest override, which removes the
+        // decoy activity-alias entries outright, not just this field gating the UI to reach them).
+        buildConfigField("boolean", "DISGUISE_SUPPORTED", "true")
     }
 
     buildTypes {
@@ -25,6 +33,22 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+        // A third build type, deliberately NOT a product flavor: flavors rename every existing
+        // Gradle task (assembleDebug -> assembleXDebug etc.), which would break every documented
+        // command in README.md/TESTING.md/CONTRIBUTING.md and this project's own established
+        // build/test invocations across docs/DECISIONS.md. A build type only ADDS new task names
+        // (assemblePlaystoreRelease etc.) alongside the existing ones, which stay unchanged.
+        create("playstoreRelease") {
+            initWith(getByName("release"))
+            // Own manifest source set (src/playstoreRelease/AndroidManifest.xml) removes the decoy
+            // activity-alias entries via tools:node="remove" — not just hiding the UI toggle, since
+            // a reviewer (automated or manual) inspecting the manifest/resources directly would
+            // still see the decoy library even if it were unreachable from the UI. Once the
+            // manifest no longer references them, isShrinkResources (inherited from release above)
+            // drops the now-unused decoy icon/string resources from the built APK/AAB on its own.
+            buildConfigField("boolean", "DISGUISE_SUPPORTED", "false")
+            matchingFallbacks += "release"
         }
     }
 

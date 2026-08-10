@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.27-dev] — Play Store build variant, disguise feature excluded
+
+New `playstoreRelease` build type for an eventual Google Play submission — the "Disguise app icon"
+feature (decoy launcher identities) is stripped entirely for this variant, both at the manifest
+level and the Home screen UI, since it's a real fit for Play's Deceptive Behavior policy. The
+existing `debug`/`release` build types (sideloaded/GitHub-release builds) are unaffected and keep
+the feature. First AAB (Android App Bundle) build in this project's history
+(`./gradlew bundlePlaystoreRelease`), required for Play Store submission. 525 tests, detekt clean,
+all three build types green. Full reasoning in decision 62 (`docs/DECISIONS.md`).
+
 ## [0.7.26-dev] — Docs, READMEs, and small text updates
 
 Updated documentation and READMEs, plus a couple of small in-app text changes. No functional
