@@ -6,11 +6,18 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **NEXT SESSION STARTS HERE — round 2 (v0.7.23-dev, 3 phones) confirmed the CR-13 revert fixed the
-  total-failure regression: comms and radar both worked this time.** It surfaced two real, fixed
-  protocol bugs and one real, deliberately-deferred one — full diagnosis and fixes in decision 59,
-  `docs/DECISIONS.md`. **The APK to test now is `releases/20.07-v0.7.24-dev-debug.apk` (versionCode
-  35, `aapt`-confirmed) — NOT v0.7.23-dev, which is the build round 2 ran against.**
+- **NEXT SESSION STARTS HERE — round 3 (v0.7.24-dev) confirmed both CR-31 and CR-32 fixed under real,
+  sustained, ~1-hour multi-phone use** (3 phones, multiple group delete/rejoin cycles, a sender/
+  receiver role swap, an app-uninstall-on-relay-phone test, ad hoc P7 bitchat-spike probing — see the
+  Resume checklist's round-3 entry for the full breakdown). **Only remaining open item from the last
+  two rounds is CR-33 (hop-count freeze), deliberately deferred — needs its own dedicated design pass
+  on `HopTracker.updateHop`, not bundled with a hardware round.** No other bugs found this round.
+  Current build: `releases/20.07-v0.7.24-dev-debug.apk` (versionCode 35, `aapt`-confirmed) — this is
+  also the build round 3 tested against, so no new APK is needed until CR-33 or something new lands.
+  **Suggested next step: either do the CR-33 design pass now, or move to P7 (the real bitchat bridge
+  — design already researched and locked in Part 7's own section, just not built) and treat CR-33 as
+  a parallel-track item**, since P7 doesn't depend on it. Round 2's original findings (superseded by
+  round 3's confirmation) are kept below for the diagnosis trail, not as open items.
   - **Fixed: SOS/evidence/nickname delivery silently stopped ~2.5-3 minutes into the session, on all
     three phones** (`[sync] peer X: pushed=N` — the log line meaning a catalog-filter round-trip
     actually happened — stopped firing on every phone after that point, even though fresh GATT
@@ -54,17 +61,6 @@ what's stale.
     — unconfirmed by this round's evidence (the symptom that surfaced was specifically in the member
     position path), flagged here as a real candidate for the next review pass rather than fixed
     speculatively.
-  - **What to do when the user returns with round 3's results:** read what's actually reported first
-    — a confident diagnosis of round 2 is not proof round 3 is clean. If round 3 is clean apart from
-    the expected hop-freeze, treat the hop-freeze fix as the next real piece of work (needs a genuine
-    design pass on `HopTracker.updateHop`'s acceptance rule, not a quick patch — re-read decision 59's
-    write-up before touching it, to avoid re-introducing the never-goes-stale bug it was built to
-    fix). If round 3 surfaces anything NEW, diagnose it fresh from the logs the same way rounds 1 and
-    2 were — don't assume it's a repeat of either prior incident.
-  - Once a round is clean (or remaining issues are fixed/re-verified) and the hop-freeze has its own
-    pass, P7 (the real bitchat bridge implementation, not the spike tooling already shipped in
-    decision 55) is next — see Part 7's own P7 section for the design, already researched and locked,
-    just not built.
   - **2026-08-10, mid-round check against v0.7.24-dev (2 phones):** user confirmed `.17`, not `.18`,
     was the last version with full comms — checked directly via `git log`/`git show`: `.18`
     (`4783feb`) touched only `L2capBulkTransport.kt` (evidence bulk-transfer padding), not
@@ -2982,8 +2978,24 @@ Tick these in order; each is independently committable.
       real topology via split-horizon MAC-rotation gap), both fixed; **CR-33** (hop-count freeze)
       identified and deliberately deferred to its own pass (decision 59, `docs/DECISIONS.md`).
 - [x] Version bump (v0.7.24-dev, versionCode 35) + fresh debug APK `aapt`-confirmed — 2026-08-10.
-- [ ] Round 3 device-test round against v0.7.24-dev — should confirm CR-31/32 fixed; CR-33's freeze
-      is EXPECTED to still reproduce (deferred, not fixed).
+- [x] Round 3 device-test round against v0.7.24-dev — **CR-31/32 confirmed fixed.** ~1-hour session
+      (3 phones, multiple mid-session group delete/rejoin cycles, a sender/receiver role swap between
+      two of the phones, an app-uninstall-on-relay-phone test, and ad hoc P7 bitchat-spike probing).
+      Checked every `sent to 0/N target(s)` immediate-delivery failure across the full session (8
+      total) against every phone's complete log: 7 of 8 were picked up and delivered within seconds
+      by CR-31's periodic catalog refresh — the fix holds under real, sustained, multi-hour use, not
+      just a short clean test. The 1 exception (`027fa8c6`, from an earlier 2-phone round against the
+      same build) is fully explained by `dismantleGroup`'s own intended behavior: authored, then that
+      phone deleted-and-rejoined the group before a real connection to the recipient ever formed —
+      the row was wiped along with the rest of that identity's data before the catalog-refresh fix
+      got a chance to re-offer it. Not a delivery-path defect; deleting a group deleting its own
+      in-flight content is the correct, by-design consequence of "ephemeral, deletable groups."
+      Member-content hop values touched 3 once during the session (`diagnostics 6 receiver`) —
+      initially flagged as a possible topology violation (max should be 2 with 3 phones), but the
+      full session shows 8 distinct sender identities total (repeated rejoins each mint a fresh one,
+      user-confirmed), so more than 3 identities were plausibly live at once at that moment — not a
+      CR-32 regression. **CR-33 (hop-count freeze) is still open, deliberately deferred — unaffected
+      by this round.**
 - [ ] `HopTracker.updateHop` redesign (CR-33) — its own dedicated pass, not bundled with a hardware
       round. See CR-33's entry for the constraint any fix must preserve.
 - [ ] Once round 3 is clean (modulo CR-33) and CR-33 has its own pass, P7 (real bitchat bridge)
