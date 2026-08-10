@@ -1,29 +1,33 @@
 # 20.07
 
 A phone-to-phone Bluetooth mesh app for finding your group, navigating toward them, calling for
-help, and sharing evidence — when cellular networks are jammed, shut down, overloaded, or not
-trusted. No servers, no cellular/Wi-Fi internet dependency, no account.
+help, and sharing incident photos — when cellular networks are jammed, overloaded, unavailable, or
+not trusted. No servers, no cellular/Wi-Fi internet dependency, no account.
 
 Built for a specific, recurring shape of problem: a group that needs to stay together, and a
-network that can't help them do it.
+network that can't help them do it — whether that network is overloaded by too many people, or
+there was never much of one there to begin with.
 
 ## Why this exists
 
 Cellular networks assume normal conditions — towers up, signal available, infrastructure standing
-between you and the people you're trying to reach. That assumption breaks down in a specific,
-recurring set of situations:
+between you and the people you're trying to reach. That breaks down in a specific, recurring set
+of situations:
 
 - **Natural disasters and blackouts** — towers down or overloaded, power out, a group that was
   together suddenly isn't.
 - **Stampedes and crowd crush** — coordination matters most at the exact moment a crowded cell
   sector is most saturated.
-- **Crowd-control and unrest situations** — networks jammed, throttled, or not trusted by the
-  people who need them.
+- **Festivals, concerts, and other big events** — tens of thousands of phones on one cell tower,
+  or no local data plan at all if you're traveling.
+- **Hiking, camping, and other remote areas** — no towers nearby to begin with, not overloaded
+  ones; the same problem from the opposite direction.
+- **Demonstrations** — networks jammed, throttled, or not trusted by the people who need them.
 
-In every case the same three needs recur: find your group, call for help, and get evidence of
-what happened onto more than one device before anything can happen to it. 20.07 is built
-specifically for that recurring shape of problem, phone-to-phone, with no infrastructure
-required — see "What it does" below for the three pieces that solve it.
+In every case the same three needs recur: find your group, call for help, and get incident photos
+onto more than one device before anything can happen to it. 20.07 is built specifically for that
+recurring shape of problem, phone-to-phone, with no infrastructure required — see "What it does"
+below for the three pieces that solve it.
 
 ## Design choices
 
@@ -37,7 +41,7 @@ A few decisions worth calling out, because they're deliberate rather than defaul
 - **The BLE identifier itself rotates every 60 seconds**, so passive scanning sees a changing,
   meaningless value rather than a stable device fingerprint.
 - **GPS lives in memory only**, never touches disk, gone the instant the app is force-quit.
-- **Evidence photos relay across the mesh as they're captured** — copies exist on other members'
+- **Incident photos relay across the mesh as they're captured** — copies exist on other members'
   phones before any single device stops being available.
 
 See Security model below for exactly what this app's own design does *not* protect against.
@@ -56,8 +60,8 @@ records the specific designs this project tried and walked back after live-devic
    "up" means "in front of you right now" — walk toward the dot, don't read a map. If GPS isn't
    available (no fix, indoors, permission denied), it falls back to hop-count hot/cold — no
    direction, but still tells you if you're getting closer or farther, using only Bluetooth.
-2. **Send evidence** — pick a photo from your gallery and it propagates through the mesh to your
-   group, phone-to-phone, however long that takes.
+2. **Send incident photos** — pick a photo from your gallery and it propagates through the mesh to
+   your group, phone-to-phone, however long that takes.
 3. **SOS** — a high-priority broadcast to your group that also lets other members navigate
    toward you.
 
@@ -94,8 +98,8 @@ hard ceiling (picked at creation from a lifetime menu: 12h/48h-default/7d/30d/6m
 timestamp is encoded directly into the shareable join code, not tracked separately per phone, so
 every member — whoever created the group, whoever joined an hour later — agrees on the exact same
 expiry moment. Once it passes, every member's own app dismantles the group on its own: the key,
-the messages, the evidence, all of it, gone, with nothing to "clean up" on a server because there
-isn't one.
+the messages, the incident photos, all of it, gone, with nothing to "clean up" on a server because
+there isn't one.
 
 **Discovery uses rotating, anonymous beacon IDs.** Instead of broadcasting anything that
 identifies your group, your phone advertises `HMAC(group_key, current_60s_time_window)` — a
@@ -122,10 +126,11 @@ filter diff-bitset exchange still happens too, once, right when a link first ope
 catches a newly-connected peer up on everything that existed *before* the link opened, so later
 contacts exchange a few hundred bytes of bookkeeping instead of resending anything already
 delivered.
-This immediate-forward path currently covers SOS only (position and presence instead refresh every
+This immediate-forward path covers SOS directly; position and presence instead refresh every
 15-30s on every open link, so a radar dot or hop count never goes stale for a link's whole
-lifetime; evidence headers and nicknames still move only via the one-shot connect-time sync,
-a known, smaller gap — see Known Limitations).
+lifetime. Incident-photo headers and nicknames move on that same periodic refresh too, not just
+the one-shot connect-time sync that first catches a link up — a gap that used to exist here was
+closed once live testing found it (see `docs/DECISIONS.md`, decision 59).
 
 **The radar is forward-up: GPS for bearing/distance, compass for rotation.** Each phone shares
 its current GPS fix over the mesh (short hop range, latest-fix-wins, kept in memory only — see
@@ -145,7 +150,7 @@ multi-hop gradient — see Known Limitations.)
 seeded at the sender; anyone in the group can then see how many hops away that SOS originated
 and close in on it the hot/cold way, same as group presence.
 
-**Evidence photos are compressed, encrypted, chunked, then flood-relayed.** BLE bandwidth is
+**Incident photos are compressed, encrypted, chunked, then flood-relayed.** BLE bandwidth is
 low, so a picked photo gets downscaled and compressed first — "slow but delivered" beats
 "never arrives." The whole compressed file is encrypted once (AES-GCM), *then* split into
 small chunks, so no partial subset of chunks is ever decryptable — only a device holding the
@@ -171,7 +176,7 @@ propagate independently through whoever's nearby, group member or not.
   service (shows a minimal, low-priority "Syncing" notification, deliberately disguised so a
   glance at your lock screen doesn't reveal a mesh app is running), plus a separate, high-priority
   channel for SOS alerts (sound/vibration — the one thing in this app that should interrupt you).
-- **Camera — opt-in only, never requested at launch.** Evidence photos are still chosen via
+- **Camera — opt-in only, never requested at launch.** Incident photos are still chosen via
   Android's built-in Photo Picker (read-only reference to one file, no gallery-wide storage
   permission). Camera access exists for exactly one thing: the QR scan icon on the Join screen,
   for reading someone else's invite code with your own camera instead of retyping it. The
@@ -180,7 +185,7 @@ propagate independently through whoever's nearby, group member or not.
   have someone else's camera scan the QR code *this* app displays all still work with zero camera
   access. No photo or video is ever captured or stored by the scanner; frames are decoded in
   memory and discarded.
-- **Uninstalling wipes everything.** Groups, keys, messages, and evidence files all live in the
+- **Uninstalling wipes everything.** Groups, keys, messages, and incident-photo files all live in the
   app's private storage (Room database, `EncryptedSharedPreferences`, internal files dir) with
   `android:allowBackup="false"` — nothing here is written anywhere Android preserves across an
   uninstall or could restore from a backup. Removing the app is a real, complete wipe.
@@ -200,7 +205,7 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 
 ## Security model
 
-- **Confidentiality**: GPS positions, evidence photo bytes, and SOS message text are sealed with
+- **Confidentiality**: GPS positions, incident photo bytes, and SOS message text are sealed with
   **AES-256-GCM** under a key derived from the group's random 256-bit root key (`HKDF-SHA256`,
   re-derived every 24h — domain-separated from the rotating wire handle below, and bounding one
   independently-leaked key to ~24h of exposure instead of the group's whole life) before they ever
@@ -210,7 +215,7 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
   itself must stay retained for as long as the group exists (re-sharing the invite code needs it),
   so any non-interactive key derived from it is exactly as forward-secret as the root key's own
   confidentiality; see `docs/DECISIONS.md` decision 39 for the full reasoning.
-- **Authenticity**: evidence headers, nicknames, and presence heartbeats (none of which carry
+- **Authenticity**: incident-photo headers, nicknames, and presence heartbeats (none of which carry
   confidential content) carry a truncated **HMAC-SHA256** (128-bit) tag under the group key
   instead of a full seal. A phone without the key can relay these but cannot forge one a real
   member will act on — verified with a constant-time comparison.
@@ -231,8 +236,8 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 - **Discovery is pseudonymous**: phones advertise `HMAC(group_key, current_60s_window)`, not
   anything that identifies the group, so passive BLE scanning by an outsider sees rotating
   random-looking values, not group membership.
-- **Group identity is opaque on the GATT wire too**: every relayed frame (SOS, position, evidence
-  header, nickname, presence heartbeat) carries a rotating `HMAC(group_key, epoch)` handle instead
+- **Group identity is opaque on the GATT wire too**: every relayed frame (SOS, position,
+  incident-photo header, nickname, presence heartbeat) carries a rotating `HMAC(group_key, epoch)` handle instead
   of a cleartext group id — the same rotating-id idea the discovery beacon already used, extended to
   cover a mesh relay too. An adversary capturing mesh traffic can't correlate which packets belong
   to the same group just by reading a field, even without holding any group's key.
@@ -288,8 +293,8 @@ where it matters:
 - **Hop-count-to-presence is capped at "in direct range or not," not a true extending gradient.**
   Only actual group members can emit a group's rotating beacon (it requires the group key), and
   every member always advertises itself at hop 0 — there's no mechanism yet for a phone to relay
-  "I heard someone 1 hop away" further outward the way SOS, evidence, and position data already
-  do over GATT. SOS hop-count does not have this limitation — it's relayed properly and gives a
+  "I heard someone 1 hop away" further outward the way SOS, incident photos, and position data
+  already do over GATT. SOS hop-count does not have this limitation — it's relayed properly and gives a
   true multi-hop distance.
 - **Background survival is best-effort.** The app runs a correctly-declared Android foreground
   service and asks once for a battery-optimization exemption, but aggressive OEM battery
@@ -333,8 +338,8 @@ where it matters:
   mid-session group deletes/rejoins, a sender/receiver role swap, and an app uninstall on a relay
   phone.** SOS floods immediately across every open link the moment it's created or received, and
   links stay open for minutes instead of seconds (`docs/DECISIONS.md` decisions 18-19). Two real
-  gaps found by live rounds since the original four are now closed: SOS/evidence-header/nickname
-  delivery used to silently stop once a link had been open for a few minutes, because the catalog
+  gaps found by live rounds since the original four are now closed: SOS/incident-photo-header/
+  nickname delivery used to silently stop once a link had been open for a few minutes, because the catalog
   exchange those depend on was only ever sent once per connection (decision 59, fixed by folding it
   into the same periodic refresh presence/position already used); and hop count could read higher
   than the mesh's real topology because a distance-vector loop guard compared raw, rotating BLE
@@ -384,7 +389,7 @@ connectionless broadcast tier over BLE Extended Advertising for presence/positio
 every phone in range at once with no connection needed, governed by a Trickle-style (RFC 6206)
 suppression timer (P2 — see Known Limitations above for its hardware-confirmed status), courier
 handoff for bridging a physical gap the mesh can't currently reach across (P4), thumbnail-first
-evidence sharing with fountain-coded chunk transfer so any combination of helpful nearby phones
+incident-photo sharing with fountain-coded chunk transfer so any combination of helpful nearby phones
 speeds up a download instead of slowing it down, plus an optional faster BLE L2CAP bulk pipe (P5),
 and further privacy hardening — per-group (not per-device) sender identity, an epoch-rotating
 content-sealing key, and fixed-size frame padding so message length itself doesn't leak message
@@ -449,7 +454,7 @@ yourself.
      their real bearing and distance, rotated so "up" is always the direction you're currently
      facing — walk toward the dot. Without a fix, it falls back to a hop-count number and a
      trend ("getting closer" / "getting farther") that only needs Bluetooth.
-   - A **Send evidence** button — opens your photo gallery, pick an image, it gets compressed,
+   - A **Send incident photo** button — opens your photo gallery, pick an image, it gets compressed,
      encrypted, and queued for relay. You'll see it listed with a chunk-progress count until
      the group (or you, for images received from others) has all pieces and it's marked
      complete.

@@ -7,8 +7,10 @@ A phone app that lets nearby phones talk to each other over Bluetooth, with
 no internet, no cell towers, no SIM card, nothing. Think of it like a
 walkie-talkie network, except messages can also HOP from phone to phone to
 reach people further away than direct Bluetooth range. Built for people who
-need to coordinate when the internet is jammed, shut off, or not trusted
-(e.g. protesters worried about phone seizure or surveillance).
+need to find each other and stay in touch when the internet is jammed,
+overloaded, unavailable, or not trusted — a festival with too many phones on
+one tower, a hike somewhere with no towers at all, a natural disaster, or a
+demonstration where the network can't be relied on.
 
 THE PROBLEM WITH V1
 --------------------
@@ -125,9 +127,9 @@ WHY WE MADE THE DECISIONS WE MADE
 - We copied bitchat's ROUTING IDEAS (forward-first, TTL, fanout, couriers)
   but NOT its identity system. bitchat gives every phone one permanent ID
   visible on the air — good for reliability, bad for privacy, since it lets
-  someone track a specific phone over time. Our users' threat model (phone
-  seizure, state surveillance) can't afford that trade, so we kept rotating,
-  hard-to-track IDs even though it's more engineering work.
+  someone track a specific phone over time. A phone getting lost, stolen, or
+  seized shouldn't hand over a trail of who was near whom, so we kept
+  rotating, hard-to-track IDs even though it's more engineering work.
 
 - We rejected an internet fallback (e.g. relaying messages over the public
   Nostr network when Bluetooth can't reach). The whole point of this app is

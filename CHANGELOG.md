@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.26-dev] — Docs, READMEs, and small text updates
+
+Updated documentation and READMEs, plus a couple of small in-app text changes. No functional
+changes. 525 tests, detekt clean, both variants green.
+
 ## [0.7.25-dev] — `HopTracker` rebuilt around per-source aging, closing the "always 1 hop away" freeze
 
 Decision 60 (`docs/DECISIONS.md`), CR-33. The old design kept one ownership-gated value per group:

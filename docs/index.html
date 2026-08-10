@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>20.07 — offline mesh coordination</title>
-<meta name="description" content="A phone-to-phone Bluetooth mesh app for staying in contact, navigating to your group, and sharing evidence when cellular networks are jammed, shut down, or not trusted. No servers, no accounts.">
+<meta name="description" content="A phone-to-phone Bluetooth mesh app for staying in contact, navigating to your group, and sharing incident photos when cellular networks are jammed, overloaded, unavailable, or not trusted. No servers, no accounts.">
 <style>
   /* Palette pulled directly from the app's own Theme.kt (AppColors) — and, on purpose, the ONLY
      palette this page has. The app itself is deliberately dark-only (Theme.kt's own doc: "Dark,
@@ -25,7 +25,7 @@
     --accent-contrast: #0a0d10;
     --danger: #ef4444;
     --safe: #34d399;
-    --safe-a: rgba(52, 211, 153, .32);
+    --safe-a: rgba(52, 211, 153, .55);
     --code-bg: #1c2126;
   }
   * { box-sizing: border-box; }
@@ -51,8 +51,8 @@
     height: 168px;
     margin: 0 auto 20px;
     border-radius: 50%;
-    background: radial-gradient(circle at 50% 50%, var(--surface) 0%, var(--bg) 72%);
-    border: 1px solid var(--border);
+    background: radial-gradient(circle at 50% 50%, var(--surface-2) 0%, var(--surface) 72%);
+    border: 1px solid #3a424b;
     overflow: hidden;
   }
   .radar::before {
@@ -61,9 +61,9 @@
     inset: 0;
     border-radius: 50%;
     background:
-      radial-gradient(circle, transparent 0 23%, var(--border) 23% 23.8%, transparent 23.8%),
-      radial-gradient(circle, transparent 0 48%, var(--border) 48% 48.8%, transparent 48.8%),
-      radial-gradient(circle, transparent 0 73%, var(--border) 73% 73.8%, transparent 73.8%);
+      radial-gradient(circle, transparent 0 23%, #3a424b 23% 23.8%, transparent 23.8%),
+      radial-gradient(circle, transparent 0 48%, #3a424b 48% 48.8%, transparent 48.8%),
+      radial-gradient(circle, transparent 0 73%, #3a424b 73% 73.8%, transparent 73.8%);
   }
   .radar-sweep {
     position: absolute;
@@ -141,7 +141,7 @@
   }
   .btn {
     display: inline-block;
-    padding: 12px 22px;
+    padding: 10px 22px;
     border-radius: 10px;
     font-weight: 600;
     font-size: 0.95rem;
@@ -211,6 +211,7 @@
   .warning-box strong { color: var(--text); }
   code {
     background: var(--code-bg);
+    color: var(--safe);
     padding: 1px 6px;
     border-radius: 4px;
     font-size: 0.85em;
@@ -237,7 +238,7 @@
   </div>
 
   <h1>20.07</h1>
-  <p class="tagline">Offline coordination for when the network can't be trusted, or isn't there.</p>
+  <p class="tagline">Find your group and stay reachable — in a crowd or off the grid, even with no signal.</p>
 
   <div class="badges">
     <span class="badge">MIT licensed</span>
@@ -272,7 +273,7 @@
       <p>An authenticated distress broadcast that hops phone to phone, distance shown in hops.</p>
     </div>
     <div class="feature">
-      <h3>Evidence</h3>
+      <h3>Incident photos</h3>
       <p>Photos encrypted and relayed across the mesh — proof that doesn't live on just one phone.</p>
     </div>
   </div>
@@ -280,10 +281,12 @@
   <h2>Why this exists</h2>
   <p>
     Cellular networks assume normal conditions. That breaks down in a specific, recurring set of
-    situations: natural disasters and blackouts, stampedes and crowd crush, crowd-control and
-    unrest situations where networks are jammed, throttled, or not trusted. In every case the
-    same three needs recur — find your group, call for help, get evidence out — and 20.07 does
-    exactly that, phone-to-phone, with no infrastructure required.
+    situations, whether the network is overloaded by too many people or there was never much of
+    it to begin with: natural disasters and blackouts, stampedes and crowd crush, festivals and
+    events with no signal or no local data plan, hiking and remote areas with no towers nearby,
+    and demonstrations where networks are jammed, throttled, or not trusted. In every case the
+    same three needs recur — find your group, call for help, get incident photos out — and 20.07
+    does exactly that, phone-to-phone, with no infrastructure required.
   </p>
 
   <h2>Design choices</h2>
@@ -305,7 +308,7 @@
       <span class="detail">Lives in memory only — gone the instant the app is force-quit.</span>
     </li>
     <li>
-      <strong>Evidence outlives any one phone</strong>
+      <strong>Incident photos outlive any one phone</strong>
       <span class="detail">Photos relay across the mesh as they're captured — copies exist elsewhere before any single phone stops being available.</span>
     </li>
     <li>

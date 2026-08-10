@@ -239,13 +239,13 @@ fun GroupChatScreen(
                     Modifier.size(44.dp).clip(CircleShape).background(AppColors.Surface)
                         .clickable { photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
                     contentAlignment = Alignment.Center
-                ) { Icon(Icons.Filled.AttachFile, contentDescription = "Share evidence", tint = AppColors.OnSurfaceMuted) }
+                ) { Icon(Icons.Filled.AttachFile, contentDescription = "Share incident photo", tint = AppColors.OnSurfaceMuted) }
 
                 OutlinedTextField(
                     value = messageText, onValueChange = { messageText = it },
                     modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(20.dp),
-                    placeholder = { Text("Type message or share evidence") }
+                    placeholder = { Text("Type message or share incident photo") }
                 )
 
                 // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B

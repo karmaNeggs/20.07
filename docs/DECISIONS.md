@@ -3980,3 +3980,51 @@ itself: 35 tests, 0 failures. detekt clean, no new suppressions. Both variants +
 real distance separation over a live session; needs a round that specifically walks a phone far
 enough away, for long enough, to watch the group row's number actually rise and then read "no one
 nearby," not just a short clean connectivity check.
+
+## 61. Public-facing copy repositioned: use cases reordered/expanded, "protest"/"evidence" terminology swapped
+
+User-directed marketing/positioning revision to README.md, `docs/index.html`, and `V2_eli15.txt` —
+no functional or protocol change. This is the second such revision this project has done (the
+first, noted in `CHANGELOG.md`'s `[0.1.1]-[0.1.3]` entry, already moved these same two docs away
+from protest-first framing toward a ranked list of use cases). This pass extends that same ranked
+list rather than replacing its shape: kept natural disasters/blackouts and stampedes/crowd-crush as
+the leading items (unchanged), added festivals/events-with-no-signal-or-data-plan and hiking/remote-
+areas-with-no-coverage as two new, broader-appeal items, and kept demonstrations in the list
+(renamed from "crowd-control and unrest") rather than removing it — diluted by more surrounding
+items, not deleted. Same treatment in `V2_eli15.txt`'s opening paragraph and its "why we made the
+decisions we made" section (the specific "protesters worried about phone seizure or state
+surveillance" phrasing became a persona-agnostic "a phone getting lost, stolen, or seized" framing
+for the identical underlying design rationale — the actual reasoning for rotating IDs is unchanged,
+only which persona is named as the motivating example).
+
+Terminology: "evidence" (photos) renamed to "incident photos" throughout README.md and
+`docs/index.html` — the feature itself, its wire behavior, its crypto, and its Room-layer type name
+(`EvidenceEntity`, `evidenceDao`, etc.) are all unchanged; this is presentation-copy only.
+`docs/WHITEPAPER.md` and `CHANGELOG.md` deliberately NOT touched — both are explicitly technical
+records referencing real code/decision names (`EvidenceEntity`, `FRAME_EVID_CHUNK`, past decisions
+as they were actually reasoned through at the time); renaming them retroactively would misdescribe
+the actual code and falsify the historical record, not just update copy.
+
+Also updated to match: two real user-facing strings in `GroupChatScreen.kt` (`AttachFile` icon's
+`contentDescription`, and the message-field placeholder) — the only two `Kt` UI strings anywhere in
+the app that literally said "evidence" — changed to "incident photo" so the live app doesn't
+contradict its own docs. Confirmed via grep this was the complete set (checked every
+`ui/*.kt` file, not just the one screen where they were first found).
+
+**Landing page (`docs/index.html`) visual tweaks, same pass, user-directed:**
+- Radar motif brightened: `--safe-a` (the sweep/pulse glow alpha) raised 0.32→0.55; the radar's own
+  background gradient and ring-line color swapped from the page's very dark `--surface`/`--border`
+  tokens to lighter, dedicated values (`--surface-2`/`--surface` gradient, `#3a424b` rings) so the
+  motif reads clearly against the equally-dark page background instead of blending into it.
+- `.btn` (all three CTA buttons — Download/Source/Full writeup, which share one class) vertical
+  padding reduced 12px→10px, ~10% less total button height, applied uniformly rather than only to
+  the primary button so the row stays visually even.
+- Inline `<code>` elements now render in `--safe` (the same green already used for the radar/
+  success color) instead of inheriting the page's default off-white text color.
+
+Verification: `./gradlew testDebugUnitTest detekt` — 525 tests, 0 failures, detekt clean (docs/HTML
+changes don't touch anything it lints anyway; the 2-string UI change does, and passes clean). Both
+variants + `lintVitalRelease` green. Version bumped to v0.7.26-dev (versionCode 37), fresh debug
+APK `aapt`-confirmed. Release notes for this version deliberately kept generic ("docs, READMEs, and
+small text updates") at the user's explicit request — this decision entry is the actual record of
+what changed and why; the public release notes are not.
