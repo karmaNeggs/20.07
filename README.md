@@ -277,8 +277,9 @@ where it matters:
   on real devices, not in a compiler.
 - **Two phones minimum to see anything work.** Discovery, navigation, and relay need at least
   two devices in the same group, physically near each other.
-- **Only hardware-tested at small scale so far (2-3 physical phones, many live rounds since —
-  see `CHANGELOG.md` for the full history).**
+- **Only hardware-tested at small scale so far (4 physical phones, all Android 12+, many live
+  rounds — see `CHANGELOG.md` for the full history).** Android 8-11 (this app's declared
+  `minSdk = 26` floor) are supported in principle but not yet physically tested.
   The actual operating envelope is a small group (3-8 people) whose *carrier medium* — the total
   local population of app users acting as blind relays, per "Every phone relays for every group"
   above — can vary from a couple of people to hundreds (`PLAN-v2.md` §5.5). The high end of that
