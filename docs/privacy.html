@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20.07 — Privacy Policy</title>
+<meta name="description" content="Privacy policy for 20.07, an offline Bluetooth mesh app with no servers, no accounts, and no data collection by the developer.">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0d10;
+    --surface: #14181c;
+    --surface-2: #1c2126;
+    --border: #262b31;
+    --text: #edeff1;
+    --text-muted: #8b95a1;
+    --accent: #818cf8;
+    --accent-contrast: #0a0d10;
+    --danger: #ef4444;
+    --safe: #34d399;
+    --code-bg: #1c2126;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 24px 64px; }
+  a { color: var(--accent); }
+  h1 { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 4px; }
+  .updated { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 28px; }
+  h2 { font-size: 1.15rem; font-weight: 700; margin: 34px 0 10px; letter-spacing: -0.01em; }
+  p, li { margin: 0 0 12px; }
+  ul { padding-left: 22px; }
+  code {
+    background: var(--code-bg);
+    color: var(--safe);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  .summary-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--safe);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 0 0 28px;
+    font-size: 0.95rem;
+  }
+  .summary-box strong { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 600; }
+  footer {
+    margin-top: 48px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+  footer a { color: var(--text-muted); }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>Privacy Policy</h1>
+  <p class="updated">20.07 — last updated 2026-08-10 (v0.7.28-dev)</p>
+
+  <div class="summary-box">
+    <strong>Plain-language summary, before the detail below:</strong> 20.07 has no servers, no
+    accounts, and no company on the other end collecting anything. Everything the app processes —
+    your location, photos you choose to share, who's in your group — either stays on your phone or
+    goes directly, encrypted, to the other phones in your own group over Bluetooth. There is
+    nothing for us (the developers) to see, sell, or hand over, because nothing is ever sent to us.
+  </div>
+
+  <h2>Who this is</h2>
+  <p>
+    20.07 is an open source project (MIT licensed) maintained on
+    <a href="https://github.com/karmaNeggs/20.07">GitHub</a>. There is no company operating this
+    app, no server infrastructure, and no data processor other than your own phone and the phones
+    of people in your group. Contact details are at the bottom of this page.
+  </p>
+
+  <h2>What the app processes, and why</h2>
+  <table>
+    <tr><th>Data</th><th>What happens to it</th></tr>
+    <tr>
+      <td>GPS location</td>
+      <td>Read to power the radar (finding your group). Held in memory only, never written to
+        disk, expires automatically after a short window even in memory, and is gone the instant
+        the app is closed. Shared only with your group's other members, encrypted, over
+        Bluetooth — never to any server, because none exists.</td>
+    </tr>
+    <tr>
+      <td>Photos</td>
+      <td>Only photos you explicitly pick to share. Compressed, encrypted, and sent to your
+        group's other members over Bluetooth. Never uploaded anywhere; never processed by anyone
+        but your group.</td>
+    </tr>
+    <tr>
+      <td>Bluetooth identifiers</td>
+      <td>The app advertises a rotating, meaningless-looking identifier over Bluetooth (changes
+        every 60 seconds) so it can be found by other members of your group. This is deliberately
+        <em>not</em> a stable, trackable device ID — it's designed so an outside observer can't
+        follow one phone over time.</td>
+    </tr>
+    <tr>
+      <td>Nicknames / group membership</td>
+      <td>Whatever name you set is shared only with your own group's members, encrypted. Groups
+        are ephemeral — they expire automatically (a lifetime you choose when creating one, 12
+        hours to 6 months) and everything about that group is deleted from every member's phone
+        at that point.</td>
+    </tr>
+    <tr>
+      <td>Camera</td>
+      <td>Only used if you tap the QR-scan icon to join a group by scanning a code. No photo or
+        video is ever saved from this — frames are read and discarded on the spot. Camera access
+        isn't requested at all unless you use this specific feature.</td>
+    </tr>
+  </table>
+
+  <h2>What the app does <em>not</em> do</h2>
+  <ul>
+    <li>No accounts, no sign-up, no phone number or email collected, ever.</li>
+    <li>No analytics, no crash-reporting SDKs, no advertising SDKs of any kind.</li>
+    <li>No data is ever sent to the developers, to any server, or to any third party — there is no
+      server for anything to go to.</li>
+    <li>No persistent device identifier is used or shared — Bluetooth identifiers rotate every 60
+      seconds specifically so nothing about your phone can be tracked over time by an outside
+      observer.</li>
+    <li>No location history is ever stored — positions live in memory only and are never written
+      to any database, log, or file.</li>
+  </ul>
+
+  <h2>Permissions the app requests, and why</h2>
+  <ul>
+    <li><strong>Bluetooth</strong> (scan/advertise/connect) — the entire mesh network runs over
+      this. Required for the app to work at all.</li>
+    <li><strong>Location</strong> (including background) — powers the radar/navigate feature.
+      Declining it still lets the rest of the app work, with a distance-only ("hot/cold") fallback
+      instead of a directional radar.</li>
+    <li><strong>Camera</strong> — opt-in, only for scanning a QR join-code. The app is fully usable
+      without ever granting this.</li>
+    <li><strong>Notifications</strong> — required to keep the mesh running reliably in the
+      background (a persistent low-priority notification while the app is active), and for SOS
+      alert sounds.</li>
+  </ul>
+  <p>
+    Full technical detail on all of this, including the actual cryptography used, is in the
+    project's <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#security-model">Security
+    model</a> and <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#permissions--and-why-each-one-is-there">Permissions</a>
+    sections on GitHub — this page is a policy summary, that's the full engineering detail.
+  </p>
+
+  <h2>Data sharing and third parties</h2>
+  <p>
+    The only "sharing" that happens is phone-to-phone, over Bluetooth, encrypted, with the members
+    of a group you created or explicitly joined with a shared code. Phones that are not in your
+    group but happen to be running 20.07 nearby may relay your encrypted data for you (this is how
+    the mesh extends beyond direct Bluetooth range) — they can pass your data along but
+    cannot read it, since they don't hold your group's key. No one outside your group — including
+    us — can read anything.
+  </p>
+
+  <h2>Data retention and deletion</h2>
+  <p>
+    Groups expire automatically at a lifetime you choose when creating one (12 hours to 6 months).
+    When a group expires, or when you delete it manually, every member's own app deletes that
+    group's key, messages, and photos on its own device — there is no server copy to separately
+    delete, because none ever existed. Uninstalling the app deletes everything immediately and
+    completely.
+  </p>
+
+  <h2>Children's privacy</h2>
+  <p>
+    20.07 does not knowingly collect any personal information from anyone, including children, for
+    the simple reason that it does not collect personal information from anyone at all — there is
+    no account system and no server to collect it into.
+  </p>
+
+  <h2>Changes to this policy</h2>
+  <p>
+    If this policy changes, the updated version will be posted at this same URL with a new "last
+    updated" date above. Given how the app itself works (no accounts, nothing to notify you
+    through), checking this page directly is the way to see updates.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Questions: open an issue on <a href="https://github.com/karmaNeggs/20.07/issues">GitHub</a>.
+    Security concerns specifically: see
+    <a href="https://github.com/karmaNeggs/20.07/blob/main/SECURITY.md">SECURITY.md</a> for private
+    reporting instructions.
+  </p>
+
+  <footer>
+    <a href="index.html">← Back to 20.07</a> ·
+    <a href="https://github.com/karmaNeggs/20.07">Source on GitHub</a>
+  </footer>
+
+</main>
+</body>
+</html>

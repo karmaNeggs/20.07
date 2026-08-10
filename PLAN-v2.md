@@ -3039,19 +3039,16 @@ CR-33's hardware round.
       key that exists now can serve as the upload key when that happens.
 
 ### Still needed — code/repo work (executable without a live Play Console session)
-- [ ] **Privacy Policy page**, required by Play Console for any app requesting sensitive
-      permissions (this app requests several — location, camera, Bluetooth). Can be written from
-      README's existing Security Model / Known Limitations sections (the actual data-handling
-      behavior is already fully documented there, this is a matter of presenting it in the format
-      Play requires) and hosted on the existing GitHub Pages site (`docs/`) — no new infrastructure
-      needed.
-- [ ] **Play Store listing copy** (short description ≤80 chars, full description, matching the
-      current README/index.html positioning) — draftable without a live Console session.
-- [ ] **Data Safety form answers**, drafted as a reference doc from README's Security Model (what's
-      collected: GPS position (in-memory only, never persisted), photos (encrypted, user-initiated),
-      Bluetooth identifiers (rotating); what's shared: nothing to any server, since there is none;
-      what's retained: nothing beyond the ephemeral group's own lifetime) — pasted into Console by
-      the user when they get there, not submittable by anyone else.
+- [x] **Privacy Policy page** — `docs/privacy.html`, live on GitHub Pages at
+      `https://karmaneggs.github.io/20.07/privacy.html`, linked from the main landing page footer.
+      Written from README's Security Model/Permissions sections.
+- [x] **Play Store listing copy** — `PLAY_STORE_LISTING.md` (repo root, staging doc, not published
+      itself). Short description (2 options, 75/73 chars, verified under the 80 limit) and full
+      description (2,465 chars, verified under the 4,000 limit).
+- [x] **Data Safety form answers** — same file, a reference table derived from README's Security
+      Model (what's collected, what's shared and with whom, encryption in transit, deletion path).
+      Still needs pasting into Console by the user when they get there — re-verify against current
+      README first if this is picked up much later, in case anything's changed since 2026-08-10.
 
 ### Still needed — only the user can do these (external, not automatable)
 - [ ] Google Play Console developer account ($25 one-time fee, ID verification).
