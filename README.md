@@ -464,12 +464,21 @@ yourself.
 
 ## Contributing
 
-Issues and pull requests are welcome. If you're reporting a bug in the BLE/mesh layer
-specifically, a description of the phones/Android versions involved is more useful than a stack
-trace — see [`TESTING.md`](TESTING.md) for why (most real bugs here have been radio-behavior
-ones that only show up on physical hardware). If you're reporting a security issue, please open
-it as a regular issue unless it's actively exploitable against real users — there's no dedicated
-security-contact channel set up yet.
+Issues and pull requests are welcome — see [`CONTRIBUTING.md`](CONTRIBUTING.md) for setup, what a
+PR needs before it's reviewable, and this project's own hardware-testing discipline. Please follow
+the [Code of Conduct](CODE_OF_CONDUCT.md). Found a security issue? See [`SECURITY.md`](SECURITY.md)
+— please don't open a public issue for anything actively exploitable.
+
+## Acknowledgments
+
+This project's mesh design was informed by comparing approaches with
+[bitchat](https://github.com/permissionlesstech/bitchat) (Jack Dorsey / permissionlesstech) — an
+open source BLE mesh chat app that explores similar territory. Several routing ideas (forward-first
+flooding, TTL, fanout) are adapted from its public design — see `V2_eli15.txt`'s "why we made the
+decisions we made" section and [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md)'s Bloom-filter
+set-reconciliation notes for where specifically. This project is independent, took a different
+approach on identity/privacy (see Security model above), and is not affiliated with or endorsed by
+bitchat or its authors.
 
 ## License
 

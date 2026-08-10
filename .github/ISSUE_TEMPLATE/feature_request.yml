@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest something this app doesn't do yet
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project deliberately does "3 features, on purpose — nothing else" (see README) and
+        is opinionated about scope. That doesn't mean new ideas aren't welcome — just that "why"
+        matters as much as "what" here.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: The actual situation you'd be in when you needed this, not just the feature itself.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you're proposing
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Is there already a way to do this, even a clunky one? Why isn't that enough?
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked PLAN-v2.md's Roadmap section — this isn't already planned or shipped
+          required: false

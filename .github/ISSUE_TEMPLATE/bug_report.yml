@@ -1,0 +1,73 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Most real bugs in this project have been BLE radio-behavior
+        ones that only show up on physical hardware — see [`TESTING.md`](../../TESTING.md) — so
+        device details below matter more here than they would for a typical app.
+
+        Before filing: please check [README's Known Limitations](../../README.md#known-limitations-honest-ones)
+        first — several things that look like bugs are already-documented, deliberate tradeoffs.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what actually happened.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: App version
+      description: From Settings, or the APK filename you installed.
+      placeholder: "0.7.26-dev"
+    validations:
+      required: true
+
+  - type: textarea
+    id: devices
+    attributes:
+      label: Devices involved
+      description: >
+        Phone model + Android version for every phone in the test, if the bug involves the
+        BLE/mesh layer (discovery, connection, relay, radar, SOS). Not needed for a pure UI bug on
+        one phone.
+      placeholder: |
+        Phone 1: Pixel 7, Android 14
+        Phone 2: Samsung Galaxy S21, Android 13
+    validations:
+      required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps, as exact as you can make them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Diagnostics log (debug builds only)
+      description: >
+        If you can reproduce this on a debug build, export the DiagnosticsLog (Home screen) from
+        every phone involved and paste or attach it here — this is usually the single most useful
+        thing you can attach for a mesh/relay bug.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I checked README's Known Limitations and this isn't already listed there
+          required: false
+        - label: This is not a security vulnerability (see SECURITY.md if it is)
+          required: true
