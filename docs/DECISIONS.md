@@ -4080,3 +4080,66 @@ generated speculatively without the user present to receive and back it up), Pri
 Play Store listing copy, Data Safety form answers, actual Play Console account/submission (all
 external/manual steps only the user can do). See `PLAN-v2.md`'s own Play Store checklist,
 added alongside this decision, for the full remaining list.
+
+## 63. Dependency security review, phase 1: continuous monitoring enabled, full inventory taken, findings recorded — no remediation yet
+
+User-requested, given this app runs a continuous background foreground service handling GPS,
+camera, and Bluetooth data, and asked explicitly for a discovery pass now with remediation
+decisions deferred to later. Two parts: what's now running continuously going forward, and what a
+one-time inventory of the current dependency tree found.
+
+**Continuous monitoring — enabled, free, zero ongoing effort.** GitHub Dependabot vulnerability
+alerts and automated security-fix PRs both turned on for this repo (`PUT
+repos/karmaNeggs/20.07/vulnerability-alerts` and `.../automated-security-fixes`, both confirmed
+204). Going forward, a newly-disclosed CVE against any dependency in this tree opens a PR
+automatically — nothing merges without review, matching "decide later what to do if one is found."
+This is a standing capability, not a one-time check, and costs nothing to keep running.
+
+**Full dependency inventory, taken via `./gradlew app:dependencies --configuration
+releaseRuntimeClasspath`** (the actual shipped release runtime classpath, not just the ~15 lines
+declared directly in `build.gradle.kts` — the real security-relevant surface is the full transitive
+tree). Every publisher in the resolved tree is `androidx.*` (Google/AndroidX first-party),
+`org.jetbrains.*` (JetBrains/Kotlin first-party), or `com.google.*` (Google-published: zxing,
+guava, gson, tink, auto-value) — no unfamiliar or single-maintainer third-party packages anywhere
+in the transitive closure. This is a genuinely clean, low-supply-chain-risk dependency set as
+publishers go; the findings below are about specific version/staleness concerns, not provenance.
+
+**Flagged for a later remediation decision, in priority order:**
+
+1. **`androidx.security:security-crypto:1.1.0-alpha06`** — already called out in README's own
+   Known Limitations as pinned to an alpha release, confirmed still the case. This wraps the actual
+   group-key storage (Android Keystore-backed `EncryptedSharedPreferences`), so it's the single
+   highest-priority item here. No stable release of this artifact exists upstream as of this
+   review (a fact about the library's own release cadence, not something this project can fix by
+   choosing a different version) — worth periodically checking whether AndroidX has since shipped
+   a 1.1.0 stable or a `androidx.security.crypto` (Jetpack Security's newer module split) has
+   matured into a real replacement.
+2. **`com.google.crypto.tink:tink-android:1.8.0`** — the actual Ed25519 sign/verify implementation
+   (`SenderIdentity.kt`) and pulled in transitively by `security-crypto` too, both resolving to the
+   same 1.8.0 (no version conflict). Google's own crypto library, generally well-audited, but this
+   project hasn't checked this specific pinned version against Tink's own security advisories —
+   Dependabot now watches this going forward; a manual check of Tink's changelog against 1.8.0
+   before the next real dependency bump is worth doing deliberately, not just passively.
+3. **`com.google.zxing:core:3.5.3`** and its transitive `androidx.exifinterface:1.3.2` — both
+   parse attacker-reachable input by design (a scanned QR code's raw bytes; EXIF metadata read from
+   a picked/captured photo). Parser libraries handling untrusted external input are a meaningfully
+   different risk category from the rest of this tree (UI/lifecycle/DI infrastructure that only
+   ever processes this app's own data) — worth a closer look than the others specifically because
+   of what they're exposed to, not because either has a known issue right now.
+4. **`com.google.code.gson:2.8.9`** (transitive, via `tink-android`, not declared directly by this
+   project) — an older Gson version; several releases have shipped upstream since. This project has
+   no direct control over which Gson version Tink pulls in short of an explicit version-forcing
+   override, which is its own tradeoff (could desync from what Tink was actually tested against) —
+   flagged for a deliberate decision, not fixed reflexively here.
+5. **LeakCanary (`com.squareup.leakcanary:leakcanary-android:2.14`, `debugImplementation`) ships in
+   the currently-distributed APK** — not itself a vulnerability (LeakCanary is a reputable, widely-
+   used debug tool), but worth naming plainly: because the release build is unsigned and the debug
+   build is what `releases/`/GitHub Releases actually distribute (see README's Known Limitations),
+   every debug-only dependency — LeakCanary, Compose UI tooling — currently ships to real users too,
+   running its own background heap-analysis service. This resolves itself once real release signing
+   happens (Play Store checklist, decision 62); noted here so it's not forgotten as a *dependency*
+   concern specifically, not just a signing one.
+
+**Deliberately not done this pass:** no version bumps, no dependency removals, no code changes —
+per the user's explicit instruction to gather findings now and decide on remediation later. No
+version bump for this decision; nothing in the built artifacts changed.

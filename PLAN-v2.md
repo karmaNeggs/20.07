@@ -3080,3 +3080,22 @@ CR-33's hardware round.
   dependency, MIT licensed, matches their inclusion criteria) and could still carry the
   full-featured (disguise-included) build alongside a stripped Play Store submission. Not started;
   worth a real decision once the Play Store track is further along, not competing for attention now.
+
+---
+
+## Part 12 — Dependency security review (ongoing track)
+
+Started 2026-08-10 (decision 63, `docs/DECISIONS.md`), user-requested given this app runs a
+continuous background service handling GPS/camera/Bluetooth. Phase 1 (discovery + continuous
+monitoring) done; remediation deliberately deferred pending user review of the findings.
+
+- [x] GitHub Dependabot vulnerability alerts + automated security-fix PRs enabled — standing,
+      ongoing, no further action needed to keep it running.
+- [x] Full transitive dependency inventory taken and reviewed by publisher — clean (all
+      androidx/JetBrains/Google), no unknown third-party packages. Five specific items flagged by
+      priority in decision 63 (`security-crypto`'s alpha status highest).
+- [ ] **User decision needed, not yet made**: what to do about each of decision 63's 5 flagged
+      items — this is the actual "what to do if one is found" step, deliberately not decided by
+      default here.
+- [ ] Recheck once Play Store release signing happens (decision 62) — resolves the LeakCanary/
+      debug-tooling-ships-to-users item on its own, not a separate fix.
