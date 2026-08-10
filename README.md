@@ -300,15 +300,15 @@ where it matters:
   service and asks once for a battery-optimization exemption, but aggressive OEM battery
   managers (common on some manufacturers) are known to kill foreground services regardless of
   correct API usage — there is no code-level guarantee against this, only the standard mitigation.
-- **The release build has no signing config and is currently unsigned** — `./gradlew assembleRelease`
-  produces `app-release-unsigned.apk`, which Android will refuse to install as-is. It's also only
-  compile-verified and unit-test-verified, not yet run end-to-end on a physical device — R8
-  minification (~90% smaller than debug) is a large enough surface of change to warrant its own
-  device pass regardless. The APK actually distributed below is the **debug** build, signed with
-  the standard auto-generated debug keystore, which is why it's what `releases/` and the download
-  link point to. Nobody has generated a release signing key for this project — do that yourself
-  (`keytool`/Android Studio's signing wizard) before distributing a release build; this repo will
-  never contain one.
+- **The release build is now signed (as of v0.7.28-dev)** — a real key exists, kept entirely out of
+  git (`keystore.properties`/`keystore/*.jks` are both gitignored; a fresh clone still builds
+  `release`/`playstoreRelease` fine without them, just unsigned, so contributing never needs the
+  real signing material). `releases/` and the download link below now point at this signed
+  **release** build (R8-minified, ~90% smaller than debug, no debug-only tooling compiled in) —
+  not the debug build the way earlier versions did. Still worth knowing: this is a fresh key with
+  no track record, and end-to-end device testing of the *minified* release build specifically
+  (distinct from testing the debug build, which is what most of this project's hardware rounds so
+  far have actually exercised) is newer and thinner than the debug build's testing history.
 - **One dependency (`androidx.security:security-crypto`) is pinned to an alpha release** — used
   only to wrap local key storage (see Security model above), not for any cryptographic operation
   itself. This reflects the state of that library upstream (no stable release exists), not a
@@ -423,8 +423,9 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 [**Releases**](https://github.com/karmaNeggs/20.07/releases/latest) page and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
-Releases page.) This is always a **debug** build — no signed release build exists yet; see Known
-Limitations above for exactly why.
+Releases page.) This is the signed **release** build (minified, no debug-only tooling) as of
+v0.7.28-dev — see Known Limitations above for what's still newer/thinner about this specific
+build's own testing history.
 
 **Build from source**:
 ```
@@ -436,7 +437,9 @@ export JAVA_HOME=<a JDK 17 install>   # e.g. Homebrew: /opt/homebrew/opt/openjdk
 ```
 Needs the Android SDK (platform 34, build-tools 34.0.0) — Android Studio sets this up
 automatically, or install the command-line SDK tools and set `ANDROID_HOME`/`local.properties`
-yourself.
+yourself. `./gradlew assembleRelease` also works without any extra setup — it just produces an
+*unsigned* release APK unless you supply your own `keystore.properties` at the repo root (the
+project's own real signing key is intentionally never in git).
 
 ## How to use it
 

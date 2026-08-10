@@ -10,9 +10,12 @@ build/
 # ...except the intentionally-committed release APK(s) — see README "Get the app".
 !releases/*.apk
 
-# Signing (none exist yet, but never commit if they do)
+# Signing — real release key as of 2026-08-10 (see keystore/README.md). NEVER commit any of this;
+# losing it out of git is fine (it's meant to only ever exist locally + in your own backup), leaking
+# it into git is not, since every future update needs this exact key.
 *.jks
 *.keystore
+keystore.properties
 
 # IDE
 .idea/

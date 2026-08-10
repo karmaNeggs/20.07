@@ -1,8 +1,22 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.kapt")
     id("io.gitlab.arturbosch.detekt")
+}
+
+// Real release signing key, added 2026-08-10 (docs/DECISIONS.md) — keystore.properties and the
+// keystore itself both live outside git (.gitignore) since this exact key is required for every
+// future update once a signed build is ever distributed. Deliberately optional here, not required:
+// a fresh clone with no keystore.properties still builds release/playstoreRelease fine, just
+// unsigned (AGP's own default) — so contributing/CI never needs the real signing material.
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val hasReleaseSigning = keystorePropertiesFile.exists()
+val keystoreProperties = Properties().apply {
+    if (hasReleaseSigning) load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
@@ -13,8 +27,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 38
-        versionName = "0.7.27-dev"
+        versionCode = 39
+        versionName = "0.7.28-dev"
         // True for every build type except playstoreRelease below, which overrides it to false.
         // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
         // Play's Deceptive Behavior / impersonation policy specifically targets apps that change
@@ -25,6 +39,17 @@ android {
         buildConfigField("boolean", "DISGUISE_SUPPORTED", "true")
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             // Enabled in Pass 18 — was off since the project's initial commit, which is the real
@@ -33,6 +58,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
         }
         // A third build type, deliberately NOT a product flavor: flavors rename every existing
         // Gradle task (assembleDebug -> assembleXDebug etc.), which would break every documented
@@ -48,6 +74,10 @@ android {
             // manifest no longer references them, isShrinkResources (inherited from release above)
             // drops the now-unused decoy icon/string resources from the built APK/AAB on its own.
             buildConfigField("boolean", "DISGUISE_SUPPORTED", "false")
+            // initWith(release) above already copies signingConfig, but set explicitly rather than
+            // relying on that being obvious to a future reader — this build's whole point is a real
+            // signed artifact for Play Console, so its signing shouldn't be implicit.
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
             matchingFallbacks += "release"
         }
     }

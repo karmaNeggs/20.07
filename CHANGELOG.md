@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.28-dev] — First real release signing key; `releases/` now ships the signed release build
+
+`release`/`playstoreRelease` are genuinely signed for the first time (key kept entirely out of
+git; a fresh clone still builds unsigned without it, so nothing about contributing changes). The
+tracked APK in `releases/` (and the GitHub Releases download) switches from the debug build to
+this signed release build — 2.1MB vs. debug's ~20MB, confirming the R8/shrinkResources reduction
+README has claimed since Pass 18. Verified via `apksigner verify` against the actual built APKs,
+not just assumed from the Gradle config compiling. 525 tests, detekt clean, all three build types
+green. Full detail in decision 64 (`docs/DECISIONS.md`).
+
 ## [0.7.27-dev] — Play Store build variant, disguise feature excluded
 
 New `playstoreRelease` build type for an eventual Google Play submission — the "Disguise app icon"

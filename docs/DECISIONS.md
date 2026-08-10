@@ -4143,3 +4143,47 @@ publishers go; the findings below are about specific version/staleness concerns,
 **Deliberately not done this pass:** no version bumps, no dependency removals, no code changes —
 per the user's explicit instruction to gather findings now and decide on remediation later. No
 version bump for this decision; nothing in the built artifacts changed.
+
+## 64. First real release signing key generated; `release`/`playstoreRelease` are now genuinely signed
+
+User is preparing a first friends-and-family/Reddit release and asked for this specifically, having
+been told it was the one hard blocker between the current app and a distributable "complete" build
+(everything else — debug-only tooling already excluded from release builds, no stray WIP/stub code
+— was already fine, confirmed by a full `BuildConfig.DEBUG`-gate and TODO/FIXME sweep before this
+decision).
+
+**Key generated**: `keystore/release.jks`, RSA 2048, alias `2007release`, valid until 2053 (10000
+days — keytool's own PKCS12 default, which does not support separate store/key passwords despite
+being asked for one; both resolve to the same value, confirmed via `keytool -list`). Both the
+keystore and `keystore.properties` (store/key passwords + alias) live outside git — `.gitignore`
+already covered `*.jks`/`*.keystore`, added `keystore.properties` explicitly this pass. A
+`keystore/README.md` (committed, non-secret) explains what the directory holds and that it must be
+backed up outside git immediately, since every future update depends on this exact key existing.
+
+**Gradle wiring, `app/build.gradle.kts`**: loads `keystore.properties` from the repo root if
+present: `signingConfigs.release` only gets created, and only gets attached to the `release`/
+`playstoreRelease` build types, when the file exists. A fresh clone with no `keystore.properties`
+still builds both release-type build types fine — just unsigned, AGP's own prior default — so
+`CONTRIBUTING.md`'s setup steps and CI (if this project ever adds it) never need the real signing
+material.
+
+**Verified, not just assumed**: `apksigner verify --print-certs` on both `app-release.apk` and
+`app-playstoreRelease.apk` confirms the same certificate fingerprint on both, matching `keytool
+-list`'s own output for the generated key. Output filenames themselves also confirm it —
+`app-release.apk`, not `app-release-unsigned.apk` the way every prior build produced.
+
+**`releases/` switched from the debug build to this signed release build** — the first time this
+project has distributed anything other than debug. 2.1MB vs. the debug build's ~20MB, confirming
+R8/shrinkResources (enabled since decision/Pass 18) actually delivers the ~90% reduction README has
+claimed since then. README's own "release build is unsigned" Known Limitations bullet and "Get the
+app" section both updated to match — with an honest caveat added, not removed: this exact
+*minified* release build's own device-testing history is thinner than the debug build's, since
+nearly every hardware round so far (CR-13 regression through CR-33) tested the debug build
+specifically.
+
+**Verification**: `./gradlew testDebugUnitTest detekt` — 525 tests, unaffected. `assembleDebug`/
+`assembleRelease`/`assemblePlaystoreRelease`/`bundleRelease`/`bundlePlaystoreRelease`/
+`lintVitalRelease`/`lintVitalPlaystoreRelease` all green. Version bumped to v0.7.28-dev
+(versionCode 39). **Not yet hardware-tested as a release build specifically** — the user's
+this-week physical rounds should include at least one pass on the actual signed release APK, not
+only the debug build, given the caveat above.
