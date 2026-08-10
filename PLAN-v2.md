@@ -65,6 +65,19 @@ what's stale.
     pass, P7 (the real bitchat bridge implementation, not the spike tooling already shipped in
     decision 55) is next — see Part 7's own P7 section for the design, already researched and locked,
     just not built.
+  - **2026-08-10, mid-round check against v0.7.24-dev (2 phones):** user confirmed `.17`, not `.18`,
+    was the last version with full comms — checked directly via `git log`/`git show`: `.18`
+    (`4783feb`) touched only `L2capBulkTransport.kt` (evidence bulk-transfer padding), not
+    `RelayResponder.kt` where CR-31/32 live, and both mechanisms behind CR-31/32 predate `.17` by a
+    wide margin (P3 links: v0.6.x; split-horizon: v0.4.0-dev) — `.17`→`.18` is not implicated in
+    anything found/fixed this session. Separately, a "first few messages take 1min+, then instant"
+    report on 2 phones was checked against fresh logs: `openLinkCount` reached 4 and 4 distinct
+    sender identities appeared, not 2 — user confirmed this was leftover phones from earlier rounds
+    left running nearby (plus `[bitchat-spike]` probing real nearby devices) contending for
+    connection slots/airtime, and a mid-test group rejoin on one phone (expected identity change,
+    not a bug). No code defect confirmed from this evidence — **next round should re-test the
+    slow-start specifically with ONLY the intended phones powered on** (no leftover devices, no
+    bitchat-spike scanning) to get a clean read on whether it's still there.
 
 - **2026-08-09 — the first live round happened, found a total-failure regression in
   the ONE fix that was flagged as unverified (CR-13), which is now diagnosed and fixed. The round
