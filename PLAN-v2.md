@@ -6,18 +6,23 @@ notes inside Part 7 below) is detail underneath this, not a competing source. If
 section below ever seems to disagree with this block, this block is current and that section is
 what's stale.
 
-- **NEXT SESSION STARTS HERE — round 3 (v0.7.24-dev) confirmed both CR-31 and CR-32 fixed under real,
-  sustained, ~1-hour multi-phone use** (3 phones, multiple group delete/rejoin cycles, a sender/
-  receiver role swap, an app-uninstall-on-relay-phone test, ad hoc P7 bitchat-spike probing — see the
-  Resume checklist's round-3 entry for the full breakdown). **Only remaining open item from the last
-  two rounds is CR-33 (hop-count freeze), deliberately deferred — needs its own dedicated design pass
-  on `HopTracker.updateHop`, not bundled with a hardware round.** No other bugs found this round.
-  Current build: `releases/20.07-v0.7.24-dev-debug.apk` (versionCode 35, `aapt`-confirmed) — this is
-  also the build round 3 tested against, so no new APK is needed until CR-33 or something new lands.
-  **Suggested next step: either do the CR-33 design pass now, or move to P7 (the real bitchat bridge
-  — design already researched and locked in Part 7's own section, just not built) and treat CR-33 as
-  a parallel-track item**, since P7 doesn't depend on it. Round 2's original findings (superseded by
-  round 3's confirmation) are kept below for the diagnosis trail, not as open items.
+- **NEXT SESSION STARTS HERE — CR-33 closed (decision 60, `docs/DECISIONS.md`).** `HopTracker`
+  rebuilt around per-source aging (one independent report per reporting source, each expiring on its
+  own clock) instead of the old ownership-gated single value — `myHop` is now the minimum hop among
+  whichever sources are currently fresh, i.e. distance to the nearest *reachable* member, with no
+  freeze mechanism left to trigger. One accepted, bounded tradeoff: `BeaconRadio`'s two BLE-address-
+  keyed call sites can now show a stale reading for up to one staleness window (~3-7.5 min) after an
+  address rotation, instead of the old design's instant handoff for that one case — see decision 60
+  for why that's judged strictly better than the freeze it replaces. **Not yet hardware-tested** —
+  needs a round that walks a phone genuinely far away for a sustained period and confirms the group
+  row's number actually rises, then reads "no one nearby," rather than staying pinned. Current build:
+  `releases/20.07-v0.7.25-dev-debug.apk` (versionCode 36, `aapt`-confirmed).
+  - Round 3 (v0.7.24-dev) confirmed CR-31 and CR-32 fixed under real, sustained, ~1-hour multi-phone
+    use (3 phones, multiple group delete/rejoin cycles, a sender/receiver role swap, an
+    app-uninstall-on-relay-phone test, ad hoc P7 bitchat-spike probing — see the Resume checklist's
+    round-3 entry for the full breakdown). CR-33 was the only item left open from that round.
+  - **Once this round confirms CR-33, move to P7** (the real bitchat bridge — design already
+    researched and locked in Part 7's own section, just not built).
   - **Fixed: SOS/evidence/nickname delivery silently stopped ~2.5-3 minutes into the session, on all
     three phones** (`[sync] peer X: pushed=N` — the log line meaning a catalog-filter round-trip
     actually happened — stopped firing on every phone after that point, even though fresh GATT
@@ -2881,34 +2886,38 @@ position path), not fixed speculatively.
 **Verify.** In a live round with 3+ phones: no position/presence hop value should ever exceed
 (phone count − 1), and should typically stay well below that.
 
-#### CR-33 — `HopTracker` "N hop(s) away" can freeze indefinitely, even as the real distance grows — 🔜 DEFERRED (next steps, not this pass)
+#### CR-33 — `HopTracker` "N hop(s) away" can freeze indefinitely, even as the real distance grows — ✅ CLOSED 2026-08-10 (decision 60)
 
 **Evidence (user-confirmed live, not just log-inferred):** the group row's hop reading stayed at 1
 even while phones were physically separated by real distance for a sustained period.
 
-**Why.** `HomeScreen`'s display reads `HopTracker.myHop` live every second (confirmed not a UI/
-recomposition bug). `MeshProtocol.HopTracker.updateHop`'s acceptance rule lets a tracked value get
-WORSE only when the same "owning" source (a rotating BLE address) reports it worse itself; any OTHER
-source merely confirming the existing value refreshes recency and takes over ownership without
-changing the value. In a redundant multi-path mesh, some path will almost always echo the old value
-occasionally, so a stale reading can neither expire (confirmations keep refreshing it) nor
-legitimately escalate (worsening needs the one specific owning source, which may simply have gone
-quiet rather than explicitly reporting worse) — even once the real peer has moved genuinely farther
-away.
+**Why it happened.** `HomeScreen`'s display read `HopTracker.myHop` live every second (confirmed not
+a UI/recomposition bug). `updateHop`'s ownership rule let a tracked value get WORSE only when the
+same "owning" source (a rotating BLE address) reported it worse itself; any OTHER source merely
+confirming the existing value refreshed recency and took over ownership without changing the value.
+In a redundant multi-path mesh, some path would almost always echo the old value occasionally, so a
+stale reading could neither expire (confirmations kept refreshing it) nor legitimately escalate
+(worsening needed the one specific owning source, which may simply have gone quiet rather than
+explicitly reporting worse) — even once the real peer had moved genuinely farther away.
 
-**Why not fixed now.** Also v0.4.0-dev-era code, built specifically to fix a *different*, earlier bug
-(recency refreshed by every report including rejected ones, so a value could never go stale at all —
-see that commit's own message, and `updateHop`'s own doc comment). Loosening the ownership rule
-without a real design pass risks silently reintroducing that original bug. **Per product decision:
-scoped here for its own dedicated pass, not patched under a hardware-round's time pressure.**
+**Fix.** `HopTracker` rebuilt around per-source aging: one independent `(hop, timestamp)` per
+reporting source, each expiring on its own `effectiveStaleMs` window (unchanged formula/constants).
+`myHop`/`bestActiveSosHop` are the minimum among whichever sources are currently fresh — "distance to
+the nearest reachable member," exactly the user's own framing for the fix, computed live with no
+ownership/handoff concept left to freeze. User's own proposed fallback ("if no reachable member,
+show any member") was deliberately NOT implemented — falling back to a stale reading reintroduces the
+exact "looks live, isn't" failure this closes; no fresh source now means "no one nearby"
+(`UNKNOWN_HOP`), matching `PositionTracker`'s own fade-out behavior. An avg-distance display mode
+(discussed as a fallback-of-the-fallback) was skipped — not worth the UI surface for an ambiguous
+case this fix already resolves. One accepted, bounded tradeoff: `BeaconRadio`'s two BLE-address-keyed
+call sites can show a stale reading for up to one staleness window after an address rotation (vs. the
+old design's instant handoff for that case) — judged strictly better than the freeze it replaces
+since it's bounded and self-healing. See decision 60 for the full writeup, including why
+`OpaqueFrameRelay`'s similarly address-keyed custody paths were deliberately left out of this pass.
 
-**When picking this up:** re-read `MeshProtocol.kt`'s `updateHop` doc comment in full before touching
-it — it explains exactly which prior bug the current shape prevents. Any fix needs to keep that
-property (a confirmed-stale route still eventually expires) while also letting a route that's
-genuinely worsened actually escalate, even when the original owning source goes silent rather than
-explicitly reporting worse — likely needs either a per-source freshness quorum or a time-boxed
-"provisional worse" state rather than the current binary owner-only-can-worsen rule. Write it as a
-new decision + CR entry when it happens, same as every other tracker fix this project has made.
+**Verify.** Needs a live round: walk a phone far enough away, for long enough, to watch the group
+row's number rise past its earlier value and eventually read "no one nearby" — not just a short
+connectivity check (which would look identical whether or not the freeze is actually fixed).
 
 **Also considered, ruled out — not a CR, no code change:** round 2's evidence initially looked like
 group deletion leaves a live broadcast running for several minutes after membership ends (a
@@ -2996,6 +3005,12 @@ Tick these in order; each is independently committable.
       user-confirmed), so more than 3 identities were plausibly live at once at that moment — not a
       CR-32 regression. **CR-33 (hop-count freeze) is still open, deliberately deferred — unaffected
       by this round.**
-- [ ] `HopTracker.updateHop` redesign (CR-33) — its own dedicated pass, not bundled with a hardware
-      round. See CR-33's entry for the constraint any fix must preserve.
-- [ ] Once round 3 is clean (modulo CR-33) and CR-33 has its own pass, P7 (real bitchat bridge)
+- [x] **CR-33 closed** (decision 60, `docs/DECISIONS.md`, 2026-08-10) — `HopTracker` rebuilt around
+      per-source aging (min hop among currently-fresh sources) instead of the ownership gate. 525
+      tests green (`HopTrackerTest`: 35, rewritten alongside the class), detekt clean, both variants
+      + `lintVitalRelease` green. Version bump (v0.7.25-dev, versionCode 36), fresh debug APK
+      `aapt`-confirmed. **Not yet hardware-tested** — needs a round that walks a phone genuinely far
+      away for a sustained period.
+- [ ] Round 4 device-test round against v0.7.25-dev — confirm CR-33's fix specifically (group row's
+      hop number should rise as a phone walks away, then read "no one nearby," not stay pinned).
+- [ ] Once that round is clean, P7 (real bitchat bridge)

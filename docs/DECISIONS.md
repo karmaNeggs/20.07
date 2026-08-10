@@ -3911,3 +3911,72 @@ hop counts should never exceed 1 in a 3-phone test; an SOS sent while no links h
 should still arrive within one `presenceRefreshIntervalMs` cycle (~15-20s) of the next connection
 forming, not require a fresh reconnect; the "N hop(s) away" freeze is EXPECTED to still reproduce —
 that fix is intentionally deferred, not attempted here.
+
+## 60. CR-33 closed: `HopTracker` rebuilt around per-source aging instead of ownership
+
+Round 3 (decision 59's own follow-up, confirmed via a ~1-hour real multi-phone session) validated
+CR-31/32 and left CR-33 — the "always 1 hop away, even far apart" freeze — as the one open item.
+User's framing for the fix: the group row should show distance to the nearest *reachable* member,
+computed by actually counting relays, not an approximation. That's a real design change, not a
+tuning knob, so it's a rewrite of `HopTracker`'s acceptance rule rather than a parameter adjustment.
+
+**Why the previous design (v0.4.0-dev, refined by CR-12) couldn't just be patched.** It kept one
+value per `(groupId, target)` key, gated by an "ownership" rule: a report can only make the value
+WORSE if it comes from the same source that most recently established it; any OTHER source merely
+CONFIRMING the existing value refreshes recency and takes over ownership without changing anything.
+That was itself the fix for an earlier bug (recency refreshed by every report including rejected
+ones, so a value could never go stale at all) — but it traded one freeze for a subtler one: in a
+redundant multi-member mesh, *some* relay path will almost always echo the old good value
+occasionally, so the tracked reading can neither expire (confirmations keep resetting the clock) nor
+properly escalate (worsening is gated on the one specific owning source, which may simply have gone
+quiet instead of explicitly reporting worse) — even once the real member has moved genuinely farther
+away. Live-confirmed by the user watching phones separate by real distance while the group row never
+moved off "1".
+
+**Fix.** `HopTracker` now keeps one independent report per `(groupId, target, sourceId)`, each aging
+out on its OWN `effectiveStaleMs` window (unchanged formula/constants — only what's stored per entry
+changed). `myHop`/`bestActiveSosHop` are simply the minimum hop among whichever sources are currently
+fresh for that key — "distance to the nearest reachable member," computed live, every call. No
+ownership concept, no "confirms" special case, no handoff logic: a source's claim is always
+overwritten by its own latest report, and a source that stops reporting just stops contributing to
+the minimum once its own entry ages out. This is a straightforward simplification, not just a bug
+fix — `lastSource`/the ownership branch in `updateHop` are gone entirely, and the same shape now also
+covers SOS hop tracking (previously per-target already, but through the identical ownership gate),
+so a same-vintage freeze there is closed too even though nobody had reported it yet.
+
+**Deliberate product call, not a bug:** the user's original framing ("nearest reachable member, if
+not then any member") was narrowed during design — falling back to a stale member's old reading when
+nothing is currently fresh was rejected as reintroducing the exact "looks live, isn't" failure this
+closes. No fresh member now means "no one nearby" (`UNKNOWN_HOP`), matching how `PositionTracker`'s
+own radar dots already fade out rather than lie. An average-distance display mode (the user's stated
+fallback-of-the-fallback) was skipped entirely: it only existed to soften an ambiguous "nearest
+reachable" case that mostly disappears once hop is tracked per-source correctly, and wasn't worth the
+added UI surface for a case this fix already resolves.
+
+**One accepted, bounded tradeoff, called out explicitly rather than silently shipped.** Two of
+`HopTracker`'s four call sites (`BeaconRadio`'s direct-beacon-hearing and Tier B paths) pass a raw
+BLE MAC address as `sourceId`, which rotates every ~10-15 minutes; the other two (`RelayResponder`'s
+GATT-derived presence/position paths, the dominant traffic source per this session's own log
+evidence) already pass the member's own stable `senderId`, unaffected. For the address-keyed paths, a
+rotation now means the OLD address's reading persists until it ages out on its own (up to one
+`effectiveStaleMs` window, ~3-7.5 min depending on hop) even if the same physical peer's NEW address
+is already reporting something worse — vs. the previous design's instant, explicit ownership handoff
+for exactly this case. Judged an acceptable trade: bounded and self-healing, versus the previous
+design's failure mode (an unrelated confirming path anywhere in the mesh) being both more likely to
+occur and unbounded in duration. Not resolved by tying `sourceId` to `PeerIdentityResolver`-resolved
+identity in this pass — deliberately scoped out, matching CR-32's own note that
+`BeaconRadio`'s address-keyed reporting is a separate, not-yet-investigated surface.
+
+**Tests.** `HopTrackerTest.kt` rewritten alongside the class: assertions for scenarios whose
+*external* behavior is identical under the new model (a worse report from a different, non-minimum
+source; a better report from any source; both candidates merged into one call) are unchanged. Tests
+that specifically exercised ownership-transfer mechanics no longer being possible were replaced with
+tests of the new, weaker-but-bounded guarantee (`a rotated BLE address is a new, independent source,
+so a stale old one only lingers up to its own window`, replacing `ownership follows whoever confirms
+the value...`). 525 tests total (unchanged count — replaced, not added), all green; `HopTrackerTest`
+itself: 35 tests, 0 failures. detekt clean, no new suppressions. Both variants +
+`lintVitalRelease` green. Version bumped to v0.7.25-dev (versionCode 36), fresh debug APK
+`aapt`-confirmed. **Not yet hardware-tested** — the freeze was only ever visible under sustained,
+real distance separation over a live session; needs a round that specifically walks a phone far
+enough away, for long enough, to watch the group row's number actually rise and then read "no one
+nearby," not just a short clean connectivity check.

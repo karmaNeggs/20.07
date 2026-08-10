@@ -344,27 +344,37 @@ object MeshProtocol {
     // have-bitset + per-peer deficit computation with FountainCode.kt's own encode/decode.
 }
 
-/** Live, in-memory distance-vector table: how many relay-hops away is my nearest group member / an
- *  active SOS. [now] is injectable (defaults to the real clock) so staleness behavior — a real,
- *  previously-buggy part of this class (see [bestActiveSosHop]'s doc) — is testable without waiting
- *  out a real 90-second window. */
-// TooManyFunctions: one small, single-purpose function per distance-vector operation (report,
-// query, or prune) rather than fewer, more overloaded ones — matches this codebase's own established
-// reasoning for the same suppress elsewhere (e.g. RelayResponder's "one small handler per wire frame
-// type... instead of one large dispatcher"). Crossed the threshold when CR-6 (PLAN-v2.md Part 10,
-// 2026-08-09) added pruneStale/clearForGroup/pruneOrphaned/removeKeys, mirroring PositionTracker's
-// own pruning shape.
+/** Live, in-memory distance table: how many relay-hops away is my nearest group member / an
+ *  active SOS. [now] is injectable (defaults to the real clock) so staleness behavior is testable
+ *  without waiting out a real multi-minute window.
+ *
+ *  **Per-source, not per-key (CR-33, `PLAN-v2.md` Part 10, closed 2026-08-10).** Two prior designs
+ *  lived here, in order: (1) every report refreshed one shared value's recency unconditionally, so
+ *  a route that vanished stayed "N hops away" forever as long as *anything* kept reporting; (2) an
+ *  "ownership" gate fixed that (only the source that established a value could later worsen it) but
+ *  traded it for a subtler freeze — any OTHER source merely confirming the old value still refreshed
+ *  recency and took over ownership without changing it, so in a redundant multi-member mesh some
+ *  path would almost always echo the old reading, and a group row could sit at "1 hop away" even
+ *  once that member had genuinely walked far out of range (live-confirmed, user-reported). Neither
+ *  problem exists once each reporting source's OWN claim ages out on its OWN clock, independent of
+ *  every other source: [myHop] is simply the minimum hop among whichever sources are still fresh —
+ *  "distance to the nearest reachable member" the group row is actually supposed to show — with
+ *  nothing to freeze or hand off, and no ownership bookkeeping at all. */
+// TooManyFunctions: one small, single-purpose function per operation (report, query, or prune)
+// rather than fewer, more overloaded ones — matches this codebase's own established reasoning for
+// the same suppress elsewhere (e.g. RelayResponder's "one small handler per wire frame type...
+// instead of one large dispatcher").
 @Suppress("TooManyFunctions")
 class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     data class Key(val groupId: String, val target: String) // target = "PRESENCE" or an sosId
-    private val table = ConcurrentHashMap<Key, Int>()
-    private val lastUpdated = ConcurrentHashMap<Key, Long>()
-    // Which reporter's report currently "owns" table[key] — see updateHop's doc for why this
-    // exists: without it, a value only ever got BETTER, forever, even after the route that
-    // produced it was long gone, as long as something (anything) kept refreshing recency. A
-    // peer/connection address is a fine source identity here even though BLE addresses rotate
-    // every ~15min — see updateHop's doc for why that rotation doesn't reopen the bug this fixes.
-    private val lastSource = ConcurrentHashMap<Key, String>()
+    private data class SourceKey(val groupId: String, val target: String, val sourceId: String)
+    private data class Report(val hop: Int, val updatedAt: Long)
+
+    // One independent report per (key, sourceId) — see class doc. A flat map, not nested: this
+    // codebase's own PositionTracker.forGroup scans its whole table with a filter the same way,
+    // rather than maintaining a second per-group index, and at this scale (a handful of members/
+    // active SOS per group) that's cheaper to reason about than nested-map concurrency.
+    private val reports = ConcurrentHashMap<SourceKey, Report>()
     private val _snapshot = MutableStateFlow<Map<Key, Int>>(emptyMap())
     val snapshot: StateFlow<Map<Key, Int>> = _snapshot
 
@@ -390,34 +400,75 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
     // reported as confusing.
     private val staleMs = BASE_STALE_MS
 
-    /** CR-6 (`PLAN-v2.md` Part 10, 2026-08-09 review pass) — [table]/[lastUpdated]/[lastSource]/
-     *  [_snapshot] are keyed on `Key(groupId, target)` where [target] is `"PRESENCE"` **or a
-     *  per-message SOS UUID** ([markSosOrigin]/[considerNeighborReport]'s `target` param), and
-     *  nothing removed an entry — [myHop]/[bestActiveSos] only ever FILTERED by staleness at read
-     *  time, so a session with many distinct alert-flagged SOS ids grew this unboundedly, on the
-     *  exact structure [BeaconRadio.bestSosHopFor] scans on every advertise-check tick (2s in
-     *  ACTIVE tier). Call periodically (same cadence as [org.offlinemesh.app.data.GroupRepository
-     *  .expireGroups]/`RelayEngine.pruneExpired`, see `MeshService.startPruning`) to actually evict
-     *  what [myHop]/[bestActiveSos] already treat as gone, mirroring [PositionTracker]'s own
-     *  filter-at-read-plus-prune-on-schedule shape. */
+    private fun freshHop(groupId: String, target: String, nowMs: Long = now()): Int =
+        reports.entries.asSequence()
+            .filter { it.key.groupId == groupId && it.key.target == target }
+            .filter { (_, r) -> nowMs - r.updatedAt <= effectiveStaleMs(staleMs, r.hop) }
+            .minOfOrNull { it.value.hop } ?: MeshProtocol.UNKNOWN_HOP
+
+    private fun refreshSnapshot(groupId: String, target: String) {
+        val key = Key(groupId, target)
+        val hop = freshHop(groupId, target)
+        _snapshot.update { if (hop == MeshProtocol.UNKNOWN_HOP) it - key else it + (key to hop) }
+    }
+
+    fun myHop(groupId: String, target: String): Int = freshHop(groupId, target)
+
+    /** A direct BLE neighbor is by definition 1 hop away for whatever they're broadcasting as
+     *  0/near. [sourceId] is whoever's actually reporting this — see [record]. */
+    fun considerNeighborReport(groupId: String, target: String, neighborHop: Int, sourceId: String) {
+        if (neighborHop >= MeshProtocol.UNKNOWN_HOP) return
+        val candidate = (neighborHop + 1).coerceAtMost(MeshProtocol.UNKNOWN_HOP - 1)
+        record(groupId, target, candidate, sourceId)
+    }
+
+    /** Set my own hop value directly (not "neighbor + 1") — used when I can derive my true
+     *  distance from something other than a live neighbor report, e.g. TTL consumed by a
+     *  relayed SOS packet. See [record]. */
+    fun considerDirectHop(groupId: String, target: String, hopValue: Int, sourceId: String) {
+        if (hopValue < 0 || hopValue >= MeshProtocol.UNKNOWN_HOP) return
+        record(groupId, target, hopValue, sourceId)
+    }
+
+    /** [sourceId]'s own current claim for the distance to [target] in [groupId] — always
+     *  overwritten, never gated on "improves" or "owns": each source's report is independent and
+     *  ages out on its own [effectiveStaleMs] window, so [myHop] (the minimum across whichever
+     *  sources are currently fresh) rises again on its own once the source that was reporting the
+     *  best value stops being heard from — no explicit downgrade or ownership handoff needed. */
+    private fun record(groupId: String, target: String, hop: Int, sourceId: String) {
+        reports[SourceKey(groupId, target, sourceId)] = Report(hop, now())
+        refreshSnapshot(groupId, target)
+    }
+
+    fun markSosOrigin(groupId: String, sosId: String) {
+        record(groupId, sosId, 0, sourceId = "self")
+    }
+
+    /** CR-6 (`PLAN-v2.md` Part 10, 2026-08-09) — [reports]/[_snapshot] grow with every distinct
+     *  source that's ever reported, and nothing removed an entry on its own; [myHop]/[bestActiveSos]
+     *  only ever FILTERED by staleness at read time. Call periodically (same cadence as
+     *  [org.offlinemesh.app.data.GroupRepository.expireGroups]/`RelayEngine.pruneExpired`, see
+     *  `MeshService.startPruning`) to actually evict what reads already treat as gone, mirroring
+     *  [PositionTracker]'s own filter-at-read-plus-prune-on-schedule shape. */
     fun pruneStale() {
         val nowMs = now()
-        val staleKeys = table.keys.filter { key ->
-            val ts = lastUpdated[key] ?: return@filter true
-            val hop = table[key] ?: return@filter true
-            nowMs - ts > effectiveStaleMs(staleMs, hop)
-        }
-        removeKeys(staleKeys)
+        val staleKeys = reports.entries
+            .filter { (_, r) -> nowMs - r.updatedAt > effectiveStaleMs(staleMs, r.hop) }
+            .map { it.key }
+        if (staleKeys.isEmpty()) return
+        val affected = staleKeys.map { Key(it.groupId, it.target) }.toSet()
+        staleKeys.forEach { reports.remove(it) }
+        affected.forEach { refreshSnapshot(it.groupId, it.target) }
     }
 
     /** Call when a group is dismantled — same "in-memory state Room-layer deletion can't reach on
      *  its own" reasoning [PositionTracker.clearForGroup]/[BroadcastSosPreview.clearForGroup]
-     *  already establish for the identical gap (decision 30, `docs/DECISIONS.md`); this class was
-     *  simply missed in that pass (CR-6, `PLAN-v2.md` Part 10). Without this, a dismantled group's
-     *  hop entries (presence AND every alert-flagged SOS it ever tracked) persist until
-     *  [pruneStale] eventually ages them out, up to [effectiveStaleMs]'s own window. */
+     *  already establish for the identical gap. Without this, a dismantled group's hop entries
+     *  (presence AND every alert-flagged SOS it ever tracked) persist until [pruneStale] eventually
+     *  ages them out, up to [effectiveStaleMs]'s own window. */
     fun clearForGroup(groupId: String) {
-        removeKeys(table.keys.filter { it.groupId == groupId })
+        reports.keys.filter { it.groupId == groupId }.forEach { reports.remove(it) }
+        _snapshot.update { it.filterKeys { key -> key.groupId != groupId } }
     }
 
     /** Periodic safety net alongside [clearForGroup]'s immediate per-group clear — same shape and
@@ -425,112 +476,30 @@ class HopTracker(private val now: () -> Long = System::currentTimeMillis) {
      *  automatic expiry and any other dismantle path without needing every caller to remember this
      *  table exists. */
     fun pruneOrphaned(activeGroupIds: Set<String>) {
-        removeKeys(table.keys.filter { it.groupId !in activeGroupIds })
-    }
-
-    private fun removeKeys(keys: List<Key>) {
-        if (keys.isEmpty()) return
-        for (key in keys) {
-            table.remove(key)
-            lastUpdated.remove(key)
-            lastSource.remove(key)
-        }
-        _snapshot.update { it - keys.toSet() }
-    }
-
-    fun myHop(groupId: String, target: String): Int {
-        val key = Key(groupId, target)
-        val ts = lastUpdated[key] ?: return MeshProtocol.UNKNOWN_HOP
-        val hop = table[key] ?: return MeshProtocol.UNKNOWN_HOP
-        if (now() - ts > effectiveStaleMs(staleMs, hop)) return MeshProtocol.UNKNOWN_HOP
-        return hop
-    }
-
-    /** A direct BLE neighbor is by definition 1 hop away for whatever they're broadcasting as 0/near.
-     *  [sourceId] is whoever's actually reporting this (a peer/connection address) — see
-     *  [updateHop]'s doc for what it's used for. */
-    fun considerNeighborReport(groupId: String, target: String, neighborHop: Int, sourceId: String) {
-        if (neighborHop >= MeshProtocol.UNKNOWN_HOP) return
-        val candidate = (neighborHop + 1).coerceAtMost(MeshProtocol.UNKNOWN_HOP - 1)
-        updateHop(groupId, target, candidate, sourceId)
-    }
-
-    /** Set my own hop value directly (not "neighbor + 1") — used when I can derive my true
-     *  distance from something other than a live neighbor report, e.g. TTL consumed by a
-     *  relayed SOS packet. See [updateHop] for the acceptance rule. */
-    fun considerDirectHop(groupId: String, target: String, hopValue: Int, sourceId: String) {
-        if (hopValue < 0 || hopValue >= MeshProtocol.UNKNOWN_HOP) return
-        updateHop(groupId, target, hopValue, sourceId)
-    }
-
-    /** Shared acceptance rule for both public update methods above.
-     *
-     *  A report that IMPROVES the currently tracked hop is always accepted, from any source —
-     *  ordinary distance-vector relaxation. A report that does NOT improve it is only accepted
-     *  (replacing the value, possibly upward — i.e. genuinely worse) when it comes from the SAME
-     *  source that established the current value: that source is re-asserting its own route got
-     *  worse or vanished, which a strictly-better-only rule would otherwise ignore forever — once
-     *  a key was recorded at hop 1, it stayed "1 hop away" no matter how stale or wrong, as long as
-     *  *anything* kept refreshing recency (which every call here already did, on every report). A
-     *  worse report from a DIFFERENT, non-owning source is never allowed to downgrade an existing
-     *  better-known route — it has no basis to override what the owning source itself last said.
-     *  Recency always refreshes regardless of acceptance, so a stable, unchanged route doesn't go
-     *  stale purely from a lack of new reports. */
-    private fun updateHop(groupId: String, target: String, candidate: Int, sourceId: String) {
-        val key = Key(groupId, target)
-        val current = myHop(groupId, target)
-        val ownedBySameSource = lastSource[key] == sourceId
-        val accept = candidate < current || (ownedBySameSource && candidate != current)
-        val confirmsCurrent = candidate == current
-        if (accept) {
-            table[key] = candidate
-            lastSource[key] = sourceId
-            lastUpdated[key] = now()
-            _snapshot.update { it + (key to candidate) }
-        } else if (confirmsCurrent) {
-            // Someone still sees the same distance, so the route is real — refresh it, and let
-            // ownership follow whoever confirmed it. That second part matters: [lastSource] is a BLE
-            // address, which rotates every ~10-15 minutes, so without transfer-on-confirm the
-            // ownership needed to later revise a value UPWARD gets permanently stranded on an
-            // address that no longer exists.
-            lastSource[key] = sourceId
-            lastUpdated[key] = now()
-        }
-        // Otherwise: a WORSE reading from a source that doesn't own this route. Neither the value
-        // nor the recency is touched — and the recency part was a real, live-confirmed bug. Every
-        // report used to refresh recency, including rejected ones, so once a group had ever recorded
-        // "1 hop" ANY later traffic for it (including a 3-hop relayed frame from a stranger) kept
-        // that 1 alive forever: the staleness window could never fire and the reading could never
-        // degrade. That is why the group row sat at "1 hop(s) away" through every build and never
-        // reached 2 or "no one nearby" — the relay was working, the display value was frozen.
-    }
-
-    fun markSosOrigin(groupId: String, sosId: String) {
-        val key = Key(groupId, sosId)
-        table[key] = 0
-        lastSource[key] = "self"
-        lastUpdated[key] = now()
-        _snapshot.update { it + (key to 0) }
+        reports.keys.filter { it.groupId !in activeGroupIds }.forEach { reports.remove(it) }
+        _snapshot.update { it.filterKeys { key -> key.groupId in activeGroupIds } }
     }
 
     /** The nearest currently-*fresh* SOS tracked for a group (excludes PRESENCE) — its real sosId
-     *  alongside its hop distance, expiring old entries the same way [myHop] does for presence.
-     *  `null` if none is currently fresh. Split out from [bestActiveSosHop] (decision 28,
-     *  `docs/DECISIONS.md`) so a caller that needs to name WHICH SOS is nearest — not just how near
-     *  — doesn't have to re-derive it from the raw table itself: `BeaconRadio`'s Tier B SOS
-     *  hop-gradient broadcast needs the id specifically so it can feed a receiver's
-     *  [considerNeighborReport] with the SAME real per-SOS key GATT flood-forward already uses,
-     *  rather than a second, id-agnostic aggregate — see [MeshProtocol.encodeBroadcastTierBeacon]'s
+     *  alongside its hop distance (the minimum among that SOS's own currently-fresh sources — same
+     *  per-source aging [myHop] uses). `null` if none is currently fresh. Split out from
+     *  [bestActiveSosHop] (decision 28, `docs/DECISIONS.md`) so a caller that needs to name WHICH
+     *  SOS is nearest — not just how near — doesn't have to re-derive it from the raw table itself:
+     *  `BeaconRadio`'s Tier B SOS hop-gradient broadcast needs the id specifically so it can feed a
+     *  receiver's [considerNeighborReport] with the SAME real per-SOS key GATT flood-forward already
+     *  uses, rather than a second, id-agnostic aggregate — see [MeshProtocol.encodeBroadcastTierBeacon]'s
      *  `activeSos` doc for why that distinction is the whole point (a prior, now-removed mechanism
      *  mixed a rough aggregate with this exact tracking and let a stale rough reading leak through). */
     fun bestActiveSos(groupId: String): Pair<String, Int>? {
         val nowMs = now()
-        return table.entries
+        return reports.entries
             .asSequence()
             .filter { it.key.groupId == groupId && it.key.target != "PRESENCE" }
-            .filter { (key, hop) -> nowMs - (lastUpdated[key] ?: 0L) <= effectiveStaleMs(staleMs, hop) }
+            .filter { (_, r) -> nowMs - r.updatedAt <= effectiveStaleMs(staleMs, r.hop) }
+            .groupBy({ it.key.target }) { it.value.hop }
+            .mapValues { (_, hops) -> hops.min() }
             .minByOrNull { it.value }
-            ?.let { it.key.target to it.value }
+            ?.toPair()
     }
 
     /** Minimum hop distance among currently-*fresh* SOS trackers for a group — i.e. "how far to the

@@ -11,12 +11,11 @@ import org.junit.Test
  * display; a synthetic sequence test like the ones below pins down the exact expected numbers
  * instead of relying on live 2-phone hand-tracing.
  *
- * Also covers route invalidation: a value only ever got BETTER, forever, even after the route that
- * produced it was long gone, as long as *anything* kept refreshing recency — every update call did
- * that regardless of whether it improved the tracked value. Fixed by tracking which source "owns"
- * the current value (see [HopTracker]'s `updateHop`): a worse report from that SAME source now
- * correctly downgrades it (the route it was tracking really did get worse), while a worse report
- * from a DIFFERENT source still can't override an existing better one.
+ * Also covers route invalidation (CR-33, `PLAN-v2.md` Part 10, closed 2026-08-10): [HopTracker] now
+ * keeps one independent report per reporting source, each aging out on its own clock (see
+ * [HopTracker]'s class doc for the two earlier designs and why both froze). `myHop` is the minimum
+ * among whichever sources are still fresh, so a route that vanishes simply stops contributing once
+ * its own source's report goes stale — no ownership handoff, no "confirms" special case.
  */
 class HopTrackerTest {
     private var clock = 0L
@@ -44,9 +43,9 @@ class HopTrackerTest {
     }
 
     @Test
-    fun `a worse neighbor report from the SAME owning source does overwrite the value`() {
+    fun `a worse report from the only source does overwrite the value`() {
         // Route invalidation: peerA's own route genuinely got worse — it should be reflected, not frozen
-        // at its previous best-ever report forever.
+        // at its previous best-ever report forever. peerA's report is simply overwritten each time.
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 3, sourceId = "peerA") // -> 4, same source
@@ -62,11 +61,12 @@ class HopTrackerTest {
     }
 
     @Test
-    fun `after a better source takes over, the original source can no longer downgrade it`() {
+    fun `a worse report from a peer whose earlier better report is still fresh does not win`() {
         val t = tracker()
-        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 5, sourceId = "peerA") // -> 6, peerA owns it
-        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerB") // -> 1, peerB now owns it
-        // peerA no longer owns the value — rejected
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 5, sourceId = "peerA") // -> 6
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerB") // -> 1
+        // peerA reports worse again — overwrites peerA's OWN entry (6), but peerB's fresher, better
+        // entry (1) is untouched and still the minimum.
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 5, sourceId = "peerA")
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
     }
@@ -77,11 +77,10 @@ class HopTrackerTest {
         // Tier B presence handling used to call considerNeighborReport TWICE per received beacon —
         // once for direct hearing (candidate 1), once for the broadcaster's own propagated distance
         // (candidate 3, say) — with the SAME sourceId both times, because both numbers describe the
-        // same physical neighbor. The FIRST call claims ownership for that source; the SECOND call's
-        // "the owning source can revise its own value" rule (meant for a source reporting a genuine
-        // change over TIME) fires immediately instead, since it can't tell "this source, later" apart
-        // from "this call's own sibling call, a moment ago" — so a worse reading silently wins. This
-        // test pins the bug down at the HopTracker level; BeaconRadio no longer calls it this way.
+        // same physical neighbor. A single source's report is always overwritten by its latest call,
+        // so calling twice in one event still lets a worse reading silently win — this is why
+        // BeaconRadio merges both candidates into ONE considerDirectHop call instead (see the next
+        // test), not something HopTracker itself is meant to guard against.
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // direct: candidate=1
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "peerA") // propagated: candidate=3
@@ -273,14 +272,12 @@ class HopTrackerTest {
         assertEquals(2, t.bestActiveSosHop("group-1"))
     }
 
-    // ---------- recency must not be refreshed by rejected reports ----------
+    // ---------- each source ages out independently, on its own clock ----------
 
     @Test
-    fun `a worse report from a non-owning source does not keep a stale reading alive`() {
-        // The live-confirmed freeze: every report used to refresh recency, including rejected ones.
-        // Once a group recorded "1 hop", any later traffic — even a 3-hop relayed frame from a
-        // stranger — kept that 1 fresh forever, so the window never fired and the reading never
-        // degraded. This is why the group row sat at "1 hop(s) away" through build after build.
+    fun `a worse report from another source does not keep a vanished route's reading alive`() {
+        // The live-confirmed freeze this design closes: peerA's "1" must age out on ITS OWN silence,
+        // not get artificially kept fresh by unrelated traffic from someone else.
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
         // peerA is gone. Only worse reports keep arriving, from someone else.
@@ -288,34 +285,34 @@ class HopTrackerTest {
             clock += 40_000
             t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 3, sourceId = "peerB") // -> 4
         }
-        // With the bug, peerA's "1" was kept permanently fresh by peerB's rejected reports and the
-        // reading stayed 1 forever. Correctly, peerA's reading ages out and reality takes over.
+        // peerA's own entry is now 200s stale (> 180s window) and excluded; peerB's is fresh at 4.
         assertEquals(4, t.myHop("group-1", "PRESENCE"))
     }
 
     @Test
-    fun `a report confirming the current value does refresh recency`() {
-        // The legitimate steady state: the route is still real, someone still sees it at that
-        // distance, so it must not age out.
+    fun `a source that keeps reporting the same value stays fresh`() {
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1
         repeat(5) {
             clock += 40_000
-            t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1, confirms
+            t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "peerA") // -> 1, refreshes
         }
         assertEquals(1, t.myHop("group-1", "PRESENCE"))
     }
 
     @Test
-    fun `ownership follows whoever confirms the value, so a rotated address cannot strand it`() {
-        // lastSource is a BLE address and those rotate every ~10-15 min. Without transfer-on-confirm
-        // the ownership needed to revise a value UPWARD is stranded on an address that no longer
-        // exists, and the reading can never degrade again.
+    fun `a rotated BLE address is a new, independent source, so a stale old one only lingers up to its own window`() {
+        // BLE addresses rotate every ~10-15 min; considerNeighborReport/considerDirectHop's sourceId
+        // is often such an address. There's no cross-address identity link here (that's
+        // PeerIdentityResolver's job elsewhere, not this class's), so "oldAddr"'s reading persists
+        // until IT ages out on its own — self-healing within one staleness window, not permanent.
         val t = tracker()
         t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "oldAddr") // -> 1
-        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 0, sourceId = "newAddr") // confirms, takes over
-        // Same peer, new address, now genuinely further away — must be able to revise upward.
-        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "newAddr")
+        // Same physical peer, rotated to a new address, genuinely now farther away.
+        t.considerNeighborReport("group-1", "PRESENCE", neighborHop = 2, sourceId = "newAddr") // -> 3
+        // oldAddr's stale "1" is still within its own window — still the minimum, by design.
+        assertEquals(1, t.myHop("group-1", "PRESENCE"))
+        clock += 180_001 // oldAddr's entry (hop=1) ages out; newAddr's (hop=3) does not yet
         assertEquals(3, t.myHop("group-1", "PRESENCE"))
     }
 
