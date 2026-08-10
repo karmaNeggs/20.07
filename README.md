@@ -201,10 +201,15 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 ## Security model
 
 - **Confidentiality**: GPS positions, evidence photo bytes, and SOS message text are sealed with
-  **AES-256-GCM** under the group's random 256-bit key before they ever go on the wire — a phone
-  relaying them without the key sees only opaque ciphertext. The GCM tag itself is the
-  authentication for these three (a failed decrypt IS the auth failure — there's no separate mac
-  to forge or check).
+  **AES-256-GCM** under a key derived from the group's random 256-bit root key (`HKDF-SHA256`,
+  re-derived every 24h — domain-separated from the rotating wire handle below, and bounding one
+  independently-leaked key to ~24h of exposure instead of the group's whole life) before they ever
+  go on the wire — a phone relaying them without the root key sees only opaque ciphertext. The GCM
+  tag itself is the authentication for these three (a failed decrypt IS the auth failure — there's
+  no separate mac to forge or check). This does **not** provide forward secrecy — the root key
+  itself must stay retained for as long as the group exists (re-sharing the invite code needs it),
+  so any non-interactive key derived from it is exactly as forward-secret as the root key's own
+  confidentiality; see `docs/DECISIONS.md` decision 39 for the full reasoning.
 - **Authenticity**: evidence headers, nicknames, and presence heartbeats (none of which carry
   confidential content) carry a truncated **HMAC-SHA256** (128-bit) tag under the group key
   instead of a full seal. A phone without the key can relay these but cannot forge one a real
@@ -267,7 +272,8 @@ where it matters:
   on real devices, not in a compiler.
 - **Two phones minimum to see anything work.** Discovery, navigation, and relay need at least
   two devices in the same group, physically near each other.
-- **Only hardware-tested at small scale so far (2-3 physical phones, four separate live rounds).**
+- **Only hardware-tested at small scale so far (2-3 physical phones, many live rounds since —
+  see `CHANGELOG.md` for the full history).**
   The actual operating envelope is a small group (3-8 people) whose *carrier medium* — the total
   local population of app users acting as blind relays, per "Every phone relays for every group"
   above — can vary from a couple of people to hundreds (`PLAN-v2.md` §5.5). The high end of that
@@ -322,18 +328,21 @@ where it matters:
   still goes through the existing GATT relay path, unaffected. Capability-gated and purely additive
   — on unsupported hardware, or if anything about it misbehaves, it's a silent no-op that can't
   affect the proven legacy discovery path.
-- **Delivery is now a forwarding protocol, not just a sync protocol — hardware-confirmed across
-  four live rounds (2026-08-05), one real gap still open.** SOS floods immediately across every
-  open link the moment it's created or received, and links now stay open for minutes instead of
-  seconds (`docs/DECISIONS.md` decisions 18-19) — closing the "a message between two already-
-  connected phones sat delayed" and "the radar went stale for a link's whole life" bugs the first
-  live test found (decision 20), a duplicate-connection radio-waste bug the second round found
-  (decision 21), and a Bluetooth off→on recovery gap the third/fourth rounds found (decision 22).
-  **Not yet done: a sustained multi-hour 3-phone session** — all four rounds so far were short
-  (tens of minutes) ad hoc tests, and PLAN-v2.md's P3 phase explicitly calls for a longer one
-  before this is fully trusted. Evidence headers and nicknames still move only via the one-shot
-  connect-time sync (the Bloom-filter catalog exchange), the same gap SOS itself had before this
-  round of fixes — smaller blast radius, deliberately not yet closed.
+- **Delivery is a forwarding protocol, not just a sync protocol — hardware-confirmed across many
+  live rounds since, most recently a real ~1-hour multi-phone session (2026-08-10) that included
+  mid-session group deletes/rejoins, a sender/receiver role swap, and an app uninstall on a relay
+  phone.** SOS floods immediately across every open link the moment it's created or received, and
+  links stay open for minutes instead of seconds (`docs/DECISIONS.md` decisions 18-19). Two real
+  gaps found by live rounds since the original four are now closed: SOS/evidence-header/nickname
+  delivery used to silently stop once a link had been open for a few minutes, because the catalog
+  exchange those depend on was only ever sent once per connection (decision 59, fixed by folding it
+  into the same periodic refresh presence/position already used); and hop count could read higher
+  than the mesh's real topology because a distance-vector loop guard compared raw, rotating BLE
+  addresses instead of stable peer identity (decision 59, fixed). One thing intentionally NOT fixed
+  yet: a group row's "N hop(s) away" reading can still read stale for up to one staleness window
+  (up to several minutes) after a member walks out of range, tracked as its own item and rebuilt
+  (decision 60) but **not yet hardware-confirmed** — the fix needs a round that walks a phone
+  genuinely far away for a sustained period to prove the number actually rises.
 - **A peer with only a low-accuracy GPS fix doesn't show up on the radar at all, with no
   on-screen explanation why.** `placePeerOnRadar` deliberately refuses to plot a dot when your
   accuracy plus theirs exceeds ~250m combined, rather than show a confidently-wrong position —
@@ -355,23 +364,11 @@ where it matters:
   that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
-- **Automated test coverage is logic-only.** 367 pure-JVM/Robolectric unit tests cover crypto,
+- **Automated test coverage is logic-only.** 525 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
   of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
   relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI
   pipeline — both are manual/planned, not built.
-- **The WiFi Direct evidence accelerator is experimental, opt-in (default OFF), and
-  compile-verified only — the least-trusted thing in this codebase.** Turned on from the Home
-  screen (own toggle, separate from the disguise/power-saver tiles, with its own permission
-  prompt), it lets two phones that already share a group key move a *large* evidence deficit over
-  a faster ephemeral WiFi Direct link instead of BLE — SOS, position, presence, and normal-size
-  evidence always stay BLE-only regardless of this setting, and any WFD failure falls back to the
-  existing BLE chunk push silently and completely. The single biggest unverified risk:
-  `WifiP2pManager.connect()` is widely reported (Android developer community, not confirmed on
-  any device here) to sometimes trigger a system "Invitation to connect" dialog on the *other*
-  phone — which would visibly break both phones' disguise the moment it fires. This is the first
-  thing to check on a real 2-phone test with the toggle on; until then, treat it as unverified and
-  leave it off for anything real.
 
 See [`TESTING.md`](TESTING.md) for how the test suite is organized, and
 [`test_rubric.md`](test_rubric.md) for the manual, physical-device test plan real bugs in this
@@ -380,20 +377,33 @@ compiler or an emulator).
 
 ## Roadmap
 
-Full plan and reasoning in [`PLAN-v2.md`](PLAN-v2.md). Shipped so far: the crowd-scale simulator,
-peer identity keyed on a stable id instead of the rotating BLE address, immediate SOS flood-
-forwarding, and persistent connections (see Known Limitations above for hardware-confirmed status).
-**Next, planned but not started: a connectionless broadcast tier** using BLE Extended Advertising —
-presence/position/SOS/hop-gradient reaching every phone in range at once with no connection at all,
-governed by a Trickle-style (RFC 6206) suppression timer so it doesn't spam a crowd once redundancy
-is established. Deliberately not started on the device yet — the persistent-connections work above
-needs its sustained multi-hour hardware session first, so a new failure mode isn't stacked on an
-unconfirmed one.
+Full plan and reasoning in [`PLAN-v2.md`](PLAN-v2.md); every version's actual changes in
+[`CHANGELOG.md`](CHANGELOG.md). Shipped and code-complete: the crowd-scale simulator and stable
+per-group peer identity (P0), immediate flood-forwarding and persistent connections (P1/P3), a
+connectionless broadcast tier over BLE Extended Advertising for presence/position/SOS reaching
+every phone in range at once with no connection needed, governed by a Trickle-style (RFC 6206)
+suppression timer (P2 — see Known Limitations above for its hardware-confirmed status), courier
+handoff for bridging a physical gap the mesh can't currently reach across (P4), thumbnail-first
+evidence sharing with fountain-coded chunk transfer so any combination of helpful nearby phones
+speeds up a download instead of slowing it down, plus an optional faster BLE L2CAP bulk pipe (P5),
+and further privacy hardening — per-group (not per-device) sender identity, an epoch-rotating
+content-sealing key, and fixed-size frame padding so message length itself doesn't leak message
+type (P6).
+
+**In progress: an optional bridge to bitchat's own mesh (P7).** Off by default. A proof-of-concept
+packet encoder and one-shot BLE write probe have been tested against a real bitchat install — some
+writes succeed, confirming a real bitchat node's GATT will accept a well-formed packet from a
+sender it's never seen, which is the first of two things this needs to be provably safe. The actual
+listener/injector bridge (and confirming an actual multi-hop relay, not just one accepted packet)
+isn't built yet.
+
+**Also open:** a group's "N hop(s) away" reading was recently rebuilt to stop freezing on a stale
+value (see Known Limitations above) but hasn't had its own dedicated hardware round yet.
 
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.7.5-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.7.25-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain

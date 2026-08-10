@@ -1,5 +1,221 @@
 # Changelog
 
+## [0.7.25-dev] — `HopTracker` rebuilt around per-source aging, closing the "always 1 hop away" freeze
+
+Decision 60 (`docs/DECISIONS.md`), CR-33. The old design kept one ownership-gated value per group:
+a report could only make it WORSE if it came from the exact source that established it, so in a
+redundant multi-member mesh, any OTHER source merely confirming the old value kept it alive
+indefinitely — a group row could sit at "1 hop away" long after that member had genuinely walked
+out of range, live-confirmed by watching it happen. Replaced with one independent report per
+reporting source, each aging out on its own clock; the displayed hop is simply the minimum among
+whichever sources are currently fresh — distance to the nearest reachable member, with nothing left
+to freeze. No fresh source now reads as "no one nearby" rather than falling back to a stale value.
+One accepted, bounded tradeoff: `BeaconRadio`'s two BLE-address-keyed call sites can show a stale
+reading for up to one staleness window after an address rotation, instead of the old design's
+instant handoff for that case.
+
+525 tests (`HopTrackerTest` rewritten alongside the class, 35 tests), detekt clean, both variants
+green. **Not yet hardware-tested** — needs a round that walks a phone far enough away, for long
+enough, to watch the number actually rise.
+
+## [0.7.24-dev] — Round 2 hardware findings: catalog-filter refresh gap and split-horizon MAC-rotation gap, both fixed
+
+Decision 59. The second live round (against the build that fixed v0.7.23-dev's regression)
+confirmed comms and radar both work, and surfaced two real protocol bugs. SOS/evidence/nickname
+delivery silently stopped roughly 3 minutes into a session, on all three phones: the catalog filter
+— the only thing that kind of delivery is reactive to — was sent exactly once, at connect; fixed by
+folding it into the periodic presence/position refresh that already ran on every open link. Hop
+count reached 3-4 in a 3-phone mesh, which should be topologically impossible: split-horizon
+compared raw, rotation-prone BLE addresses instead of resolved peer identity, silently breaking
+every time an address rotated; fixed via `PeerIdentityResolver.resolve()` on both sides of the
+comparison. A third finding from this round — the hop-count freeze — was diagnosed but deliberately
+deferred, becoming CR-33 (v0.7.25-dev, above).
+
+525 tests, detekt clean, both variants green.
+
+## [0.7.23-dev] — Live regression: CR-13's `ScanFilter` broke discovery outright, reverted
+
+Decision 58. The first live hardware round (3 phones) against v0.7.22-dev showed total discovery
+failure — zero open links for the entire session, every SOS blocked with "no open links." Root
+cause, found from the exported diagnostics alone: this app's beacon advertises via
+`addServiceData`, never `addServiceUuid`, and `ScanFilter.setServiceUuid()` structurally cannot
+match a `ServiceData` advertisement — a deterministic mismatch on every device, not chipset
+flakiness. The identical bug existed in Tier B's own scan filter since the day it shipped, never
+caught because Tier B carried its own separate "not device-tested" caveat. Both filters reverted to
+the unfiltered, software-matching scan that was live-tested working across four prior rounds. Cost:
+the crowd-scale battery optimization this filter was meant to provide (matching in the radio chip
+instead of app code) is undone until a properly pre-verified filter type replaces it.
+
+525 tests (unaffected — this is Android BLE advertising-data semantics, entirely outside what
+Robolectric/JVM tests can exercise).
+
+## [0.7.22-dev] — Tracked tier (CR-21..30) closed out
+
+Decision 57. Second pass over the full-codebase review's remaining findings, user-directed. Two
+product decisions: shake-to-panic-delete cut from scope entirely (it was never built or even
+scoped, despite being in the original brief); reassembled evidence staying plaintext at rest closed
+as working-as-intended, not a bug (the actual goal is redundancy against single-device loss, and
+encrypting it would work against that for no compensating benefit). Five more findings fixed
+(fountain-decoder cost bounded by capping `MAX_EVIDENCE_CHUNKS` 4096→1024, `JoinCode` expiry
+widened past a Y2038-class overflow, three smaller correctness fixes), one shipped partially
+(connection-degree logging landed, its threshold re-derivation waits on real round data), one left
+alone deliberately (already gated on its own hardware-evidence condition), one closed as a
+meta-observation with nothing separately actionable.
+
+525 tests.
+
+## [0.7.21-dev] — Pre-hardware-round fix pass: 20 findings from a full-codebase review
+
+Decision 56. A full read-through of the app's ~13.4k lines looking for redundant code, regressions,
+bugs, memory leaks, and over-engineering, ahead of a device-test round. 30 findings total, 20
+shipped this pass. Most consequential: Tier B's SOS content-preview MAC length had silently drifted
+to 32 bytes against the real 16-byte tag, meaning the preview had never once transmitted correctly
+in production — and the test suite encoded the bug as its own passing case; frame padding's
+256-byte floor could silently break a GATT write below MTU 259; group deletion never cleaned up
+that group's courier envelopes, letting them keep circulating for up to 24 hours after the group
+was gone; a hardware scan filter had been applied to Tier B's scan but never to the legacy scan
+that actually feeds connection attempts — the exact gap v0.7.23-dev's regression came from. Also
+fixed unbounded in-memory growth in three of the mesh's own tracking tables.
+
+525 tests (15 new), detekt clean, both variants green. **Not yet hardware-confirmed** at this point.
+
+## [0.7.20-dev] — P7 spike tooling: bitchat packet encoder + BLE injector
+
+Decision 55. First concrete step toward an optional, off-by-default bridge to bitchat's own mesh
+(Part 7 of the scaling plan). New, deliberately isolated package that nothing in the real mesh
+touches: a pure, unit-tested encoder matching bitchat's own wire format, and a debug-only BLE
+transport that finds a real bitchat node and writes one forged, unsigned packet with a random
+marker. A clean write confirms the first half of P7's hard dependency — that an unmodified bitchat
+install's peripheral GATT accepts a well-formed packet from a sender it's never seen before. It does
+not, by itself, confirm multi-hop relay.
+
+510 tests (5 new).
+
+## [0.7.19-dev] — `senderId` de-globalized: fixes a cross-group correlation leak
+
+Decisions 53-54. `senderId` — the identity string every presence/position broadcast carries in
+cleartext — used to be exactly one random id shared across every group a device belongs to. Any
+member of two overlapping groups, or a passive listener watching both, could correlate a device's
+presence across them. Now derived per (device, group) from the same already-persisted keypair
+(`sha256Hex(publicKey).take(16)`) — no new key material, purely a computed value, all 12 call sites
+updated. Real one-time cost on upgrade: existing peers see a "new" sender once.
+
+505 tests (unchanged).
+
+## [0.7.18-dev] — L2CAP bulk-pipe padding, plus four follow-ups from the first hardware round
+
+Decision 52. The first hardware round since v0.7.17-dev confirmed the blind-relay pillar and the
+L2CAP bulk pipe both work on real hardware — 3 phones, one deleted its own group mid-session and
+correctly kept carrying the other two members' traffic as a blind, non-decrypting carrier. Traced
+that round's SOS/presence delays (17-113 seconds) to a real, previously-undocumented property of
+the design rather than a bug: blind/opaque custody only propagates at the next connection cycle,
+not immediately the way member traffic does. Shipped: the L2CAP bulk pipe's frames now get the same
+size-bucket padding GATT writes already had.
+
+505 tests (unchanged).
+
+## [0.7.17-dev] — Diagnostics logging widened ahead of the device-test round
+
+Decision 50. Added event-log coverage for the L2CAP path, the catch-all incoming-frame handler, and
+reject/error cases, plus message-level hop tracing — so an exported log from a live round could
+actually explain a failure instead of only confirming one happened. No behavior change.
+
+505 tests (unchanged).
+
+## [0.7.16-dev] — Wi-Fi Direct removed outright
+
+Decision 49. Closes out P5. The experimental Wi-Fi Direct evidence accelerator (opt-in, always
+default off) is deleted entirely — every transport file, its settings screen, its own test files,
+its wire frame types, the Home-screen toggle, and its manifest permissions. `WifiP2pManager.connect()`
+is widely reported to trigger a system "Invitation to connect" dialog on the *other* phone, which
+would have visibly defeated this app's own disguise feature the moment it fired — not an acceptable
+risk for a feature whose only benefit (faster large-evidence transfer) the L2CAP bulk pipe and
+fountain coding below already substantially cover.
+
+505 tests (down from 522 — Wi-Fi Direct's own tests removed with it). **P5 fully code-complete.**
+
+## [0.7.15-dev] — BLE L2CAP CoC bulk pipe, additive
+
+Decision 48. A proper two-way socket (SDK-gated, API 29+) for large transfers on phones that
+support it, instead of one-message-at-a-time GATT writes. Purely additive — nothing existing
+depends on it yet. **Not device-tested**: Robolectric's own L2CAP channel listener is a
+non-functional stub, so this is compile- and unit-test-verified only until a real round.
+
+19 new tests.
+
+## [0.7.14-dev] — Fountain coding wired in; P5's chunking rework is code-complete
+
+Decision 47. Replaces the old numbered-chunk-plus-manifest-plus-have-bitset system outright with
+the fountain-code primitive from v0.7.13-dev: any sufficient combination of received symbols, from
+any combination of nearby phones, reconstructs the file — so more helpful phones nearby means
+faster download, not slower, the opposite of the old scheme.
+
+511 tests.
+
+## [0.7.13-dev] — Fountain-code encode/decode primitive
+
+Decision 46. New, construction-only fountain code: systematic random-linear encoding with
+Gaussian-elimination decoding. Rejected both an existing open-source library (unmaintained) and a
+full RFC 6330 implementation as more than this app needs; switched from a robust-soliton degree
+distribution to dense random coefficients after measuring a real 1.3-2.6x overhead difference
+between the two at this app's typical evidence-photo sizes. No production call sites yet.
+
+497 tests (15 new).
+
+## [0.7.12-dev] — Thumbnail-first, full-resolution pulled on demand
+
+Decision 45. P5's first slice. Previously every phone that could relay an evidence photo got the
+entire multi-MB file pushed to it, wanted or not. Now a small thumbnail plus a "full photo
+available" tag goes out to everyone first, and the full file only moves to a phone that actually
+requests it — a multi-MB-to-under-100KB win for anyone who doesn't. The thumbnail itself is sealed
+with AES-GCM under the content-epoch key.
+
+482 tests.
+
+## [0.7.11-dev] — Courier handover mechanics; P4 is code-complete
+
+Decision 44. Implements Spray-and-Wait: a courier splits its remaining copy count with whoever it
+hands part of its load to (conservation-property tested — copies never appear or vanish across a
+split), rate-limited to one handover attempt per envelope per ten minutes so a crowded connection
+doesn't spray the same envelope at everyone at once. Multi-hop blind-carry of courier content is
+now actually enabled.
+
+462 tests.
+
+## [0.7.10-dev] — GATT wiring for couriers
+
+Decision 43. Couriers get a real wire type and a bounded pool (40 total, 20 reserved per group, so
+one group's courier traffic can't starve another's), plus the handlers to send/receive/hold one
+over an active connection. Still single-hop only — the copy-count field multi-hop spray will use
+exists but is deliberately inert until the next version. **Not yet hardware-confirmed.**
+
+442 tests.
+
+## [0.7.9-dev] — Persisted courier envelope + local creation
+
+Decision 42. Couriers get a real, Room-backed entity and a creation path, with their own 24-hour
+pruning cutoff independent of evidence/SOS's 48-hour one. Storage and lifecycle only — nothing can
+be sent over the wire yet.
+
+416 tests.
+
+## [0.7.8-dev] — Courier tag + envelope seal/open: the crypto, on its own
+
+Decision 41. P4 (couriers — carrying a message across a physical gap the mesh can't currently
+bridge on its own) starts with just the cryptographic primitives, mirroring how SOS content is
+already sealed. Purely additive and unreachable until the slices that follow wire it in.
+
+412 tests.
+
+## [0.7.7-dev] — Frame padding to size buckets; P6 is code-complete
+
+Decision 40. Every GATT frame now pads to one of a small set of fixed size buckets before it goes
+on the wire, so message length alone can't hint at what type of message it is to a passive
+listener. Tier B's own frames are excluded by construction — its advertising budget can't absorb
+even the smallest bucket's floor. Padding bytes are random, not zero-filled.
+
+399 tests. Closes out P6 (decisions 37-40) in full. **Not yet hardware-confirmed.**
+
 ## [0.7.6-dev] — Content-sealing epoch key (P6's third slice)
 
 Decision 39 (`docs/DECISIONS.md`), P6's third slice: seals AES-GCM bodies (SOS/position) and macs

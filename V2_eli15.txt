@@ -105,9 +105,20 @@ P6 — Locking down privacy
   every message to a few fixed sizes so message LENGTH alone can't hint at
   what type of message it is.
 
-P7 — Not started yet
+P7 — First real-world test done, the bridge itself not built yet
   An OPTIONAL bridge to talk to the "bitchat" app's own network too (see
   below), so our users can also reach bitchat users nearby. Off by default.
+  Before writing any of the real bridge, we needed to know one thing: would
+  a real, unmodified bitchat app on someone else's phone even accept a
+  message crafted by our app, with no handshake? We built a small one-button
+  test tool and tried it against a real bitchat install several times: most
+  attempts failed to connect in time, but a few succeeded and got a clean
+  "accepted" response back. That's a real, if partial, yes — but it only
+  proves the FIRST step (bitchat's phone will take our packet). It does not
+  yet prove the message actually gets relayed further by bitchat's own
+  network, and the actual two-way bridge (listening for incoming messages,
+  not just sending one test packet) isn't built. That's the next piece of
+  real engineering here, not started yet.
 
 WHY WE MADE THE DECISIONS WE MADE
 ------------------------------------
@@ -160,12 +171,20 @@ IMPORTANT PROCESS THINGS
 
 WHERE WE ARE NOW
 -------------------
-All the code for P0 through P6 is done, tested, and built. What's NOT done
-yet:
-  - A real, sustained test with actual phones in actual rooms/distances —
-    the simulator and unit tests can't prove the real Bluetooth radio
-    behaves the way we assumed, especially for this session's newest,
-    riskiest piece (the faster file-transfer pipe, never tried on a real
-    phone yet).
-  - P7, the optional bitchat bridge — intentionally saved for last, after
-    everything else is proven solid on real hardware.
+All the code for P0 through P6 is done, tested, and built. Since this
+document was first written, we've also run several real multi-phone test
+rounds (not just the simulator/unit tests) — including one that found and
+fixed a real regression (a hardware filter change that accidentally broke
+discovery outright on every phone, caught and reverted the same session),
+and a ~1-hour session with 3 phones that included mid-session group
+deletes/rejoins, swapping which phone was sender vs. receiver, and even
+uninstalling the app on one relay phone mid-test to see what happens. What's
+NOT done yet:
+  - One specific display bug just got a real fix (a group's "how many hops
+    away" number could get stuck at an old value and never update even
+    after someone walked far away) but that fix itself hasn't had its own
+    hardware round yet — needs a test that actually walks a phone far away
+    and confirms the number updates correctly.
+  - P7, the optional bitchat bridge — the first real-world proving step
+    (does a real bitchat phone even accept our message?) got a partial yes
+    from live testing; the actual two-way bridge is still not built.

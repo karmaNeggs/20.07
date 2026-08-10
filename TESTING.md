@@ -11,19 +11,22 @@ file is for, and stays manual on purpose.
 ```
 
 Covers: crypto round-trips and tamper detection, every wire frame type's encode→decode identity
-(including malformed/truncated input), the hop-count state machine (with a fake clock, so the
-90-second staleness window is tested in milliseconds), the radar bearing/distance math against known
-coordinate pairs (Robolectric-backed — the one thing here that needs a real
-`android.location.Location.distanceBetween`, not a stub), the join-code round-trip, the
+(including malformed/truncated input), fountain-code encode/decode and its Gaussian-elimination
+decoder, courier handoff's copy-conservation property, the hop-count state machine (with a fake
+clock, so its multi-minute, per-source staleness windows are tested in milliseconds), the radar
+bearing/distance math against known coordinate pairs (Robolectric-backed — the one thing here that
+needs a real `android.location.Location.distanceBetween`, not a stub), the join-code round-trip, the
 Bloom-filter catalog-sync round trip (`RelayResponderTest.kt` — given a peer's filter, correctly
 push what they're missing and skip what they already have), and the state machines that had real,
 live-tested bugs: `ConnectionAttemptTracker` (a connection attempt that never gets a callback must
 eventually become retryable again, not stay stuck forever — see `docs/DECISIONS.md`, decision 5;
-later extended for the epoch-aware cooldown-skip behind the passerby-relay fix).
+later extended for the epoch-aware cooldown-skip behind the passerby-relay fix) and `HopTracker` (a
+tracked hop reading used to be able to freeze indefinitely in a redundant mesh — see decision 60 —
+now rebuilt so each reporting source ages out independently, tested with a fake clock the same way).
 
-203 tests as of [0.3.0], all passing. This is what should catch a broken build *before* you spend
-twenty minutes manually testing it — a crypto or wire-format regression shows up here in seconds,
-not after a confusing live session.
+525 tests, all passing. This is what should catch a broken build *before* you spend twenty minutes
+manually testing it — a crypto or wire-format regression shows up here in seconds, not after a
+confusing live session.
 
 **Static analysis, same idea, same command family:**
 

@@ -153,6 +153,51 @@ known algorithm (RFC 6206), simplified (no "inconsistency resets the interval" b
 timer's one input has no natural "consistent version" to compare against) and applied to a genuine
 sub-problem this project has, not a novel algorithm.
 
+### Fountain coding, and why not the obvious library
+
+Evidence chunk transfer needed a scheme where any sufficient combination of symbols from any
+combination of nearby relaying phones can reconstruct a file — the opposite of the numbered-piece
+system it replaced, where two relays holding different halves of the missing set couldn't combine
+their help. The two obvious off-the-shelf answers were both rejected: an existing open-source
+RaptorQ implementation was unmaintained, and a full RFC 6330 implementation (systematic pre-coding,
+tuned degree tables, standardized packet format) is built for reliable multicast at internet scale,
+far more machinery than a phone-to-phone evidence photo needs. What shipped is a from-scratch
+systematic random-linear fountain code with Gaussian-elimination (GF(2)) decoding — simple enough
+to reason about directly. One design choice was revised after measurement, not guessed: a
+robust-soliton degree distribution (fountain coding's usual choice, tuned for very large block
+counts) was tried first, then dropped for dense random coefficients after measuring 1.3-2.6x more
+real transmission overhead from soliton at this app's actual evidence-photo block sizes — the
+classic tuning only pays off at scales this app doesn't operate at.
+
+### Courier handoff: proving copies can't leak or duplicate across a split
+
+A courier — a phone carrying content it can't currently deliver, hoping to meet someone who can —
+needs to hand off part of its remaining "copy budget" to another courier it meets, so the content
+keeps spreading without either device silently believing it's carrying more or fewer copies than
+actually exist. `CourierHandover.split()` implements Spray-and-Wait's floor/ceil halving (an
+established multi-hop routing technique, not invented here) but the thing actually worth recording
+is what got tested: a property test asserting the conservation invariant directly — for any starting
+copy count, `original.remaining + handedOff.copies` after a split always equals the count before
+it, across the full range of possible values, not just a couple of hand-picked examples. Copy-count
+bugs in spray-style protocols are the kind of thing that looks fine in a two-device manual test and
+then silently drifts wrong after the tenth handoff in a real crowd; testing the invariant itself
+instead of specific input/output pairs is what actually rules that out.
+
+### An epoch key, not the group key, for anything that goes on the wire repeatedly
+
+Position and SOS bodies are sealed under a key *derived* from the group's root key
+(`HKDF-SHA256(rootKey, info=epoch)`, a fresh 24-hour epoch), not the root key directly — despite
+the root key already being a single static secret for the group's whole life either way. The reason
+isn't forward secrecy (it doesn't provide any: the root key itself has to stay retained for as long
+as the group's own invite code needs to keep working, so a non-interactive derivation from it is
+exactly as forward-secret as the root key's own confidentiality — a correction made to this
+project's own earlier planning doc, which had claimed otherwise). What it actually buys is domain
+separation from the rotating wire handle (a different derivation of the same root key, used for a
+different purpose, so the two can never collide) and a bounded blast radius: if one epoch key is
+somehow independently recovered, that exposes roughly 24 hours of traffic, not the group's entire
+multi-day-to-months life. A real, if narrower, security property, for the cost of one deterministic
+HKDF call already computed once per epoch, not once per message.
+
 ## What this document doesn't cover
 
 Deliberately excluded: the crypto/authentication model as a whole (README's Security Model owns
