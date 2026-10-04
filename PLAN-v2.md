@@ -3093,3 +3093,135 @@ monitoring) done; remediation deliberately deferred pending user review of the f
       default here.
 - [ ] Recheck once Play Store release signing happens (decision 62) — resolves the LeakCanary/
       debug-tooling-ships-to-users item on its own, not a separate fix.
+
+
+---
+
+## Part 13 — v3 internet gateway: wire design (2026-10-05, draft for the author's sign-off)
+
+**Status: design only, no code.** Decisions 66 (goal) and 67 (relay spike) are the inputs.
+
+### 13.1 Goal and non-goals
+
+**Goal:** mates in two groups of phones that are out of BLE range of each other can see each other's
+live position (and presence, SOS) if **one opted-in phone in each cluster has any internet**. The
+payload that matters is *finding your mates*. A GPS position is absolute, so a position that
+arrives over the internet is as useful for navigation as one that arrived over BLE.
+
+**Non-goals (v3):** photos/evidence over the internet, general global chat, any server of ours,
+any account, an iOS gateway. Fully offline operation must be byte-for-byte unchanged when no
+gateway exists.
+
+### 13.2 The one hard problem, and the answer
+
+A gateway holds no group keys, so it cannot compute any group's handle. And the frame's own
+`handle` is the 72 h `GATT_GROUP_HANDLE_WINDOW_SECONDS` value, which decision 67 says must not be
+what a relay sees (relays store "ephemeral" events). A keyless gateway also cannot map a frame's 72 h
+handle to the group's 60 s beacon ID.
+
+**Answer: members, who hold the keys, wrap frames for the uplink; the gateway only forwards.**
+
+New frame **`FRAME_UPLINK = 0x20`** (next unused byte; 0x10/0x14/0x19-0x1B stay retired):
+
+| Field | Meaning |
+|---|---|
+| `relayTag` | `rotatingAdvertisementId(groupKey, now, 60 s)`, the same HMAC the BLE beacon already advertises. Cleartext outer field. |
+| `flags` | bit 0 = `fromInternet` (set by a gateway on frames it injects; gateways never re-uplink these) |
+| `inner` | one complete, already-sealed existing frame (`PositionSealed`, `Presence`, `SosSealed`, `Nickname`), padded with the existing GATT padding buckets |
+
+A **member** wraps a frame into `FRAME_UPLINK` only while a gateway is believed present (13.4). It
+adds no new crypto: `inner` is sealed and signed exactly as it is on BLE today.
+
+### 13.3 Gateway behaviour (blind, keyless)
+
+- **Uplink:** accept an `FRAME_UPLINK` from BLE only if its `relayTag` equals a **beacon ID this
+  phone has itself scanned within the last +-1 window**. That proves a real member is advertising
+  nearby, and kills random-tag junk at the door. Then batch per `relayTag` and publish.
+- **Downlink:** subscribe (`#t` filter) to the current and previous window's tags it has observed
+  locally. Events from the relay are unwrapped to `FRAME_UPLINK` frames, `fromInternet` set, and
+  injected into the BLE mesh through the existing path (`RelayResponder.handleIncoming(bytes,
+  "gateway:<relay>", ...)`). Members open them like any other frame.
+- **Loop control:** never uplink `fromInternet` frames; drop events whose id this gateway published;
+  existing dedup caches (`DedupCache`) handle the rest. Two gateways in one cluster just duplicate
+  traffic; jitter the publish (Trickle-style, `TrickleTimer`) and suppress if the same frame is
+  overheard first. Duplicates are harmless, so v3 does not build coordination.
+- **Opt-in and visible:** off by default; persistent "relaying for nearby people" notice; a data cap
+  and a "stop when battery < X%" rule. It runs inside the existing foreground service.
+
+### 13.4 How members know a gateway exists
+
+A gateway advertises one extra bit in its presence heartbeat ("uplink available"). A member that
+sees it (directly or through blind relay) starts wrapping its position/presence in `FRAME_UPLINK`.
+When no gateway has been seen for N minutes, members stop wrapping and the mesh is as in v2.
+(Exact flag location in the presence frame is a codec task; any added field bumps `VERSION`.)
+
+### 13.5 Relay protocol (Nostr, decision 67 rules applied)
+
+- Event kind **22007** (ephemeral range; relays may still store it, so we assume they do).
+- Tags: one `["t", <hex relayTag>]` per group-tag in the batch; `content` = base64 of concatenated
+  `FRAME_UPLINK` frames, <= 32 KB (spike-verified on all working relays). Typical event ~1-3 KB.
+- **One event per tag per 5 s tick at most**, and <= 1 event/s per relay connection overall
+  (decision 67 rule 2; damus bans above that).
+- **3 relays in parallel** from a configurable list with fallback (start: relay.snort.social,
+  nos.lol, nostr.mom, relay.damus.io at low rate). Subscribe on all, dedupe by event id.
+- **Signing:** Nostr needs BIP-340 Schnorr on secp256k1. Plan: a ~60-line **pure-Kotlin BigInteger
+  implementation checked against the official BIP-340 test vectors** (the Python version used in the
+  spike already passes a local verify), at 1 signature/s. This adds **no native dependency**; the
+  alternative (`secp256k1-kmp`) stays as a fallback and would need a Part 12 dependency review.
+- **Key:** one random gateway key per install, rotated daily. It is not derived from any group key
+  (a gateway has none). Accepted risk: reputation-gated relays (offchain.pub) may drop it.
+
+### 13.6 Spam and abuse (answer to the author's question 4)
+
+Layers, cheapest first, all in v3: (1) **local-presence gate**, only tags scanned in a nearby
+beacon are uplinked; (2) +-1 window freshness; (3) per-tag token bucket and a global per-gateway
+cap; (4) known frame types and padded fixed sizes only; (5) members drop anything that fails
+AEAD/signature, so junk reaches only radio time, never the UI. **Parked:** per-frame proof-of-work,
+relay allow-lists, any reputation system.
+
+### 13.7 Privacy statement this design must keep true
+
+A relay learns: the gateway's IP, a rotating gateway pubkey, rotating 60 s tags, event sizes and
+timing. It does **not** learn group names, members, or positions (sealed). A rival who watches one
+tag learns "something is being sent under this 60 s tag", then the tag changes. **Known weakness:**
+because relays may store events, a later compromise of a group key lets someone decrypt stored
+positions from that group's windows. Mitigations: positions already carry a timestamp inside the
+seal and short validity; consider per-window content-epoch keys (decision 39 already has them).
+**New exposure vs v2 that the UI must say plainly:** sharing a live position over the internet
+(even sealed) is a larger threat surface than BLE-only. Proposed: a **per-group toggle "also share
+my position over the internet", default off**, plus the gateway opt-in. (Author to confirm.)
+
+### 13.8 Platform and policy consequences
+
+- The manifest has **no INTERNET permission today**. v3 adds it (a normal install-time permission).
+  README and the privacy page currently say "no internet dependency", which must become "works
+  fully offline; optionally reaches further when a nearby phone shares its internet". Play Data
+  Safety answers must be re-done. Decide before coding whether this ships in the main app or a
+  separate gateway-capable variant.
+- Foreground-service and background-network limits at targetSdk 36 apply to the gateway; they can
+  only be learned on a real phone.
+
+### 13.9 Build order and test plan
+
+| Step | What | Proof |
+|---|---|---|
+| G0 | `FRAME_UPLINK` codec + gateway admission/batching/loop logic, pure Kotlin | JVM unit tests, plus the existing simulator (`sim/`) extended with two clusters and a fake relay |
+| G1 | Kotlin BIP-340 + Nostr client (REQ/EVENT/OK, reconnect, 3-relay fan-out) | BIP-340 official vectors; a replay of the spike's results against real relays |
+| G2 | Wire into `MeshService`/`RelayResponder`; opt-in UI; INTERNET permission | Existing 520 tests stay green; new tests per rule in 13.3 and 13.6 |
+| G3 | Real phones: A+B near each other, C+D elsewhere, one gateway each | The done line below |
+
+### 13.10 Done line for v3 "Gateway pilot" (proposed)
+
+With phones A+B in one BLE cluster and C+D in another, out of BLE range of each other, one gateway
+phone in each (on cellular or Wi-Fi), and the per-group internet toggle on: **A's live position
+appears on D's radar within 30 s through a real public relay**; with the toggle off or no gateway,
+behaviour is identical to v2; **a frame with a random tag is dropped by the gateway and never
+reaches a member**; the gateway notice is visible; all unit tests plus new ones pass; verified on
+the 4 phones. **Next action:** author signs off the questions in 13.11, then G0.
+
+### 13.11 Questions for the author
+
+1. Per-group "share over internet" toggle, default off: agree? (13.7)
+2. Same app with an opt-in gateway, or a separate variant? (13.8)
+3. Is a 30 s end-to-end target right for the pilot?
+4. Daily-rotated gateway key and accepting that some relays will drop it: acceptable for v3?
