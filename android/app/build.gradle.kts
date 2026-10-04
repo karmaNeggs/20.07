@@ -21,14 +21,14 @@ val keystoreProperties = Properties().apply {
 
 android {
     namespace = "org.offlinemesh.app"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
-        targetSdk = 34
-        versionCode = 39
-        versionName = "0.7.28-dev"
+        targetSdk = 36
+        versionCode = 40
+        versionName = "0.7.29-dev"
         // True for every build type except playstoreRelease below, which overrides it to false.
         // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
         // Play's Deceptive Behavior / impersonation policy specifically targets apps that change

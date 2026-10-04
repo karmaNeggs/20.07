@@ -4199,3 +4199,5 @@ The author dropped the bitchat bridge (P7) and asked for a second Wi-Fi path to 
 
 **Play Store:** from 2026-08-31 new apps and updates must target API 36 (extension to 2026-11-01). The app targets 34. Raising targetSdk/compileSdk to 36 is a prerequisite for any submission and is scheduled before v3.
 
+**Update, same day:** targetSdk/compileSdk raised to 36 (v0.7.29-dev). Build, 520 tests, detekt, lint and both signed release variants pass; runtime behaviour at API 36 still needs the 4-phone round. Publishing the release and pushing are deferred by the author.
+

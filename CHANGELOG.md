@@ -6,7 +6,9 @@
 - **Deleted `docs/archive/`** (superseded NEXT_STEPS and PLAN-v0.3.0).
 - **README corrected:** hardware-tested on 4 phones (not 10); Tier B verified on 4 phones by the author, all four features.
 - **`git gc`:** `.git` 701MB -> 34MB with no history rewrite.
-- Not done yet: targetSdk is still 34. Google Play requires 36 for new apps and updates from 2026-08-31 (extension to 2026-11-01). Raising it is the next step before any Play submission.
+- **targetSdk/compileSdk 34 -> 36** (Google Play requires 36 for new apps and updates from 2026-08-31; extension to 2026-11-01). Version 0.7.29-dev (versionCode 40). Robolectric 4.13 only emulates up to API 34, so `src/test/resources/robolectric.properties` pins `sdk=34` for those tests. 520 tests, detekt, lintVitalRelease/Playstore and both signed release builds green; `aapt` confirms targetSdk 36 and `apksigner` the real key. `releases/` now holds the signed 0.7.29-dev APK.
+- **Not yet verified: runtime behaviour on a real phone at targetSdk 36.** Android 15/16 enforce edge-to-edge layouts, tighter foreground-service rules and other behaviour changes that compile fine but only show on a device. Needs a real round on the 4 phones (`test_rubric.md`) before Play submission.
+- Known: AGP 8.5.2 warns it was only tested to compileSdk 34. Upgrading AGP + Gradle is a later cleanup, not done here.
 
 ## [Unreleased] — Repo split into `android/` + `ios/`
 
