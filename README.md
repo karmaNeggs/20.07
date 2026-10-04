@@ -284,7 +284,7 @@ where it matters:
   local population of app users acting as blind relays, per "Every phone relays for every group"
   above — can vary from a couple of people to hundreds (`PLAN-v2.md` §5.5). The high end of that
   is validated only in a JVM discrete-event simulator driving the real connection/relay/dedup
-  classes from D=3 to D=400 (`app/src/test/.../sim/`), not on physical hardware — no crowd-scale
+  classes from D=3 to D=400 (`android/app/src/test/.../sim/`), not on physical hardware — no crowd-scale
   live test has been run. A defensive cap on simultaneous inbound BLE connections exists
   (`MeshGattServer`) but its enforcement is currently **disabled** (logging only) pending real
   dense-crowd data on whether it's needed and safe.
@@ -314,7 +314,7 @@ where it matters:
   only to wrap local key storage (see Security model above), not for any cryptographic operation
   itself. This reflects the state of that library upstream (no stable release exists), not a
   chosen risk.
-- **Broadcast tier (Tier B) is new, compile-verified only, not device-tested.**
+- **Broadcast tier (Tier B): verified on 4 physical phones (all features — presence, hop gradient, live position, SOS preview), per the author's own test round, Oct 2026.**
   (`BeaconRadio.kt`/`BleCapabilities.kt`/`TrickleTimer.kt`/`HopTracker.kt`, PLAN-v2.md
   §5.1/decisions 26-29) — a connectionless, Trickle-governed extended-advertising channel carrying
   group presence, a multi-hop presence-distance gradient, a single-hop live position (reuses the
@@ -396,12 +396,7 @@ and further privacy hardening — per-group (not per-device) sender identity, an
 content-sealing key, and fixed-size frame padding so message length itself doesn't leak message
 type (P6).
 
-**In progress: an optional bridge to bitchat's own mesh (P7).** Off by default. A proof-of-concept
-packet encoder and one-shot BLE write probe have been tested against a real bitchat install — some
-writes succeed, confirming a real bitchat node's GATT will accept a well-formed packet from a
-sender it's never seen, which is the first of two things this needs to be provably safe. The actual
-listener/injector bridge (and confirming an actual multi-hop relay, not just one accepted packet)
-isn't built yet.
+**Dropped: the bitchat bridge (P7).** An early probe that injected packets into bitchat's mesh was removed in Oct 2026 (it lives in git history and the decisions log). Range extension now goes through a Wi-Fi Aware second transport instead (see `CLAUDE.md`, v3).
 
 **Also open:** a group's "N hop(s) away" reading was recently rebuilt to stop freezing on a stale
 value (see Known Limitations above) but hasn't had its own dedicated hardware round yet.
@@ -431,15 +426,15 @@ build's own testing history.
 **Build from source**:
 ```
 git clone <this repo>
-cd 20.07
+cd 20.07/android          # the Gradle project lives here; ios/ is its sibling
 export JAVA_HOME=<a JDK 17 install>   # e.g. Homebrew: /opt/homebrew/opt/openjdk@17 on macOS
-./gradlew assembleDebug                # APK at app/build/outputs/apk/debug/
+./gradlew assembleDebug                # APK at android/app/build/outputs/apk/debug/
 ./gradlew test detekt                  # Tier 1 test suite + static analysis, see TESTING.md
 ```
 Needs the Android SDK (platform 34, build-tools 34.0.0) — Android Studio sets this up
 automatically, or install the command-line SDK tools and set `ANDROID_HOME`/`local.properties`
 yourself. `./gradlew assembleRelease` also works without any extra setup — it just produces an
-*unsigned* release APK unless you supply your own `keystore.properties` at the repo root (the
+*unsigned* release APK unless you supply your own `keystore.properties` in `android/` (the Gradle root) (the
 project's own real signing key is intentionally never in git).
 
 ## How to use it
@@ -465,6 +460,21 @@ project's own real signing key is intentionally never in git).
 5. **Leave it running.** The mesh only works while the app's background service is alive —
    don't force-stop it, and if your phone aggressively kills background apps (common on some
    Android OEMs), you may need to exempt it from battery optimization in system settings.
+
+## Repository layout
+
+```
+20.07/
+├── android/        the Android app — Gradle project root (build from here)
+├── ios/            reserved for the iOS app; empty for now
+├── docs/           DECISIONS.md, whitepaper, the published site
+├── releases/       signed release APKs
+├── README.md · PLAN-v2.md · CHANGELOG.md · TESTING.md · test_rubric.md
+└── PLAY_STORE_LISTING.md · SECURITY.md · CONTRIBUTING.md · LICENSE
+```
+
+Docs, decisions and release history live at the repo root and cover the whole product; each
+platform keeps only its own build under `android/` or `ios/`.
 
 ## Contributing
 

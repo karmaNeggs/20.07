@@ -1,5 +1,29 @@
 # Changelog
 
+## [Unreleased] — Declutter: bitchat spike removed, docs corrected, git packed
+
+- **Removed the P7 bitchat spike** (`bitchatbridge/` package, its test, and the debug-only HomeScreen row). The author chose to drop bitchat interop; range extension goes through a Wi-Fi Aware second transport instead (v3). History keeps the code. 520 tests, 0 failures after removal (525 minus the 5 encoder tests).
+- **Deleted `docs/archive/`** (superseded NEXT_STEPS and PLAN-v0.3.0).
+- **README corrected:** hardware-tested on 4 phones (not 10); Tier B verified on 4 phones by the author, all four features.
+- **`git gc`:** `.git` 701MB -> 34MB with no history rewrite.
+- Not done yet: targetSdk is still 34. Google Play requires 36 for new apps and updates from 2026-08-31 (extension to 2026-11-01). Raising it is the next step before any Play submission.
+
+## [Unreleased] — Repo split into `android/` + `ios/`
+
+The Gradle project moved from the repo root into `android/`, and an empty `ios/` was created
+alongside it, so a future iOS app can live in this same repo and share its docs, decisions log and
+release history. Moved as one unit with `git mv` (history preserved): `app/`, `gradle/`, `gradlew`,
+`gradlew.bat`, `build.gradle.kts`, `settings.gradle.kts`, `gradle.properties`, plus the local-only
+`local.properties`, `keystore.properties` and `keystore/`. Those last three had to move too —
+`app/build.gradle.kts` resolves them with `rootProject.file(...)`, and the Gradle root is now
+`android/` — so **no Gradle code changed**. Everything else (README, PLAN-v2, `docs/`, CHANGELOG,
+`releases/`, `.github/`) stays at the repo root and now covers both platforms.
+
+Verified after the move: `./gradlew projects` resolves and `./gradlew :app:assembleDebug` builds
+clean from `android/`. Build commands now run from `android/`, not the repo root — README,
+CONTRIBUTING and TESTING updated. Historical records (PLAN-v2, `docs/DECISIONS.md`,
+`docs/archive/`, earlier CHANGELOG entries) were deliberately left with their original paths.
+
 ## [0.7.28-dev] — First real release signing key; `releases/` now ships the signed release build
 
 `release`/`playstoreRelease` are genuinely signed for the first time (key kept entirely out of

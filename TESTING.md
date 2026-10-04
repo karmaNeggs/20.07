@@ -4,9 +4,12 @@ This exists so you only pick up the phones for manual testing once the cheap, fa
 checks have already passed. It doesn't replace `test_rubric.md` — Tier 3 below is exactly what that
 file is for, and stays manual on purpose.
 
+All `./gradlew` commands below run from `android/`, where the Gradle project lives.
+
 ## Tier 1 — pure logic, JVM only, no device or emulator, runs in seconds
 
 ```
+cd android
 ./gradlew test
 ```
 

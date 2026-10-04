@@ -4187,3 +4187,15 @@ specifically.
 (versionCode 39). **Not yet hardware-tested as a release build specifically** — the user's
 this-week physical rounds should include at least one pass on the actual signed release APK, not
 only the debug build, given the caveat above.
+
+
+## 65. Declutter pass: P7 bitchat bridge dropped, Wi-Fi Aware chosen for range (2026-10-04)
+
+The author dropped the bitchat bridge (P7) and asked for a second Wi-Fi path to improve usability and reach. Removed `bitchatbridge/` (encoder, spike transport, test) and its debug UI row; nothing in `MeshService`/`RelayResponder` referenced it. Decision 51's design and decision 55's spike notes stay as the record of what was tried and why it stopped. The README credit to bitchat stays (design inspiration for the courier model).
+
+**Wi-Fi route: Wi-Fi Aware, via the existing `BulkChannel` interface.** `BulkChannel` (decision 48) already decouples `RelayResponder` from the concrete bulk transport, so Aware is a second implementation beside `L2capBulkTransport`, not a rewrite. Wi-Fi Direct stays removed (decision 49); frame bytes 0x19/0x1A/0x1B stay retired.
+
+**Facts checked 2026-10-04 (web):** Aware works on Android 8+ (API 26). Newer pairing (Aware 4.0) and iOS 26 interoperability are unreliable; some Pixel 9/10 and Xiaomi 14 builds reportedly lack the newer pairing. So Aware must be an opportunistic accelerator with BLE as the always-works fallback, and phone support must be measured on the real test phones first.
+
+**Play Store:** from 2026-08-31 new apps and updates must target API 36 (extension to 2026-11-01). The app targets 34. Raising targetSdk/compileSdk to 36 is a prerequisite for any submission and is scheduled before v3.
+

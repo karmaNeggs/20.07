@@ -7,7 +7,7 @@
 
 - [ ] `./gradlew test detekt` passes locally
 - [ ] `./gradlew lint` has no new warnings
-- [ ] New/changed logic has a Tier 1 unit test (see `app/src/test/` for shape/density)
+- [ ] New/changed logic has a Tier 1 unit test (see `android/app/src/test/` for shape/density)
 
 **Device testing** (only if this touches BLE/GATT/background service/permissions behavior):
 - [ ] Tested on real hardware — describe phones/Android versions and what you observed

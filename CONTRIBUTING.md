@@ -12,7 +12,7 @@ you a review round-trip.
 - **Read [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md)** for the handful of places this codebase does
   something non-obvious on purpose. If your change touches one of those, explain in the PR why the
   existing approach doesn't work for your case, not just what you changed.
-- **For anything touching the BLE/mesh layer** (`app/src/main/java/org/offlinemesh/app/ble/`),
+- **For anything touching the BLE/mesh layer** (`android/app/src/main/java/org/offlinemesh/app/ble/`),
   check [`docs/DECISIONS.md`](docs/DECISIONS.md) for whether this exact thing has been tried
   before. A lot of entries there are "this looked like the obvious fix, here's the live-hardware
   failure it caused" — real prior art, not just a changelog.
@@ -21,9 +21,9 @@ you a review round-trip.
 
 ```
 git clone <this repo>
-cd 20.07
+cd 20.07/android          # the Gradle project lives here; ios/ is its sibling
 export JAVA_HOME=<a JDK 17 install>   # e.g. Homebrew: /opt/homebrew/opt/openjdk@17 on macOS
-./gradlew assembleDebug                # APK at app/build/outputs/apk/debug/
+./gradlew assembleDebug                # APK at android/app/build/outputs/apk/debug/
 ./gradlew test detekt                  # Tier 1 test suite + static analysis
 ```
 Needs the Android SDK (platform 34, build-tools 34.0.0) — Android Studio sets this up
@@ -33,7 +33,7 @@ the full three-tier test breakdown (pure logic / Compose UI / manual device).
 ## What a PR needs before it's reviewable
 
 - [ ] `./gradlew test detekt` passes locally. New logic (crypto, wire-format, state machines,
-      anything with an edge case) gets a Tier 1 unit test — see `app/src/test/` for the existing
+      anything with an edge case) gets a Tier 1 unit test — see `android/app/src/test/` for the existing
       shape and density of these; a PR that changes behavior with no corresponding test is the
       single most common reason for a slow review here.
 - [ ] `./gradlew lint` has no new warnings.
