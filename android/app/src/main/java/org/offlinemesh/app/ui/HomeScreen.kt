@@ -168,7 +168,6 @@ fun HomeScreen(
                         QuickToggleTiles(meshService, onGeneralSos)
                         Spacer(Modifier.height(10.dp))
                         DiagnosticsExportRow()
-                        WifiAwareProbeRow()
                         Spacer(Modifier.height(20.dp))
                     }
                 }
@@ -435,49 +434,6 @@ private fun DiagnosticsExportRow() {
                 style = MaterialTheme.typography.bodySmall
             )
         }
-    }
-}
-
-/** v3 groundwork: one tap shows whether this phone supports Wi-Fi Aware and its limits
- *  ([org.offlinemesh.app.transport.WifiAwareProbe]). Debug-only, same boundary as the diagnostics
- *  export; the report is also written to the diagnostics log. */
-@Composable
-private fun WifiAwareProbeRow() {
-    if (!BuildConfig.DEBUG) return
-    val context = LocalContext.current
-    var report by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<String?>(null) }
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .padding(top = 10.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(AppColors.Surface)
-            .clickable { report = org.offlinemesh.app.transport.WifiAwareProbe.report(context) }
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(Icons.Filled.BugReport, contentDescription = null, tint = AppColors.OnSurfaceMuted)
-        Spacer(Modifier.width(10.dp))
-        Column {
-            Text("Check Wi-Fi Aware support", color = AppColors.OnSurface, style = MaterialTheme.typography.bodyMedium)
-            Text(
-                "debug build only \u2022 v3 groundwork",
-                color = AppColors.OnSurfaceMuted,
-                style = MaterialTheme.typography.bodySmall
-            )
-        }
-    }
-    report?.let { text ->
-        androidx.compose.material3.AlertDialog(
-            onDismissRequest = { report = null },
-            confirmButton = {
-                androidx.compose.material3.TextButton(onClick = { report = null }) { Text("Close") }
-            },
-            title = { Text("Wi-Fi Aware") },
-            text = {
-                androidx.compose.foundation.text.selection.SelectionContainer { Text(text) }
-            }
-        )
     }
 }
 
