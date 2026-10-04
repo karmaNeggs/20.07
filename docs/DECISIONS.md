@@ -4201,3 +4201,23 @@ The author dropped the bitchat bridge (P7) and asked for a second Wi-Fi path to 
 
 **Update, same day:** targetSdk/compileSdk raised to 36 (v0.7.29-dev). Build, 520 tests, detekt, lint and both signed release variants pass; runtime behaviour at API 36 still needs the 4-phone round. Publishing the release and pushing are deferred by the author.
 
+
+## 66. v3 is an internet gateway for finding mates, not Wi-Fi Aware (2026-10-04)
+
+Correction to decision 65: the author's Wi-Fi goal is **an internet uplink**, not a faster local
+radio. One opted-in, internet-connected phone per BLE cluster blind-relays sealed frames to a dumb
+relay (Nostr), so group members in two separate clusters can see each other's live location. The
+goal is mate-finding, not global chat. Wi-Fi Aware work (the capability probe) was reverted.
+
+**Key design fact (verified in code/README):** every relayed frame carries a rotating
+`HMAC(group_key, epoch)` handle, so a gateway needs no keys: it subscribes to the handles it sees
+locally and publishes local frames under them; a gateway in the other cluster sees the same handle
+and injects what it receives into its BLE mesh. Keys stay on member phones.
+
+**Decided by the author:** dumb relay (Nostr) as the backend; live position/presence are the
+priority payload (local-first, extended by the gateway); opt-in gateway with a visible notice.
+**Spam:** cheap controls now (handle-gated subscription, dedupe, +-1 epoch freshness, per-handle
+rate cap, known fixed-size frame types); proof-of-work parked. **Open:** handle linkability on a
+public relay (72h GATT handle vs 60s beacon window), real relay behaviour/limits, secp256k1 key
+derivation, Play policy/privacy text for a network-using version.
+
