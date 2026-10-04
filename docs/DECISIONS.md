@@ -4221,3 +4221,43 @@ rate cap, known fixed-size frame types); proof-of-work parked. **Open:** handle 
 public relay (72h GATT handle vs 60s beacon window), real relay behaviour/limits, secp256k1 key
 derivation, Play policy/privacy text for a network-using version.
 
+
+## 67. Nostr relay spike results (2026-10-05) — public relays are usable, with four rules
+
+Throwaway script (`docs/spikes/nostr-2026-10-05/`), run once from one Mac against 8 public relays:
+random-byte kind-20001 (ephemeral) events tagged with a random handle, 400 B each, one connection
+publishing and a second subscribing. **One run, one machine, one time of day. Not a load test and
+not a phone test.**
+
+| Relay | Result |
+|---|---|
+| nos.lol, nostr.mom | 10/10 accepted and delivered, p50 0.15-0.16 s; 30-event burst fully accepted (but sends took 22-26 s, i.e. throttled to ~1/s); **stores the "ephemeral" events** |
+| relay.snort.social | 10/10, p50 0.19 s; burst 30/30 (17 s); accepts up to 100 KB; **honours ephemeral (nothing stored)** |
+| offchain.pub | 10/10, p50 0.36 s; burst rejected ("not in our web of trust"); **stores** |
+| relay.damus.io | Delivered 6/10 at 1 event/s: "rate-limited: you are noting too much", then temporarily banned my IP after the burst; honours ephemeral |
+| nostr.wine | Rejects all writes (paid) |
+| relay.primal.net, relay.nostr.band | Unreachable (HTTP 502 / handshake timeout) |
+
+What held: handle-filtered subscription works (0 leaks of a wrong handle on every relay), delivery
+latency is 0.15-0.4 s when a relay accepts, 32 KB events pass on all working relays (our frames are
+~1 KB), 100 KB is rejected by most.
+
+**Four rules for v3, from this evidence:**
+1. **Assume relays store everything.** 3 of 5 working relays persisted "ephemeral" events. So the
+   relay-side handle must be the **60 s beacon-window handle, not the 72 h GATT handle** (answers
+   open question 1), payloads stay sealed, and a stored event must be useless after its window.
+2. **Aggregate before uplink.** Relays throttle to roughly 1 event/s per connection (damus rejects
+   faster). A gateway batches many sealed frames into one event per tick (<=32 KB) instead of one
+   event per frame.
+3. **Publish to 3 relays, not 1.** 4 of 8 relays were unusable or hostile to unknown keys in this
+   run (502, timeout, paywall, web-of-trust). Use a small configurable list with fallback; start
+   with snort.social, nos.lol, nostr.mom, damus at a low rate.
+4. **Per-epoch throwaway keys must not be treated as free.** offchain.pub accepted 10 events from a
+   fresh key and then refused it as outside its web of trust; reputation-gated relays will drop
+   unknown keys over time.
+
+**Not tested:** two real BLE clusters, a phone over cellular, sustained hours, relay behaviour on
+mobile networks, Android secp256k1 signing (a dependency to choose), and whether the temporary
+damus ban (my IP, from the deliberate burst) lifts as it says. Relays change policy without notice,
+so this is a snapshot, not a guarantee.
+

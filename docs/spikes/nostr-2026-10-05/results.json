@@ -1,0 +1,179 @@
+[
+ {
+  "relay": "wss://relay.damus.io",
+  "connect_s": 1.61,
+  "steady": {
+   "sent": 10,
+   "accepted": 6,
+   "delivered": 6,
+   "lat_p50_s": 0.3,
+   "lat_max_s": 0.3,
+   "reject_reasons": [
+    "banned: too many rate-limit violations, try again later",
+    "rate-limited: you are noting too much"
+   ]
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "rej: banned: too many rate-limit violations, try again later",
+   "2000": "rej: banned: too many rate-limit violations, try again later",
+   "8000": "rej: banned: too many rate-limit violations, try again later",
+   "32000": "rej: banned: too many rate-limit violations, try again later",
+   "100000": "rej: banned: too many rate-limit violations, try again later"
+  },
+  "burst30": {
+   "accepted": 0,
+   "delivered": 0,
+   "send_took_s": 8.36,
+   "reject_reasons": [
+    "banned: too many rate-limit violations, try again later"
+   ]
+  },
+  "stored_after_reconnect": 0
+ },
+ {
+  "relay": "wss://nos.lol",
+  "connect_s": 0.54,
+  "steady": {
+   "sent": 10,
+   "accepted": 10,
+   "delivered": 10,
+   "lat_p50_s": 0.16,
+   "lat_max_s": 0.19
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "ok",
+   "2000": "ok",
+   "8000": "ok",
+   "32000": "ok",
+   "100000": "rej: invalid: event too large: 100370"
+  },
+  "burst30": {
+   "accepted": 30,
+   "delivered": 30,
+   "send_took_s": 21.9,
+   "reject_reasons": []
+  },
+  "stored_after_reconnect": 44
+ },
+ {
+  "relay": "wss://relay.primal.net",
+  "error": "connect failed: InvalidStatus server rejected WebSocket connection: HTTP 502"
+ },
+ {
+  "relay": "wss://offchain.pub",
+  "connect_s": 1.0,
+  "steady": {
+   "sent": 10,
+   "accepted": 10,
+   "delivered": 10,
+   "lat_p50_s": 0.36,
+   "lat_max_s": 0.36
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "ok",
+   "2000": "ok",
+   "8000": "ok",
+   "32000": "ok",
+   "100000": "rej: invalid: event too large: 100370"
+  },
+  "burst30": {
+   "accepted": 0,
+   "delivered": 0,
+   "send_took_s": 8.74,
+   "reject_reasons": [
+    "Policy violated and pubkey is not in our web of trust."
+   ]
+  },
+  "stored_after_reconnect": 14
+ },
+ {
+  "relay": "wss://nostr.mom",
+  "connect_s": 0.48,
+  "steady": {
+   "sent": 10,
+   "accepted": 10,
+   "delivered": 10,
+   "lat_p50_s": 0.15,
+   "lat_max_s": 0.29
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "ok",
+   "2000": "ok",
+   "8000": "ok",
+   "32000": "ok",
+   "100000": "rej: invalid: event too large: 100370"
+  },
+  "burst30": {
+   "accepted": 30,
+   "delivered": 30,
+   "send_took_s": 26.28,
+   "reject_reasons": []
+  },
+  "stored_after_reconnect": 44
+ },
+ {
+  "relay": "wss://relay.snort.social",
+  "connect_s": 0.56,
+  "steady": {
+   "sent": 10,
+   "accepted": 10,
+   "delivered": 10,
+   "lat_p50_s": 0.19,
+   "lat_max_s": 0.19
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "ok",
+   "2000": "ok",
+   "8000": "ok",
+   "32000": "ok",
+   "100000": "ok"
+  },
+  "burst30": {
+   "accepted": 30,
+   "delivered": 30,
+   "send_took_s": 17.51,
+   "reject_reasons": []
+  },
+  "stored_after_reconnect": 0
+ },
+ {
+  "relay": "wss://relay.nostr.band",
+  "error": "connect failed: TimeoutError timed out during opening handshake"
+ },
+ {
+  "relay": "wss://nostr.wine",
+  "connect_s": 0.97,
+  "steady": {
+   "sent": 10,
+   "accepted": 0,
+   "delivered": 0,
+   "lat_p50_s": null,
+   "lat_max_s": null,
+   "reject_reasons": [
+    "restricted: sign up at https://nostr.wine to write events to this relay"
+   ]
+  },
+  "wrong_handle_leaked": 0,
+  "sizes": {
+   "1000": "rej: restricted: sign up at https://nostr.wine to write events to",
+   "2000": "rej: restricted: sign up at https://nostr.wine to write events to",
+   "8000": "rej: restricted: sign up at https://nostr.wine to write events to",
+   "32000": "rej: restricted: sign up at https://nostr.wine to write events to",
+   "100000": "rej: restricted: sign up at https://nostr.wine to write events to"
+  },
+  "burst30": {
+   "accepted": 0,
+   "delivered": 0,
+   "send_took_s": 13.13,
+   "reject_reasons": [
+    "restricted: sign up at https://nostr.wine to write events to this rela"
+   ]
+  },
+  "stored_after_reconnect": 0
+ }
+]
