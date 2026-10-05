@@ -3099,7 +3099,7 @@ monitoring) done; remediation deliberately deferred pending user review of the f
 
 ## Part 13 — v3 internet gateway: wire design (2026-10-05, draft for the author's sign-off)
 
-**Status: design only, no code.** Decisions 66 (goal) and 67 (relay spike) are the inputs.
+**Status: design signed off by the author 2026-10-05 (decision 68), no code yet.** Decisions 66 (goal) and 67 (relay spike) are the inputs.
 
 ### 13.1 Goal and non-goals
 
@@ -3145,8 +3145,12 @@ adds no new crypto: `inner` is sealed and signed exactly as it is on BLE today.
   existing dedup caches (`DedupCache`) handle the rest. Two gateways in one cluster just duplicate
   traffic; jitter the publish (Trickle-style, `TrickleTimer`) and suppress if the same frame is
   overheard first. Duplicates are harmless, so v3 does not build coordination.
-- **Opt-in and visible:** off by default; persistent "relaying for nearby people" notice; a data cap
-  and a "stop when battery < X%" rule. It runs inside the existing foreground service.
+- **Opt-in and visible:** controlled by the single global switch in 13.12; off by default. While on
+  and online, a persistent "relaying for nearby people" notice shows, with a data cap and a "stop
+  when battery < X%" rule. It runs inside the existing foreground service. **Patchy-network
+  tolerance:** gateways come and go, so nothing depends on one. Uplink state is RAM-only and
+  latest-wins (a position older than its window is dropped, never queued to disk), and members
+  re-detect gateways from the heartbeat bit (13.4) rather than being told.
 
 ### 13.4 How members know a gateway exists
 
@@ -3168,8 +3172,10 @@ When no gateway has been seen for N minutes, members stop wrapping and the mesh 
   implementation checked against the official BIP-340 test vectors** (the Python version used in the
   spike already passes a local verify), at 1 signature/s. This adds **no native dependency**; the
   alternative (`secp256k1-kmp`) stays as a fallback and would need a Part 12 dependency review.
-- **Key:** one random gateway key per install, rotated daily. It is not derived from any group key
-  (a gateway has none). Accepted risk: reputation-gated relays (offchain.pub) may drop it.
+- **Key:** one random gateway key per install, **replaced every 7 days** (groups live 3-7 days, so
+  that matches their lifetime; decision 68). It is not derived from any group key (a gateway has
+  none). Accepted and not worked around: a relay that drops an unknown key is simply skipped, since
+  3 relays publish in parallel.
 
 ### 13.6 Spam and abuse (answer to the author's question 4)
 
@@ -3187,9 +3193,9 @@ tag learns "something is being sent under this 60 s tag", then the tag changes. 
 because relays may store events, a later compromise of a group key lets someone decrypt stored
 positions from that group's windows. Mitigations: positions already carry a timestamp inside the
 seal and short validity; consider per-window content-epoch keys (decision 39 already has them).
-**New exposure vs v2 that the UI must say plainly:** sharing a live position over the internet
-(even sealed) is a larger threat surface than BLE-only. Proposed: a **per-group toggle "also share
-my position over the internet", default off**, plus the gateway opt-in. (Author to confirm.)
+**New exposure vs v2 that the UI must say plainly:** a sealed position leaving over the internet is
+a larger threat surface than BLE-only. Short group lifetimes (3-7 days) bound how long a stored
+event stays useful. Control: **one global switch, off by default (13.12)**, not a per-group one.
 
 ### 13.8 Platform and policy consequences
 
@@ -3213,15 +3219,43 @@ my position over the internet", default off**, plus the gateway opt-in. (Author 
 ### 13.10 Done line for v3 "Gateway pilot" (proposed)
 
 With phones A+B in one BLE cluster and C+D in another, out of BLE range of each other, one gateway
-phone in each (on cellular or Wi-Fi), and the per-group internet toggle on: **A's live position
-appears on D's radar within 30 s through a real public relay**; with the toggle off or no gateway,
-behaviour is identical to v2; **a frame with a random tag is dropped by the gateway and never
-reaches a member**; the gateway notice is visible; all unit tests plus new ones pass; verified on
-the 4 phones. **Next action:** author signs off the questions in 13.11, then G0.
+phone in each (on cellular or Wi-Fi), and the Internet-reach switch on for all four: **A's live
+position appears on D's radar within 30 s through a real public relay** (full turnaround, first
+appearance), and afterwards D's view of A refreshes at least every ~15 s while A moves; with the
+switch off on any phone, or no gateway present, behaviour is identical to v2; **a frame with a
+random tag is dropped by the gateway and never reaches a member**; the gateway notice is visible;
+all unit tests plus new ones pass; verified on the 4 phones.
 
-### 13.11 Questions for the author
+### 13.11 Answers (author, 2026-10-05)
 
-1. Per-group "share over internet" toggle, default off: agree? (13.7)
-2. Same app with an opt-in gateway, or a separate variant? (13.8)
-3. Is a 30 s end-to-end target right for the pilot?
-4. Daily-rotated gateway key and accepting that some relays will drop it: acceptable for v3?
+1. **One global switch, off by default, not per group** (13.12). Gateways are "mega emitters" for the
+   whole BLE network around them, so the control belongs to the phone, not to a group.
+2. **Same app, opt-in feature.** No separate variant.
+3. **30 s is a full-turnaround target** (A's phone to D's radar, first appearance), not a refresh
+   rate. Refresh after that is a separate, looser target (~15 s staleness while moving).
+4. **Gateway key expires and is replaced every 7 days;** the app asks in plain words when the user
+   enables the switch. No further complexity for relays that drop unknown keys.
+
+### 13.12 The single switch: "Internet reach" (default OFF)
+
+One setting per phone, asked in the app when first enabled, with a plain explanation:
+
+- **ON means two things:** (a) my frames may be wrapped in `FRAME_UPLINK` and sent out by a nearby
+  gateway; (b) if I have internet, I relay other people's already-sealed frames for them.
+- **OFF means neither:** my phone neither wraps its own frames nor acts as a gateway. A phone with the
+  switch off still blind-relays ordinary BLE frames exactly as in v2.
+- Consequence to state in the UI: **to find a mate through the internet, both mates need the switch
+  on**, and at least one phone in each cluster needs a connection.
+- Reason it is one switch and not two: a member whose frames get wrapped by someone else's gateway
+  must have agreed to that, and a gateway should only carry traffic for a network it chose to help.
+
+### 13.13 Timing budget behind the 30 s target (to be measured, not assumed)
+
+Relay round trip measured at 0.15-0.4 s (decision 67). Expected costs on top: up to 5 s publish tick,
+up to one beacon window for the receiving gateway to learn the tag, and one BLE hop per side where
+the frame is injected. The BLE hops dominate: earlier live testing showed each hop needs its own
+reconnect cycle. If a real round exceeds 30 s, the first thing to shorten is the tick.
+
+### 13.14 Next action
+
+G0 (13.9): `FRAME_UPLINK` codec and gateway logic with JVM tests, no network code.

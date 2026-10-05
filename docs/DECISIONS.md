@@ -4261,3 +4261,17 @@ mobile networks, Android secp256k1 signing (a dependency to choose), and whether
 damus ban (my IP, from the deliberate burst) lifts as it says. Relays change policy without notice,
 so this is a snapshot, not a guarantee.
 
+
+## 68. v3 gateway design signed off with four author answers (2026-10-05)
+
+`PLAN-v2.md` Part 13 is the wire design. Author's answers: (1) **one global "Internet reach" switch,
+default off, not per group** (gateways are "mega emitters" for the whole BLE network around them);
+(2) same app, opt-in, no separate variant; (3) the 30 s target is **full turnaround**, first
+appearance of A's position on D's radar; (4) gateway key expires and is replaced every 7 days,
+matching 3-7 day group lifetimes, no extra handling for relays that drop unknown keys.
+
+**One design consequence to keep visible:** the single switch has two effects (my frames may be
+wrapped for the internet, and I relay for others when online), so finding a mate through the
+internet requires the switch on at both mates' phones. Next: build G0 (codec + gateway logic + JVM
+tests), no network code.
+
