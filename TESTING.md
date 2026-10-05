@@ -80,3 +80,66 @@ to install it on. Do a
 full manual pass against `test_rubric.md` on a real release build before trusting it for real
 distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
 deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
+
+## Test day — Internet reach (v0.8.0-dev, targetSdk 36)
+
+First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
+until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
+
+**Before you start**
+- [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
+- [ ] Install `20.07-v0.8.0-dev-debug-internet-reach.apk` on every phone. Grant every permission it asks for.
+- [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
+- [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
+- [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).
+
+**Phone roles for Test 2 and 3**
+
+| Phone | Bluetooth | Wi-Fi / data | Internet tile |
+|---|---|---|---|
+| A | on | off | off |
+| B (the bridge) | on | on | on |
+| C | **off** | on | on |
+| D (only for Test 1) | **off** | on | on |
+
+**Test 0 — switch off means "exactly as v2" (15 min)**
+- [ ] With the Internet tile OFF on all phones and Bluetooth on, do your normal v2 checks from `test_rubric.md`: radar, message, SOS.
+- [ ] Confirm no "Internet reach" status line shows on any phone.
+- [ ] PASS = nothing behaves differently from the last v2 round.
+
+**Test 1 — Win 1: two phones, Bluetooth off, only Internet reach (20 min)**
+- [ ] On C and D: Bluetooth off, Wi-Fi on, tap the Internet tile, read the consent text, confirm. Status should go from "connecting" to "connected".
+- [ ] C sends a message. D receives it within about 30 seconds. D replies. C receives it.
+- [ ] Put C and D in different places (different rooms or buildings). Each shows the other on the radar and the distance/direction changes as one walks.
+- [ ] PASS = messages both ways and a moving location both ways, with Bluetooth off on both.
+
+**Test 2 — Win 2: the bridge (30 min)**
+- [ ] Roles as in the table. A and B within Bluetooth range of each other; C far enough away that it can never reach A by Bluetooth.
+- [ ] A sends a message. C receives it. C replies. A receives it. Note the delay each way.
+- [ ] A and C each appear on the other's radar. Walk A around: C's view follows within about 15 seconds.
+- [ ] PASS = A and C talk both ways through B, and the location is shared both ways.
+- [ ] Turn B's Internet tile OFF. Within a minute A and C stop receiving each other's new messages. Turn it back on: they resume.
+
+**Test 3 — the awkward cases (20 min)**
+- [ ] Turn C's Wi-Fi off, wait 30 seconds, turn it on. Status goes "waiting for Wi-Fi or mobile data", then back to connected. Messages sent meanwhile arrive afterwards.
+- [ ] Turn on the app's Offline tile on C. Status shows "paused by Offline mode" and C stops sending.
+- [ ] Switch C from Wi-Fi to mobile data. Still connected.
+- [ ] Lock the screen on C for 10 minutes. Does it still receive? (Android 16 may limit background networking; record what happens.)
+- [ ] Reboot C. After unlocking, is the Internet tile still on or off as you left it, and does it reconnect?
+
+**What to capture for every failure**
+- [ ] Phone model, Android version, which role, what you did, what you expected, what happened, and the time.
+- [ ] On each phone involved, tap "Export diagnostics" (debug build) straight after, and share the file.
+- [ ] A screenshot of the home screen showing the status line.
+
+**Do NOT report these as bugs, they are known and not built yet**
+- A message sent to a phone that has never been online does not wait for it (stranger-carrying is G3).
+- A mate who went quiet more than 2 minutes ago disappears from the radar; "last seen N minutes ago" is not built yet.
+- Phones that only have Bluetooth and are not members of the group do not carry anything over the internet.
+
+**Also record, because it is unmeasured**
+- [ ] Battery percentage on B and C at the start and after the 90 minutes, with the tile on.
+- [ ] Mobile data used (Settings > Network) on C during the test.
+- [ ] Anything that looks wrong at targetSdk 36: content hidden behind the status bar or navigation bar, notification not showing, the foreground notification disappearing.
+
+**Stop the round and tell me if:** the app crashes on open, a message from the wrong group appears, a location shows for a person who is not in the group, or the app uses mobile data with the tile OFF.
