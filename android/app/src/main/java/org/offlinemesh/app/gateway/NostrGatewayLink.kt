@@ -22,7 +22,8 @@ import java.util.Base64
  */
 // LongParameterList: every collaborator (gateway, relays, transport, key, clock, injection sink, config) is a
 // distinct seam the tests replace, so none can be folded away.
-@Suppress("LongParameterList")
+// TooManyFunctions: the UplinkLink surface plus a few pure helpers around one small state holder.
+@Suppress("LongParameterList", "TooManyFunctions")
 class NostrGatewayLink(
     private val gateway: UplinkGateway,
     urls: List<String>,
@@ -31,7 +32,7 @@ class NostrGatewayLink(
     private val now: () -> Long = System::currentTimeMillis,
     private val inject: (ByteArray) -> Unit,
     private val config: Config = Config(),
-) {
+) : UplinkLink {
     data class Config(
         val maxBatchesPerTick: Int = MAX_BATCHES_PER_TICK,
         val mailboxLookbackSec: Long = MAILBOX_LOOKBACK_SEC,
@@ -52,10 +53,13 @@ class NostrGatewayLink(
 
     fun offerFromBle(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision = gateway.offer(frame)
 
+    /** This phone's own (or its group's) frame, wrapped by a member. Same admission rules as one heard over BLE. */
+    override fun offerLocal(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision = gateway.offer(frame)
+
     fun noteBeaconSeen(tag: ByteArray) = gateway.noteBeaconSeen(tag)
 
     /** Replaces the set of relay tags this gateway listens for. */
-    fun setInterestTags(tags: Collection<ByteArray>) {
+    override fun setInterestTags(tags: Collection<ByteArray>) {
         val hex = tags.map { it.toHex() }.distinct().take(config.maxInterestTags)
         if (hex.isEmpty()) {
             pool.setSubscription(emptyList())
@@ -74,7 +78,7 @@ class NostrGatewayLink(
     }
 
     /** Pushes pool state forward and publishes whatever the gateway has ready. */
-    fun tick() {
+    override fun tick() {
         pool.tick()
         if (!pool.hasConnectedRelay()) return
         val batches = gateway.drain(config.maxBatchesPerTick)
@@ -85,7 +89,9 @@ class NostrGatewayLink(
 
     fun relayStatus(): List<RelayPool.Status> = pool.status()
 
-    fun close() = pool.close()
+    override fun close() = pool.close()
+
+    override fun hasConnectedRelay(): Boolean = pool.hasConnectedRelay()
 
     private fun publish(batch: UplinkGateway.Batch) {
         val nowSec = now() / MS_PER_SEC

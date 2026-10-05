@@ -2,7 +2,8 @@
 
 A phone-to-phone Bluetooth mesh app for finding your group, navigating toward them, calling for
 help, and sharing incident photos — when cellular networks are jammed, overloaded, unavailable, or
-not trusted. No servers, no cellular/Wi-Fi internet dependency, no account.
+not trusted. No servers of ours, no account, and no internet dependency: it works fully offline. An optional,
+off-by-default *Internet reach* switch (see below) can extend reach over the internet when a phone has a connection.
 
 Built for a specific, recurring shape of problem: a group that needs to stay together, and a
 network that can't help them do it — whether that network is overloaded by too many people, or
@@ -410,8 +411,21 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
   `android.location`/`android.bluetooth.le` — no Google Play Services dependency anywhere, so it
   works on de-Googled/custom-ROM phones.
-- **Wire transport**: Bluetooth LE only — GATT for content, BLE advertising for discovery/beacons.
-  No internet, cellular, or Wi-Fi involved at any point.
+- **Wire transport**: Bluetooth LE — GATT for content, BLE advertising for discovery/beacons. By default nothing
+  else is involved. Optionally (Internet reach, off by default) sealed frames can also travel over the internet
+  through public Nostr relays; see "Internet reach" below.
+
+## Internet reach (v3, optional, off by default, experimental)
+
+A switch on the home screen lets a phone with a connection (Wi-Fi, hotspot or mobile data) carry your group's
+end-to-end-encrypted messages and live locations to group members it cannot reach by Bluetooth, through public
+Nostr relay servers. Two phones with **Bluetooth off** can use it alone, and a phone with Bluetooth plus
+internet bridges nearby Bluetooth-only phones to internet-only ones. Relays see only ciphertext, rotating group
+codes, your IP address and timing; **both mates need the switch on**. Design: `PLAN-v2.md` Part 13 and
+`docs/DECISIONS.md` decisions 66-72.
+
+**Status honestly:** built and tested in simulation and against real public relays, **not yet tested on phones**.
+The stranger-carrying "mule" mode and last-known-position display are not built yet.
 
 ## Get the app
 

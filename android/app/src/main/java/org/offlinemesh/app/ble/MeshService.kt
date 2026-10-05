@@ -35,6 +35,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.offlinemesh.app.data.EvidenceEntity
 import org.offlinemesh.app.diagnostics.DiagnosticsLog
+import org.offlinemesh.app.gateway.InternetReachRuntime
 import org.offlinemesh.app.data.GroupRepository
 import org.offlinemesh.app.data.NicknameEntity
 import org.offlinemesh.app.data.SosEntity
@@ -99,6 +100,10 @@ class MeshService : Service() {
 
     private lateinit var bluetoothManager: BluetoothManager
     private lateinit var responder: RelayResponder
+
+    /** v3 internet reach (decision 68): off by default, works with Bluetooth off. */
+    lateinit var internetReach: InternetReachRuntime
+        private set
     private lateinit var beaconRadio: BeaconRadio
     private lateinit var gattServer: MeshGattServer
     private lateinit var gattClient: MeshGattClient
@@ -346,6 +351,8 @@ class MeshService : Service() {
         startPruning()
         startRadarTickLoop()
         startDegreeLogging()
+        internetReach = InternetReachRuntime(applicationContext, serviceScope, repo, responder, meshActive)
+            .also { it.start() }
         // Once per process start, not periodic — see GroupRepository.sweepOrphanKeys' doc for why
         // that's sufficient (new orphans can only appear via a destructive schema migration, which
         // only happens across an app update, i.e. already a fresh start).
@@ -404,6 +411,7 @@ class MeshService : Service() {
         // moment the service is destroyed could leave a radio resource open past the service's
         // own lifetime.
         l2capTransport.closeAll()
+        internetReach.stop()
         serviceScope.cancel()
         super.onDestroy()
     }

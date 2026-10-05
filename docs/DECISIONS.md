@@ -4339,3 +4339,30 @@ group members themselves the bridge, since they hold the keys. G2 is therefore r
 `FRAME_UPLINK`, `VERSION` 13 and last-known-position display move to G3. No `VERSION` bump is needed for G2,
 because uplink frames travel only over the relay and inner frames keep the current version.
 
+
+## 72. G2 built: Internet reach wired into the app, off by default (2026-10-05)
+
+`gateway/InternetReachController` (what to publish and when; echo control; inbound queue), `InternetReachRuntime`
+(switch + connectivity + persisted 7-day key + loop, status for the UI), `ResponderUplinkSource` and two new
+`RelayResponder` methods (`uplinkLiveFrames`, `uplinkMailboxItems`), a `SosDao.recentForGroup` query (no schema
+change), `InternetReachSettings`, `NetworkMonitor`. Live frames go out as presence plus own and held positions;
+messages and nicknames go out once each as text. Inbound frames use the synthetic peer `internet` so the existing
+split-horizon rule keeps internet-learned positions from being re-published, and inbound message ids are marked
+so they are never echoed back.
+
+**Verified in the JVM, not on phones:** both win conditions of decision 71 pass end to end with the real signer,
+relay protocol, link and controller over in-memory relays (two internet-only phones exchange a position and a
+message both ways; a bridge carries a BLE-only phone's position and message to an internet-only phone and brings
+the reply back); a different group receives nothing; stopping publishes nothing. 612 tests, detekt, lint and both
+signed release builds green.
+
+**Known limits and risks, stated plainly:** (1) never run on a phone; the synthetic `internet` peer address going
+through `handleIncoming` (hop tracking, identity learning, flood-forward) is the least-proven seam and may
+surface issues only a real round shows; (2) `NetworkMonitor` registers a connectivity callback whenever the
+service runs, even with the switch off (it only observes connectivity; the controller never starts unless the
+switch is on); (3) last-known positions are not produced or displayed yet, so a bridged position older than the
+LIVE window (120 s) is dropped; (4) stranger-carrying mule mode, interest frame, BLE carry of `FRAME_UPLINK` and
+`VERSION` 13 are still G3; (5) Play Data Safety answers must be re-derived before any submission; (6) the
+OkHttp dependency still needs its Part 12 review; (7) background networking limits at targetSdk 36 and battery
+cost are unmeasured.
+

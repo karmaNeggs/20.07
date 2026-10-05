@@ -28,7 +28,7 @@ in Play Console's text field.)
 signal, too many people on one cell tower, or you just don't have a local data plan — festivals,
 hiking, crowds, natural disasters, or anywhere else the network can't help you.
 
-No servers. No accounts. No SIM or data plan needed. Phones relay for each other directly over
+No servers of ours. No accounts. No SIM or data plan needed. Phones relay for each other directly over
 Bluetooth — everything encrypted under a key only your group holds.
 
 THREE THINGS, ON PURPOSE — NOTHING ELSE
@@ -79,6 +79,12 @@ github.com/karmaNeggs/20.07
 ---
 
 ## Data Safety form — reference answers
+
+> **v3 (Internet reach) changes these answers and they have NOT been re-derived.** With the optional switch on,
+> the app sends end-to-end-encrypted location and messages over the internet to third-party relay servers. Google's
+> definitions of "collected", "shared" and the end-to-end-encryption exemption must be read again before filling
+> the form; do not answer from the table below, which describes the Bluetooth-only v2 app. Also update the store
+> text and screenshots, and state the INTERNET and ACCESS_NETWORK_STATE permissions' purpose.
 
 Google Play's Data Safety form asks about data *collected* and *shared* in its own specific
 categories. Answers below, derived directly from README's Security Model / Permissions sections —

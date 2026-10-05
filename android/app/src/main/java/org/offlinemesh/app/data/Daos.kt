@@ -79,6 +79,14 @@ interface SosDao {
     @Query("SELECT * FROM sos_events WHERE ttl > 0")
     suspend fun getRelayable(): List<SosEntity>
 
+    // v3 internet uplink (decision 71): every stored message of a group, newest first, whatever its ttl --
+    // a message that stopped propagating over BLE (ttl 0) must still be bridged to the internet.
+    @Query(
+        "SELECT * FROM sos_events WHERE groupId = :groupId AND sealed IS NOT NULL " +
+            "ORDER BY timestamp DESC LIMIT :limit"
+    )
+    suspend fun recentForGroup(groupId: String, limit: Int): List<SosEntity>
+
     // No ttl/ownership filter, unlike getRelayable — BeaconRadio's Tier B SOS content broadcast
     // (decision 29) needs whichever SOS HopTracker.bestActiveSos already named as nearest,
     // regardless of whether we originated it or are holding a relayed copy; ttl=0 (stopped

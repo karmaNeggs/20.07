@@ -80,6 +80,11 @@
     your location, photos you choose to share, who's in your group — either stays on your phone or
     goes directly, encrypted, to the other phones in your own group over Bluetooth. There is
     nothing for us (the developers) to see, sell, or hand over, because nothing is ever sent to us.
+    <br><br>
+    <strong>One optional exception, off by default:</strong> if you turn on <em>Internet reach</em>, your phone
+    can also send your group's end-to-end-encrypted messages and live locations over the internet through
+    public relay servers that other people run (not us), so group members who are out of Bluetooth range can
+    still reach each other. See "Optional: Internet reach" below.
   </div>
 
   <h2>Who this is</h2>
@@ -141,8 +146,33 @@
       to any database, log, or file.</li>
   </ul>
 
+  <h2>Optional: Internet reach (off by default)</h2>
+  <p>
+    This feature is <strong>off until you turn it on</strong>, and the app works fully without it. When on, your
+    phone connects over Wi-Fi or mobile data to public Nostr relay servers (a small, changing list, for example
+    relay.snort.social and nos.lol) and sends them your group's messages and live locations so that group members
+    who are out of Bluetooth range can receive them. It can also carry such messages for nearby group members
+    who have no signal, and it works with Bluetooth switched off.
+  </p>
+  <ul>
+    <li><strong>What the relays can see:</strong> your phone's internet (IP) address, the timing and size of what
+      is sent, and a short rotating code that stands in for your group. They cannot read messages or locations:
+      those are encrypted with your group's key before they leave your phone. We do not run these relays and
+      cannot control how they handle or keep what they receive. Some relays keep what they are sent, possibly until a
+      message's expiry (the app sets 7 days) or longer, which is why everything is encrypted for your group and the
+      group codes are short-lived.</li>
+    <li><strong>What we, the developers, see:</strong> nothing. No data is sent to us.</li>
+    <li><strong>Your group members</strong> must also have Internet reach turned on to be reached this way.</li>
+    <li><strong>Cost:</strong> it uses mobile data and some battery while on. You can turn it off any time with
+      the Internet tile on the home screen; the app then behaves exactly as before.</li>
+    <li>It uses a throwaway signing key, replaced every 7 days, only to sign what it sends to relays. The key does
+      not identify you and protects no message content.</li>
+  </ul>
+
   <h2>Permissions the app requests, and why</h2>
   <ul>
+    <li><strong>Internet and network state</strong> — used only for the optional Internet reach feature above, and
+      only when you turn it on.</li>
     <li><strong>Bluetooth</strong> (scan/advertise/connect) — the entire mesh network runs over
       this. Required for the app to work at all.</li>
     <li><strong>Location</strong> (including background) — powers the radar/navigate feature.

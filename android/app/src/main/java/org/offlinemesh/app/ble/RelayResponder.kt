@@ -478,6 +478,39 @@ class RelayResponder(
         return frames
     }
 
+    /** v3 internet uplink (decision 71): this group's presence plus positions (own, and those held for other
+     *  members), sealed exactly as for BLE. Positions that themselves arrived over the internet are excluded by
+     *  the same split-horizon rule used for BLE peers, so they never echo back to the relay. */
+    suspend fun uplinkLiveFrames(groupId: String): List<ByteArray> {
+        val frames = mutableListOf<ByteArray>()
+        repo.getGroupKey(groupId)?.let { rootKey ->
+            val identity = repo.getSenderKeyPair(groupId)
+            val timestamp = System.currentTimeMillis()
+            val contentKey = CryptoUtils.contentEpochKey(rootKey, timestamp / MILLIS_PER_SECOND)
+            frames += MeshFrameCodec.encodePresence(
+                groupId, repo.senderIdFor(groupId), timestamp, rootKey, contentKey,
+                senderPublicKey = identity?.publicKey, signingPrivateKey = identity?.privateKey,
+            )
+        }
+        frames += positionFramesToPush(groupId, INTERNET_PEER)
+        return frames
+    }
+
+    /** v3 internet uplink: this group's stored messages and nicknames as (stable id, sealed frame), so each is
+     *  published once. */
+    suspend fun uplinkMailboxItems(groupId: String): List<Pair<String, ByteArray>> {
+        val items = mutableListOf<Pair<String, ByteArray>>()
+        for (sos in relay.sosForUplink(groupId)) {
+            val sealed = sos.sealed ?: continue
+            val handle = sos.handle ?: continue
+            items += "sos:${sos.id}" to MeshFrameCodec.reframeSosForRelay(handle, sos.id, sos.ttl, sos.hop, sealed)
+        }
+        for (n in relay.nicknamesForGroup(groupId)) {
+            items += "nick:${n.groupId}:${n.senderId}:${n.updatedAt}" to MeshFrameCodec.encodeNickname(n)
+        }
+        return items
+    }
+
     /** Call periodically (~15-20s, see `MeshGattClient`'s refresh loop) on an already-open,
      *  persistent link — PLAN-v2.md P3 kept links open far past the moment
      *  [framesToPushOnConnect] used to be the only chance presence/position/nicknames ever had to
@@ -1505,6 +1538,10 @@ class RelayResponder(
     }
 
     companion object {
+        /** Synthetic peer address for frames that arrived over the internet rather than a BLE link (v3). Used so
+         *  the existing split-horizon rules keep internet-learned positions from being re-published to the relay. */
+        const val INTERNET_PEER = "internet"
+
         // How much of a sender/group id may appear in a log line — enough to tell peers apart
         // while never writing a full identifier to disk (see DiagnosticsLog's class doc).
         internal const val SENDER_ID_LOG_CHARS = 8

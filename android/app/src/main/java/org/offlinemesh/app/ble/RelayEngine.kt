@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicInteger
 class RelayEngine(private val context: Context, private val repo: GroupRepository) {
 
     companion object {
+        /** Most recent messages per group handed to the v3 internet uplink. */
+        const val UPLINK_SOS_LIMIT = 50
+
         const val CHUNK_SIZE = 400
         const val DEFAULT_TTL = 8
         private const val TAG = "RelayEngine"
@@ -547,6 +550,10 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     // `@Query`s (`WHERE ttl > 0`, see Daos.kt) — harmless (both sides agree), but dead weight re-run
     // on every catalog-filter exchange per connection. Removed; the DAO's own SQL is authoritative.
     suspend fun relayableSos(): List<SosEntity> = sosDao.getRelayable()
+
+    /** Messages of [groupId] for the v3 internet uplink, regardless of ttl (see [SosDao.recentForGroup]). */
+    suspend fun sosForUplink(groupId: String, limit: Int = UPLINK_SOS_LIMIT): List<SosEntity> =
+        sosDao.recentForGroup(groupId, limit)
 
     suspend fun relayableEvidenceMeta(): List<EvidenceEntity> = evidenceDao.getRelayable()
 
