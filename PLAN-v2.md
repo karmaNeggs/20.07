@@ -3315,3 +3315,30 @@ tag plus the last N hourly tags, capped at `NostrGatewayLink.MAX_INTEREST_TAGS` 
 them to `NostrGatewayLink.setInterestTags`. The frame carries tags only: no group id, name or key. A gateway
 learns that a nearby phone listens for those opaque values, which a BLE scan of beacons already reveals.
 
+### 13.17 The win condition, and the resulting build order (author, 2026-10-05)
+
+**Win 1 (internet-only):** two phones with **Bluetooth off** and only the Internet-reach switch on can
+message each other and see each other's location, with no BLE at all.
+**Win 2 (bridge):** three phones, A on BLE only, B on BLE plus internet, C on internet only (Bluetooth
+off). **A and C message each other in both directions**, through B.
+
+Consequences:
+1. **An online phone is a full endpoint**, not only a relay. It wraps and publishes its own frames, and it
+   subscribes to its own groups' tags itself (no interest frame needed). This was in 13.15 but not in G1.
+2. **Members are the bridge.** B is a member of the group and holds the key, so B can wrap any frame of its
+   own groups (its own, and the positions and texts it holds for A) without being a blind mule. The
+   keyless stranger-mule, the interest frame (13.16), BLE carry of `FRAME_UPLINK` and its `VERSION` bump
+   are **deferred to G3**; they are not needed for either win.
+3. **The service must run with Bluetooth off** when the switch is on, and the UI must not block on
+   Bluetooth in that case.
+4. **Receiving needs no new path:** an `inner` frame from the relay goes through the existing
+   `RelayResponder.handleIncoming`, so a text lands in chat and a position on the radar exactly as over BLE,
+   and the existing BLE flood-forward then carries it from B on to A.
+
+Revised order: **G2a** tags and wrapper (pure, tested); **G2b** the service controller (switch state,
+connectivity, link lifecycle, own-frame producers, inbound injection, Bluetooth-off operation);
+**G2c** switch UI and consent, INTERNET and network-state permissions, privacy page and Data Safety text;
+**G3** blind mule, interest frame, `VERSION` 13, last-known position display. Class POSITION_LAST_KNOWN
+stays in the codec but is not produced until G3, because showing "last seen N min ago" needs radar work.
+**Done line for G2:** Win 1 and Win 2 on real phones, with the switch off meaning behaviour identical to v2.
+

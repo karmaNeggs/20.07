@@ -4328,3 +4328,14 @@ a keyless gateway cannot learn hourly mailbox tags; `PLAN-v2.md` §13.16 adds a 
 for G2. **Not tested:** a phone on cellular, battery and background limits at targetSdk 36, a long run, or real
 BLE clusters.
 
+
+## 71. Win condition: internet-only phones and a bridge; members first, blind mule later (2026-10-05)
+
+Author's win condition: (1) two phones with Bluetooth off and only this feature on can communicate;
+(2) with three phones, A on BLE only, B on BLE plus internet, C on internet only, A and C can message each
+other. This makes an online phone a full endpoint (publish own frames, subscribe to own tags) and makes the
+group members themselves the bridge, since they hold the keys. G2 is therefore reordered (`PLAN-v2.md`
+§13.17): member endpoint and bridge first; the keyless stranger-mule, interest frame, BLE carry of
+`FRAME_UPLINK`, `VERSION` 13 and last-known-position display move to G3. No `VERSION` bump is needed for G2,
+because uplink frames travel only over the relay and inner frames keep the current version.
+
