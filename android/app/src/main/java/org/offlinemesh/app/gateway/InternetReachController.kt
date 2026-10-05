@@ -28,6 +28,9 @@ interface UplinkSource {
 
     /** Messages and nicknames, sealed, ready to wrap as TEXT. */
     suspend fun mailboxItems(groupId: String): List<MailboxItem>
+
+    /** The newest position known for each member (own included), sealed, ready to wrap as POSITION_LAST_KNOWN. */
+    suspend fun lastKnownFrames(groupId: String): List<ByteArray>
 }
 
 /**
@@ -45,21 +48,25 @@ interface UplinkSource {
 class InternetReachController(
     private val source: UplinkSource,
     private val newLink: (inject: (ByteArray) -> Unit) -> UplinkLink,
-    private val onInbound: suspend (inner: ByteArray) -> Unit,
+    private val onInbound: suspend (cls: Int, inner: ByteArray) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
     private val config: Config = Config(),
 ) {
     data class Config(
         val liveIntervalMs: Long = LIVE_INTERVAL_MS,
         val mailboxIntervalMs: Long = MAILBOX_INTERVAL_MS,
+        val lastKnownIntervalMs: Long = LAST_KNOWN_INTERVAL_MS,
         val interestIntervalMs: Long = INTEREST_INTERVAL_MS,
         val maxUplinkedIds: Int = MAX_UPLINKED_IDS,
     )
 
     private var link: UplinkLink? = null
-    private var inbound = Channel<ByteArray>(Channel.UNLIMITED)
+    private class Inbound(val cls: Int, val inner: ByteArray)
+
+    private var inbound = Channel<Inbound>(Channel.UNLIMITED)
     private var lastLiveAt = 0L
     private var lastMailboxAt = 0L
+    private var lastKnownAt = 0L
     private var lastInterestAt = 0L
     private val uplinkedIds = object : LinkedHashMap<String, Boolean>(INITIAL_CAPACITY, LOAD_FACTOR, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > config.maxUplinkedIds
@@ -73,8 +80,12 @@ class InternetReachController(
         if (link != null) return
         inbound = Channel(Channel.UNLIMITED)
         val channel = inbound
-        link = newLink { encodedUplink -> UplinkWrapper.unwrap(encodedUplink)?.let { channel.trySend(it) } }
-        lastLiveAt = 0; lastMailboxAt = 0; lastInterestAt = 0
+        link = newLink { encodedUplink ->
+            (MeshFrameCodec.decode(encodedUplink) as? MeshFrameCodec.Frame.Uplink)?.let {
+                channel.trySend(Inbound(it.cls, it.inner))
+            }
+        }
+        lastLiveAt = 0; lastMailboxAt = 0; lastKnownAt = 0; lastInterestAt = 0
     }
 
     fun stop() {
@@ -97,6 +108,7 @@ class InternetReachController(
         if (l.hasConnectedRelay()) {
             if (t - lastLiveAt >= config.liveIntervalMs) { lastLiveAt = t; produceLive(l, t / MS_PER_SEC) }
             if (t - lastMailboxAt >= config.mailboxIntervalMs) { lastMailboxAt = t; produceMailbox(l, t / MS_PER_SEC) }
+            if (t - lastKnownAt >= config.lastKnownIntervalMs) { lastKnownAt = t; produceLastKnown(l, t / MS_PER_SEC) }
         }
         l.tick()
         drainInbound()
@@ -106,6 +118,15 @@ class InternetReachController(
         for (g in source.groups()) {
             for (frame in source.liveFrames(g.id)) {
                 l.offerLocal(UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_LIVE, frame, nowSec))
+            }
+        }
+    }
+
+    private suspend fun produceLastKnown(l: UplinkLink, nowSec: Long) {
+        for (g in source.groups()) {
+            for (frame in source.lastKnownFrames(g.id)) {
+                val cls = MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN
+                l.offerLocal(UplinkWrapper.wrap(g.rootKey, cls, frame, nowSec))
             }
         }
     }
@@ -123,14 +144,15 @@ class InternetReachController(
 
     private suspend fun drainInbound() {
         while (true) {
-            val inner = inbound.tryReceive().getOrNull() ?: return
-            onInbound(inner)
+            val item = inbound.tryReceive().getOrNull() ?: return
+            onInbound(item.cls, item.inner)
         }
     }
 
     companion object {
         const val LIVE_INTERVAL_MS = 10_000L
         const val MAILBOX_INTERVAL_MS = 5_000L
+        const val LAST_KNOWN_INTERVAL_MS = 60_000L
         const val INTEREST_INTERVAL_MS = 30_000L
         const val MAX_UPLINKED_IDS = 2048
         private const val MS_PER_SEC = 1000L

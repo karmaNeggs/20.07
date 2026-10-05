@@ -14,6 +14,8 @@ class ResponderUplinkSource(
 
     override suspend fun liveFrames(groupId: String): List<ByteArray> = responder.uplinkLiveFrames(groupId)
 
+    override suspend fun lastKnownFrames(groupId: String): List<ByteArray> = responder.uplinkLastKnownFrames(groupId)
+
     override suspend fun mailboxItems(groupId: String): List<MailboxItem> =
         responder.uplinkMailboxItems(groupId).map { (id, frame) -> MailboxItem(id, frame) }
 }

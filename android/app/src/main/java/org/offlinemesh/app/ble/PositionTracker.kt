@@ -68,6 +68,12 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
     // forGroup(). Removed rather than left as a cost nothing collected.
     private val table = ConcurrentHashMap<Key, Record>()
 
+    // v3 "last seen" (decision 71/73): the newest position ever heard per member, kept past the live window so a
+    // mate who went quiet, or who is only reachable through the internet, can still be shown as "last seen N min
+    // ago". RAM only like [table], same "nothing durable to find on a seized phone" property, and capped at
+    // [LAST_SEEN_MAX_AGE_SECONDS] so a stored trail is short-lived.
+    private val lastSeen = ConcurrentHashMap<Key, Record>()
+
     // Live-tested gap: ConnectionAttemptTracker already skips a peer's reconnect cooldown early
     // when there's genuinely new CONTENT to offer them (RelayEngine.catalogEpoch — see that
     // class's doc), but had no equivalent for position: a phone that just picked up a fresher
@@ -103,9 +109,44 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
                 (existing.timestampSec == timestampSec && existing.hop <= hop)
             )
         if (staleOrWorse) return
-        table[key] = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
+        val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
+        table[key] = record
+        rememberLastSeen(key, record)
         epoch.incrementAndGet()
         prune()
+    }
+
+    /** A position that is too old for the live radar (it arrived late, over the internet) but still worth showing as
+     *  "last seen". Never touches the live table, so it cannot appear as a live dot. */
+    @Suppress("LongParameterList") // wire-shaped scalars, matching [offer]
+    fun offerLastSeen(
+        groupId: String,
+        senderId: String,
+        lat: Double,
+        lon: Double,
+        accuracyM: Int,
+        timestampSec: Long,
+        hop: Int,
+        viaPeer: String? = null,
+        sealed: ByteArray? = null,
+        handle: ByteArray? = null,
+    ) {
+        val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
+        rememberLastSeen(Key(groupId, senderId), record)
+    }
+
+    private fun rememberLastSeen(key: Key, record: Record) {
+        val existing = lastSeen[key]
+        if (existing == null || existing.timestampSec <= record.timestampSec) lastSeen[key] = record
+    }
+
+    /** Members of [groupId] whose newest known position is older than the live window (so they are not on the live
+     *  radar) but younger than [LAST_SEEN_MAX_AGE_SECONDS]. Keyed by sender id. */
+    fun lastSeenForGroup(groupId: String): Map<String, Record> {
+        val nowSec = now() / 1000
+        lastSeen.entries.removeAll { nowSec - it.value.timestampSec > LAST_SEEN_MAX_AGE_SECONDS }
+        val live = forGroup(groupId).keys
+        return lastSeen.filterKeys { it.groupId == groupId && it.senderId !in live }.mapKeys { it.key.senderId }
     }
 
     fun forGroup(groupId: String): Map<String, Record> {
@@ -133,6 +174,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
      *  group is gone from the UI's own group list, but no reason to hold onto it. */
     fun clearForGroup(groupId: String) {
         table.keys.filter { it.groupId == groupId }.forEach { table.remove(it) }
+        lastSeen.keys.filter { it.groupId == groupId }.forEach { lastSeen.remove(it) }
     }
 
     /** Periodic safety net alongside [clearForGroup]'s immediate per-group clear (decision 30) —
@@ -143,6 +185,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
      *  sweep" shape as `GroupRepository.sweepOrphanKeys`. */
     fun pruneOrphaned(activeGroupIds: Set<String>) {
         table.keys.filter { it.groupId !in activeGroupIds }.forEach { table.remove(it) }
+        lastSeen.keys.filter { it.groupId !in activeGroupIds }.forEach { lastSeen.remove(it) }
     }
 
     companion object {
@@ -152,6 +195,9 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
 
         /** See the class-level note on why this is 180s and not 90s. */
         private const val BASE_MAX_AGE_SECONDS = 180L
+
+        /** How long a "last seen" position is kept: 6 hours (PLAN-v2.md §13.15; the author may shorten it). */
+        const val LAST_SEEN_MAX_AGE_SECONDS = 6L * 3600
 
         // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — [hop]'s slack contribution is now
         // capped here, NOT decoupled from maxPositionRelayHops the way decision 33 (below) left it.

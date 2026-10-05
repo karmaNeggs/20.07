@@ -17,9 +17,11 @@ class InternetReachControllerTest {
     private class FakeSource(val key: ByteArray, val groupId: String = "g1") : UplinkSource {
         val live = ArrayList<ByteArray>()
         val mailbox = ArrayList<MailboxItem>()
+        val lastKnown = ArrayList<ByteArray>()
         override suspend fun groups() = listOf(UplinkGroup(groupId, key))
         override suspend fun liveFrames(groupId: String) = live.toList()
         override suspend fun mailboxItems(groupId: String) = mailbox.toList()
+        override suspend fun lastKnownFrames(groupId: String) = lastKnown.toList()
     }
 
     private class FakeLink : UplinkLink {
@@ -38,7 +40,7 @@ class InternetReachControllerTest {
     }
 
     private fun fakeController(source: UplinkSource, link: FakeLink, inbound: MutableList<ByteArray> = ArrayList()) =
-        InternetReachController(source, { link }, { inbound.add(it) }, { nowMs })
+        InternetReachController(source, { link }, { _, inner -> inbound.add(inner) }, { nowMs })
 
     private fun step(c: InternetReachController, ms: Long = 1000) = runBlocking { nowMs += ms; c.step() }
 
@@ -102,11 +104,13 @@ class InternetReachControllerTest {
         val source: FakeSource,
         val controller: InternetReachController,
         val inbound: ArrayList<ByteArray>,
+        val lastKnownInbound: ArrayList<ByteArray> = ArrayList(),
     )
 
     private fun phone(name: String, net: FakeRelayNetwork, key: ByteArray): Phone {
         val src = FakeSource(key)
         val inbound = ArrayList<ByteArray>()
+        val lastKnownInbound = ArrayList<ByteArray>()
         val urls = listOf("wss://a", "wss://b", "wss://c")
         val c = InternetReachController(
             src,
@@ -116,11 +120,14 @@ class InternetReachControllerTest {
                     urls, net.connector(), GatewayKeyHolder({ nowMs }), { nowMs }, inject,
                 )
             },
-            { inbound.add(it) },
+            { cls, inner ->
+                val target = if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) lastKnownInbound else inbound
+                target.add(inner)
+            },
             { nowMs },
         )
         c.start()
-        return Phone(name, src, c, inbound)
+        return Phone(name, src, c, inbound, lastKnownInbound)
     }
 
     private fun run(phones: List<Phone>, seconds: Int) = repeat(seconds) {
@@ -155,6 +162,32 @@ class InternetReachControllerTest {
         assertEquals("C gets A's text once", 1, c.inbound.count { it.contentEquals(textA) })
         val atBridge = bridge.inbound.count { it.contentEquals(textC) }
         assertEquals("B receives C's text, ready to flood to A over BLE", 1, atBridge)
+    }
+
+    @Test fun `a last-known position reaches a phone that joins after it was published`() {
+        val net = FakeRelayNetwork()
+        val a = phone("A", net, groupKey)
+        val pos = ByteArray(280) { 11 }
+        a.source.lastKnown.add(pos)
+        run(listOf(a), 15)
+        val late = phone("late", net, groupKey)
+        run(listOf(a, late), 20)
+        assertEquals("delivered once as last-known", 1, late.lastKnownInbound.count { it.contentEquals(pos) })
+        assertTrue("never delivered as live", late.inbound.none { it.contentEquals(pos) })
+    }
+
+    @Test fun `last-known frames are produced about once a minute under the mailbox tag`() {
+        val link = FakeLink(); val src = FakeSource(groupKey)
+        src.lastKnown.add(ByteArray(50) { 1 })
+        val c = fakeController(src, link); c.start()
+        step(c)
+        step(c, 30_000)
+        assertEquals(1, link.offered.size)
+        step(c, 40_000)
+        assertEquals(2, link.offered.size)
+        val f = link.offered.first()
+        assertEquals(MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN, f.cls)
+        assertArrayEquals(UplinkTags.mailboxTag(groupKey, f.createdAtSec), f.relayTag)
     }
 
     @Test fun `a group that is not ours never receives our frames`() {

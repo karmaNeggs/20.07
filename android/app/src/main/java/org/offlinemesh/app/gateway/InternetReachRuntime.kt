@@ -101,7 +101,11 @@ class InternetReachRuntime(
     }
 
     /** A frame that arrived over the internet goes through the same handler as one from a BLE neighbour. */
-    private suspend fun handleInbound(inner: ByteArray) {
+    private suspend fun handleInbound(cls: Int, inner: ByteArray) {
+        if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {
+            responder.ingestLastKnownPosition(inner)
+            return
+        }
         val sos = MeshFrameCodec.decode(inner) as? MeshFrameCodec.Frame.SosSealed
         if (sos != null) controller.markUplinked("sos:${sos.id}")
         responder.handleIncoming(inner, RelayResponder.INTERNET_PEER) { }

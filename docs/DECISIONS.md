@@ -4366,3 +4366,23 @@ LIVE window (120 s) is dropped; (4) stranger-carrying mule mode, interest frame,
 OkHttp dependency still needs its Part 12 review; (7) background networking limits at targetSdk 36 and battery
 cost are unmeasured.
 
+
+## 73. G3a: last-known positions and the "Last seen" list; G3b paused (2026-10-05)
+
+The author asked that location packets travel too ("especially location packets"). `PositionTracker` now keeps the
+newest position per member in RAM (never on disk) for 6 hours; `lastSeenForGroup` returns those who are not live.
+A new home-screen list shows each as name, age, distance and compass direction, as plain text so a stale or distant
+position cannot be mistaken for a live dot. Members publish `POSITION_LAST_KNOWN` about once a minute (own fix plus
+the newest position held for others, never anything that itself came from the internet) and ingest it through
+`RelayResponder.ingestLastKnownPosition`, which records it for "last seen" only: no live dot, no presence or hop
+update. On the relay it expires after 6 hours, sooner than a text (7 days), because a stored location trail is the
+most sensitive thing this feature creates. **The 6 hour window is still the author's to confirm.**
+
+**Bug caught before shipping:** `learnPeerIdentity("internet", senderId)` would have mapped the synthetic peer to a
+member, which breaks both the split-horizon echo control and the flood-forward exclusion. It now ignores the
+synthetic peer. 622 tests, detekt, lint and both release builds green; version 0.8.1-dev.
+
+**G3b paused on purpose** (stranger mule, interest frame, BLE carry of `FRAME_UPLINK`, `VERSION` 13): neither win
+condition needs it, it changes the BLE push path and cuts old builds off, and the first real round may change its
+design. See `PLAN-v2.md` §13.18.
+

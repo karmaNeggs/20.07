@@ -3342,3 +3342,12 @@ connectivity, link lifecycle, own-frame producers, inbound injection, Bluetooth-
 stays in the codec but is not produced until G3, because showing "last seen N min ago" needs radar work.
 **Done line for G2:** Win 1 and Win 2 on real phones, with the switch off meaning behaviour identical to v2.
 
+### 13.18 G3 split (2026-10-05): last-known first, the stranger mule after the real round
+
+**G3a, built:** last-known positions and the "Last seen" list (decision 73). It also works over Bluetooth alone: any
+member who goes quiet is listed as last seen for up to 6 hours, held in RAM only.
+**G3b, deliberately paused:** the keyless stranger mule, `FRAME_UPLINK_INTEREST`, BLE carry of `FRAME_UPLINK` and the
+`VERSION` 13 bump. Reasons: neither win condition needs it; it changes the BLE push path and cuts old builds off
+(`decode` drops any other version), so it would invalidate the build the first real round is about to test; and the
+round may show problems in the synthetic `internet` peer seam that change G3b's design. Do it after the round.
+

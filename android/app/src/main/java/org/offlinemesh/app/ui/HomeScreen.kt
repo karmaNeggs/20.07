@@ -81,6 +81,18 @@ fun HomeScreen(
         groups.associate { it.id to svc.hopToGroupPresence(it.id) }
     }
 
+    // Mates who are not on the live radar but were seen within the last 6 hours (decision 73): shown as plain text,
+    // never as a dot, so a stale or far-away position cannot be mistaken for a live one.
+    val nicknames by produceState(emptyMap<String, String>(), groups, meshService) {
+        val svc = meshService
+        value = if (svc == null) emptyMap() else groups.flatMap { svc.nicknamesFor(it.id) }
+            .associate { "${it.groupId}:${it.senderId}" to it.username }
+    }
+    val lastSeenRows = remember(radarTick, groups, meshService, nicknames) {
+        val svc = meshService
+        if (svc == null) emptyList() else buildLastSeenRows(svc, groups, myLocation, nicknames)
+    }
+
     val dots = remember(radarTick, groups, meshService) {
         val me = myLocation
         val svc = meshService
@@ -167,6 +179,9 @@ fun HomeScreen(
                     } else {
                         RadarCanvas(dots = dots, headingDegrees = heading)
                     }
+                }
+                if (lastSeenRows.isNotEmpty()) {
+                    item { LastSeenList(lastSeenRows) }
                 }
                 item {
                     Column(Modifier.fillMaxWidth()) {
@@ -334,67 +349,9 @@ private fun QuickToggleTiles(meshService: MeshService?, onGeneralSos: () -> Unit
     }
 }
 
-/** The single "Internet reach" switch (decision 68), off by default. Turning it ON asks first, in plain words. */
-@Composable
-private fun InternetReachTile(meshService: MeshService?, modifier: Modifier) {
-    val reach = meshService?.internetReach
-    val on by (reach?.settings?.enabled?.collectAsState() ?: remember { mutableStateOf(false) })
-    var askConsent by remember { mutableStateOf(false) }
-    ToggleTile(
-        spec = TileSpec(Icons.Filled.Public, "Internet", AppColors.Accent),
-        active = on,
-        contentDescription = if (on) "Internet reach, on" else "Internet reach, off",
-        modifier = modifier,
-        onToggle = { wantOn -> if (wantOn) askConsent = true else reach?.settings?.setEnabled(false) },
-    )
-    if (askConsent) {
-        AlertDialog(
-            onDismissRequest = { askConsent = false },
-            title = { Text("Reach beyond Bluetooth?") },
-            text = {
-                Text(
-                    "When this is on, your phone can send your group's messages and live locations over the " +
-                        "internet (Wi-Fi or mobile data), and can carry them for group members who have no " +
-                        "signal. It works even with Bluetooth off.\n\n" +
-                        "Everything stays encrypted for your group. The public relay servers it uses only see " +
-                        "scrambled data, your phone's internet address and the timing.\n\n" +
-                        "Your mates need this on too. It uses some mobile data and battery. " +
-                        "You can turn it off any time.",
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { reach?.settings?.setEnabled(true); askConsent = false }) { Text("Turn on") }
-            },
-            dismissButton = { TextButton(onClick = { askConsent = false }) { Text("Not now") } },
-        )
-    }
-}
-
-/** One quiet line under the tiles saying what Internet reach is doing, shown only while it is switched on. */
-@Composable
-private fun InternetReachStatusLine(meshService: MeshService?) {
-    val reach = meshService?.internetReach ?: return
-    val on by reach.settings.enabled.collectAsState()
-    val status by reach.status.collectAsState()
-    if (!on) return
-    val text = when (status) {
-        InternetReachRuntime.Status.ACTIVE -> "Internet reach: connected, relaying for your group"
-        InternetReachRuntime.Status.CONNECTING -> "Internet reach: connecting\u2026"
-        InternetReachRuntime.Status.WAITING_FOR_NETWORK -> "Internet reach: waiting for Wi-Fi or mobile data"
-        InternetReachRuntime.Status.OFFLINE_MODE -> "Internet reach: paused by Offline mode"
-        InternetReachRuntime.Status.OFF -> return
-    }
-    Text(
-        text,
-        modifier = Modifier.padding(top = 8.dp),
-        color = AppColors.OnSurfaceMuted,
-        style = MaterialTheme.typography.bodySmall,
-    )
-}
-
 /** A tile's static appearance (icon/label/glow color) — separated from its dynamic [ToggleTile]
  *  state (active/description/callback) purely to keep that composable's parameter count small. */
-private data class TileSpec(val icon: ImageVector, val label: String, val activeColor: Color)
+internal data class TileSpec(val icon: ImageVector, val label: String, val activeColor: Color)
 
 /** A compact, square, icon+one-word toggle — the shared shape behind every tile in
  *  [QuickToggleTiles]. Compact visually, but not for accessibility: [Modifier.toggleable]'s
@@ -404,7 +361,7 @@ private data class TileSpec(val icon: ImageVector, val label: String, val active
  *  resting state and [TileSpec.activeColor] via [animateColorAsState] — the "glow when active,
  *  fade when inactive" effect, done with Compose's built-in color animation, no new dependency. */
 @Composable
-private fun ToggleTile(
+internal fun ToggleTile(
     spec: TileSpec,
     active: Boolean,
     contentDescription: String,

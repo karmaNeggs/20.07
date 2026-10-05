@@ -231,6 +231,8 @@ class RelayResponder(
      *  count even as `addresses=` climbs with rotation, instead of the two tracking together like
      *  the pre-P0b `19-prefixes-for-3-phones` diagnostics. */
     private fun learnPeerIdentity(address: String, stableKey: String) {
+        // The synthetic internet peer is not a BLE address: mapping it to a member would corrupt split horizon.
+        if (address == INTERNET_PEER) return
         if (!peerIdentity.learn(address, stableKey)) return
         DiagnosticsLog.event(
             "identity",
@@ -542,6 +544,55 @@ class RelayResponder(
         return frames
     }
 
+    /** This phone's own fix, sealed for [groupId] and signed with its identity, or null if there is no GPS fix. */
+    private fun ownPositionFrame(groupId: String, rootKey: ByteArray): ByteArray? {
+        val myLoc = locationTracker.location.value ?: return null
+        val nowSec = System.currentTimeMillis() / 1000
+        // Decision 39 (docs/DECISIONS.md): sealed under the current epoch's derived content
+        // key; groupHandle (inside encodePosition) stays on the root key, unchanged.
+        val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
+        return MeshFrameCodec.encodePosition(
+            rootKey, contentKey, repo.senderIdFor(groupId), myLoc.latitude, myLoc.longitude,
+            myLoc.accuracy.toInt(), nowSec, 0,
+            signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
+        )
+    }
+
+    /** v3 last-known uplink (decision 73): this phone's own fix plus the newest position held for every other member
+     *  (live or last seen), sealed as received. Anything that itself came from the internet is left out so it
+     *  never echoes back to the relay. */
+    suspend fun uplinkLastKnownFrames(groupId: String): List<ByteArray> {
+        val rootKey = repo.getGroupKey(groupId) ?: return emptyList()
+        val frames = mutableListOf<ByteArray>()
+        ownPositionFrame(groupId, rootKey)?.let { frames.add(it) }
+        val me = repo.senderIdFor(groupId)
+        val known = positionTracker.lastSeenForGroup(groupId) + positionTracker.forGroup(groupId)
+        for ((sender, record) in known) {
+            val sealed = record.sealed
+            val handle = record.handle
+            val relayable = sender != me && record.viaPeer != INTERNET_PEER
+            if (relayable && sealed != null && handle != null) {
+                frames.add(MeshFrameCodec.reframePositionForRelay(handle, record.hop + 1, sealed))
+            }
+        }
+        return frames
+    }
+
+    /** v3: a position that arrived over the internet as "last known". Recorded for the "last seen" list only, never
+     *  as a live dot, and never fed to presence or hop tracking (it may be hours old). */
+    suspend fun ingestLastKnownPosition(inner: ByteArray) {
+        val frame = MeshFrameCodec.decode(inner) as? MeshFrameCodec.Frame.PositionSealed ?: return
+        val (groupId, rootKey) = repo.resolveGroupKeyByHandle(frame.handle) ?: return
+        val body = CryptoUtils.candidateContentEpochKeys(rootKey)
+            .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return
+        if (body.senderId == repo.senderIdFor(groupId)) return
+        if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) return
+        positionTracker.offerLastSeen(
+            groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, frame.hop,
+            viaPeer = INTERNET_PEER, sealed = frame.sealed, handle = frame.handle,
+        )
+    }
+
     /** My own fix, plus whatever I'm holding on behalf of other group members, one hop further out
      *  — capped to the nearest [MAX_RELAYED_POSITIONS_PER_GROUP] (see [selectPositionsToRelay]'s
      *  doc for why). Every frame is AES-GCM-sealed under the group key, so this is safe to push
@@ -550,20 +601,7 @@ class RelayResponder(
     private fun positionFramesToPush(groupId: String, toPeer: String? = null): List<ByteArray> {
         val rootKey = repo.getGroupKey(groupId) ?: return emptyList()
         val frames = mutableListOf<ByteArray>()
-        val myLoc = locationTracker.location.value
-        if (myLoc != null) {
-            val nowSec = System.currentTimeMillis() / 1000
-            // Decision 39 (docs/DECISIONS.md): sealed under the current epoch's derived content
-            // key; groupHandle (inside encodePosition) stays on the root key, unchanged.
-            val contentKey = CryptoUtils.contentEpochKey(rootKey, nowSec)
-            frames.add(
-                MeshFrameCodec.encodePosition(
-                    rootKey, contentKey, repo.senderIdFor(groupId), myLoc.latitude, myLoc.longitude,
-                    myLoc.accuracy.toInt(), nowSec, 0,
-                    signingPrivateKey = repo.getSenderKeyPair(groupId)?.privateKey
-                )
-            )
-        }
+        ownPositionFrame(groupId, rootKey)?.let { frames.add(it) }
         // Only OUR OWN fix above gets signed with OUR identity — a position we're relaying on
         // someone else's behalf was already signed (if at all) by ITS original sender before it
         // ever reached us; we have no private key to sign as them, and re-signing as ourselves

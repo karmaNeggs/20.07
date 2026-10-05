@@ -93,12 +93,20 @@ class NostrGatewayLink(
 
     override fun hasConnectedRelay(): Boolean = pool.hasConnectedRelay()
 
+    /** A last-known position is the most sensitive thing stored on a relay, so it expires sooner than a text. */
+    private fun expirySec(cls: Int): Long =
+        if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {
+            UplinkGateway.POSITION_MAX_AGE_SEC
+        } else {
+            MAILBOX_EXPIRY_SEC
+        }
+
     private fun publish(batch: UplinkGateway.Batch) {
         val nowSec = now() / MS_PER_SEC
         val mailbox = batch.cls != MeshFrameCodec.UPLINK_CLASS_LIVE
         val tags = ArrayList<List<String>>()
         tags.add(listOf("t", batch.relayTag.toHex()))
-        if (mailbox) tags.add(listOf("expiration", (nowSec + MAILBOX_EXPIRY_SEC).toString()))
+        if (mailbox) tags.add(listOf("expiration", (nowSec + expirySec(batch.cls)).toString()))
         val content = Base64.getEncoder().encodeToString(batch.content())
         val event = Nostr.signEvent(keys.current(), nowSec, if (mailbox) MAILBOX_KIND else LIVE_KIND, tags, content)
         synchronized(lock) { inFlight[event.id] = batch }

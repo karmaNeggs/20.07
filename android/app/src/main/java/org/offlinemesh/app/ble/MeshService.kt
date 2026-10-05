@@ -464,6 +464,7 @@ class MeshService : Service() {
     /** Group-level, not global: the same device can carry a different display name per group. */
     suspend fun setNickname(groupId: String, username: String): NicknameEntity = relay.setNickname(groupId, username)
     suspend fun myNickname(groupId: String): NicknameEntity? = relay.myNickname(groupId)
+    suspend fun nicknamesFor(groupId: String): List<NicknameEntity> = relay.nicknamesForGroup(groupId)
 
     // ---------------- foreground notification ----------------
 

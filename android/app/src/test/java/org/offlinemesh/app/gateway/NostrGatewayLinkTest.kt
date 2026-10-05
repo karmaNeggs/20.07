@@ -52,6 +52,18 @@ class NostrGatewayLinkTest {
         assertTrue(got.all { Nostr.verifyEvent(it) })
     }
 
+    @Test fun `a last-known position expires sooner than a text on the relay`() {
+        val s = side()
+        s.link.tick()
+        s.link.offerFromBle(uplink(MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN, ByteArray(100) { 8 }))
+        s.link.offerFromBle(uplink(MeshFrameCodec.UPLINK_CLASS_TEXT, ByteArray(100) { 9 }))
+        repeat(4) { step(s) }
+        val byExpiry = net.server("wss://a").received.map { it.tagValue("expiration")!!.toLong() - nowSec }.sorted()
+        assertEquals(2, byExpiry.size)
+        assertTrue(byExpiry[0] in (UplinkGateway.POSITION_MAX_AGE_SEC - 20)..UplinkGateway.POSITION_MAX_AGE_SEC)
+        assertTrue(byExpiry[1] > UplinkGateway.POSITION_MAX_AGE_SEC)
+    }
+
     @Test fun `content is a base64 batch that decodes back to the uplink frame`() {
         val s = side()
         s.link.tick()

@@ -81,14 +81,14 @@ full manual pass against `test_rubric.md` on a real release build before trustin
 distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
 deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
 
-## Test day — Internet reach (v0.8.0-dev, targetSdk 36)
+## Test day — Internet reach (v0.8.1-dev, targetSdk 36)
 
 First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
 until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
 
 **Before you start**
 - [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
-- [ ] Install `20.07-v0.8.0-dev-debug-internet-reach.apk` on every phone. Grant every permission it asks for.
+- [ ] Install `20.07-v0.8.1-dev-debug-internet-reach.apk` on every phone. Grant every permission it asks for.
 - [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
 - [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
 - [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).
@@ -120,6 +120,14 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 - [ ] PASS = A and C talk both ways through B, and the location is shared both ways.
 - [ ] Turn B's Internet tile OFF. Within a minute A and C stop receiving each other's new messages. Turn it back on: they resume.
 
+**Test 2b — "Last seen" (15 min)**
+- [ ] With A and C both showing on each other's radar (Test 2), switch C's Wi-Fi off, or walk C out of any coverage. After about 3 minutes C's dot leaves A's radar.
+- [ ] A's home screen now shows a **Last seen** line for C: name, "N min ago", and a distance with a compass direction (for example "1.2 km NE"). Check the direction and distance against where C really is.
+- [ ] Bring C back online. The Last seen line disappears and C is a live dot again.
+- [ ] Reverse it: C should show A under Last seen when A goes quiet, if B is still online and relaying.
+- [ ] A phone that joins late (turn Internet reach on for a fourth phone after C went quiet) shows C under Last seen within about a minute. If not, record it.
+- [ ] PASS = last-seen age, distance and direction are right and it never appears as a live dot.
+
 **Test 3 — the awkward cases (20 min)**
 - [ ] Turn C's Wi-Fi off, wait 30 seconds, turn it on. Status goes "waiting for Wi-Fi or mobile data", then back to connected. Messages sent meanwhile arrive afterwards.
 - [ ] Turn on the app's Offline tile on C. Status shows "paused by Offline mode" and C stops sending.
@@ -134,7 +142,6 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 
 **Do NOT report these as bugs, they are known and not built yet**
 - A message sent to a phone that has never been online does not wait for it (stranger-carrying is G3).
-- A mate who went quiet more than 2 minutes ago disappears from the radar; "last seen N minutes ago" is not built yet.
 - Phones that only have Bluetooth and are not members of the group do not carry anything over the internet.
 
 **Also record, because it is unmeasured**
