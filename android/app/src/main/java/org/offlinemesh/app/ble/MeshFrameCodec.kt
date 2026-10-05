@@ -57,6 +57,29 @@ object MeshFrameCodec {
     // move onto instead of GATT. See L2capBulkTransport's own class doc.
     const val FRAME_L2CAP_CAP: Byte = 0x1F // "here's the PSM to open an L2CAP channel to me on"
 
+    // v3 internet gateway (docs/DECISIONS.md decisions 66-68, PLAN-v2.md Part 13) — a member-wrapped
+    // sealed frame a keyless "mule" phone can carry to and from a relay. Added WITHOUT a VERSION bump
+    // in G0 on purpose: decode() drops any frame whose version differs, so a bump severs old builds;
+    // the bump to 13 lands in G2 when this is wired in.
+    const val FRAME_UPLINK: Byte = 0x20
+
+    /** [Frame.Uplink.cls] values. LIVE = fresh position/presence for a mule already present;
+     *  POSITION_LAST_KNOWN = a position deposited as "last seen" for later delivery; TEXT = chat and
+     *  SOS. See PLAN-v2.md §13.15. */
+    const val UPLINK_CLASS_LIVE = 0
+    const val UPLINK_CLASS_POSITION_LAST_KNOWN = 1
+    const val UPLINK_CLASS_TEXT = 2
+
+    /** [Frame.Uplink.flags] bit 0: set by a gateway on frames it injects from the internet; gateways
+     *  never uplink a frame carrying it (loop control). */
+    const val UPLINK_FLAG_FROM_INTERNET = 1
+
+    /** Largest `inner` an uplink may carry: one padded GATT frame (top bucket 2048) plus slack. */
+    const val MAX_UPLINK_INNER_BYTES = 4096
+
+    /** Longest relay tag accepted (the rotating-id HMAC truncation is 6 bytes today). */
+    const val MAX_UPLINK_TAG_BYTES = 32
+
     /** Display names are a small courtesy label, not an identity — kept short so it stays a
      *  one-line, cheap-to-relay addition rather than a second chat field. */
     const val MAX_USERNAME_CHARS = 20
@@ -432,6 +455,19 @@ object MeshFrameCodec {
          *  Replaces the retired `WifiDirectCap` (decision 49) as this codec's "here's how to reach
          *  my own bulk-transfer listener" announcement. */
         data class L2capCap(val psm: Int) : Frame()
+
+        /** v3 gateway wrapper (`PLAN-v2.md` Part 13). [relayTag] is a member-computed rotating HMAC the
+         *  gateway uses as the relay topic without holding any group key; [cls] is one of the
+         *  `UPLINK_CLASS_*` values; [flags] carries `UPLINK_FLAG_*`; [createdAtSec] is cleartext so a
+         *  keyless carrier can expire it; [inner] is one complete, already-sealed existing frame,
+         *  moved verbatim and never opened by a gateway. */
+        data class Uplink(
+            val relayTag: ByteArray,
+            val cls: Int,
+            val flags: Int,
+            val createdAtSec: Long,
+            val inner: ByteArray,
+        ) : Frame()
 
         /** P4 slice 3 (`docs/DECISIONS.md` decision 43, `PLAN-v2.md` §4.2) — a courier envelope on
          *  the wire. [tag] replaces what would otherwise be a cleartext `groupId`, same role
@@ -876,6 +912,17 @@ object MeshFrameCodec {
 
     fun encodeL2capCap(psm: Int): ByteArray = frame(FRAME_L2CAP_CAP) { d -> d.writeInt(psm) }
 
+    /** Wraps one sealed [inner] frame for the internet uplink. Throws on an empty/oversize tag or an
+     *  oversize [inner] — callers build these themselves, so a bad value is a bug, not input. */
+    fun encodeUplink(relayTag: ByteArray, cls: Int, flags: Int, createdAtSec: Long, inner: ByteArray): ByteArray {
+        require(relayTag.isNotEmpty() && relayTag.size <= MAX_UPLINK_TAG_BYTES) { "bad relayTag size ${relayTag.size}" }
+        require(inner.size <= MAX_UPLINK_INNER_BYTES) { "uplink inner too large: ${inner.size}" }
+        return frame(FRAME_UPLINK) { d ->
+            d.writeBlob(relayTag); d.writeByte(cls); d.writeByte(flags); d.writeLong(createdAtSec)
+            d.writeStr16Bytes(inner)
+        }
+    }
+
     // encodeWifiDirectCap/Handoff/Accept lived here through v0.7.15-dev — deleted by decision 49
     // (docs/DECISIONS.md), Wi-Fi Direct's removal (PLAN-v2.md §4.3 item 3).
 
@@ -1146,6 +1193,15 @@ object MeshFrameCodec {
                     val copiesRemaining = buf.get().toInt() and 0xFF
                     val sealed = buf.readStr16Bytes()
                     Frame.Courier(tag, id, createdAt, copiesRemaining, sealed)
+                }
+                FRAME_UPLINK -> {
+                    val tag = buf.readBlob() ?: return null
+                    val cls = buf.get().toInt() and 0xFF
+                    val flags = buf.get().toInt() and 0xFF
+                    val createdAt = buf.long
+                    val inner = buf.readStr16Bytes()
+                    if (inner.size > MAX_UPLINK_INNER_BYTES) return null
+                    Frame.Uplink(tag, cls, flags, createdAt, inner)
                 }
                 else -> null
             }

@@ -4275,3 +4275,24 @@ wrapped for the internet, and I relay for others when online), so finding a mate
 internet requires the switch on at both mates' phones. Next: build G0 (codec + gateway logic + JVM
 tests), no network code.
 
+
+## 69. Mule semantics: location packets and texts both travel, G0 built (2026-10-05)
+
+Author clarification: the gateway is a **mule carrier**, to and fro, and "messages mean texts and
+especially location packets". A message written with no internet rides the BLE mesh, waits on blind
+carriers if nobody online is near, and is uploaded when a phone with the app, the Internet-reach switch
+and a connection passes by; the recipient receives it when their own app is on and connected, or via
+their cluster's mule. An online phone is its own endpoint.
+
+Consequences written into `PLAN-v2.md` §13.15: wrap always while the switch is on; three frame classes
+(LIVE ~2 min, POSITION_LAST_KNOWN up to 6 h with newest-K-per-tag retention and a "last seen N min ago"
+display, TEXT up to 7 days); the local-presence check is a drain priority, not a gate (a held frame's
+sender has left); the mailbox classes use a longer hourly relay tag and a stored relay kind. **The 6 h
+last-known-position window is a proposal the author has not yet confirmed**, and it is the most
+sensitive thing this feature creates (a stored location trail on third-party relays).
+
+**G0 built:** `FRAME_UPLINK` 0x20 and `UplinkGateway`/`UplinkBatch` (`ble/UplinkGateway.kt`), pure
+logic, 26 tests, 546 total, detekt clean. No `VERSION` bump yet because `decode()` drops frames with a
+different version byte, so a bump cuts old builds off; it lands in G2. `RelayResponder` ignores the
+frame until then, so v2 behaviour is unchanged.
+

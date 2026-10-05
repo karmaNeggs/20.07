@@ -1492,6 +1492,8 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.SymbolRequest -> handleSymbolRequest(frame, peerAddress, respond)
                 is MeshFrameCodec.Frame.L2capCap -> handleL2capCap(frame, peerAddress)
                 is MeshFrameCodec.Frame.Courier -> handleCourier(frame, peerAddress)
+                // v3 gateway frame: wired in G2 (PLAN-v2.md Part 13.9). Ignored until then, so G0 changes no behaviour.
+                is MeshFrameCodec.Frame.Uplink -> Unit
             }
         } catch (e: Exception) {
             Log.w("RelayResponder", "frame handling failed: ${e.message}")

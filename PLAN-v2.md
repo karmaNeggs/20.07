@@ -3259,3 +3259,46 @@ reconnect cycle. If a real round exceeds 30 s, the first thing to shorten is the
 ### 13.14 Next action
 
 G0 (13.9): `FRAME_UPLINK` codec and gateway logic with JVM tests, no network code.
+
+### 13.15 Mule semantics (author clarification, 2026-10-05; supersedes parts of 13.3 and 13.4)
+
+The model is a **mule carrier**, to and fro. With the switch ON a phone carries sealed frames between
+the BLE mesh and the internet as it moves. A message written with no internet goes onto the BLE mesh;
+if nobody nearby is online it waits; later someone with the app, the switch ON and a connection passes
+by and uploads it; the intended person receives it when *their* app is on and connected (or via their
+own cluster's mule). A phone that is itself online is its own endpoint: it publishes its own frames
+and subscribes to its own tags directly, no BLE gateway needed.
+
+What this changes in the draft above:
+
+1. **Wrap always while ON** (replaces 13.4's "only while a gateway is seen"). The frame must already be
+   wrapped when a mule appears later. No heartbeat bit is needed for correctness.
+2. **Store-and-forward uses the existing courier custody** (`CourierPool`, `FRAME_COURIER`, decisions 43+):
+   a wrapped frame waits on blind carriers until a mule uploads it. **Three classes** (author: "messages
+   mean texts, and especially location packets"):
+   - **LIVE** (class 0): a fresh position/presence for a mule that is already there. Useful ~2 minutes,
+     never held, 60 s tag, ephemeral relay kind.
+   - **POSITION_LAST_KNOWN** (class 1): the same position packets, deposited as **last known location**
+     (the mate-finding payload for someone who is out of reach right now). Carriers and gateways keep
+     only the **newest K per tag** (start K = 16, about 2x a 7-person group), because a blind carrier
+     cannot see sender ids inside the seal. Max age **6 hours** (author to confirm; shorter than texts on
+     purpose, since a stored location trail is the most sensitive thing this feature creates). The
+     receiver shows it as "last seen N min ago", never as live.
+   - **TEXT** (class 2): chat messages and SOS (`SosEntity` frames today). Not replaced, held up to the
+     group's life (<= 7 days), bounded by the pool and the per-hour budget.
+3. **The local-presence gate becomes a priority, not a hard rule** (replaces 13.3 and 13.6 layer 1):
+   a held MAILBOX frame comes from a sender who has walked away, so its tag will not match any beacon
+   the mule scans. Frames whose tag was seen recently go first; others are admitted from a fixed
+   per-hour data budget. Junk that gets through costs radio time and budget only, and members drop it.
+4. **Classes 1 and 2 (the "mailbox" classes) use a longer-window relay tag** and a *stored* relay event kind, so a recipient who
+   connects later can still collect: tag = `rotatingAdvertisementId(key, t, 3600 s)` (its window
+   numbers cannot collide with the 60 s or 72 h ones), event kind in the regular range with a NIP-40
+   expiration tag, recipient subscribes to the last N hourly tags (start N = 48, test relay filter
+   size limits). LIVE keeps the 60 s tag and ephemeral kind 22007. Trade-off, stated plainly: a
+   mailbox tag is linkable on a relay for one hour instead of one minute, and a stored last-known
+   location exists on third-party relays until it expires.
+5. **Version policy:** `MeshFrameCodec.decode` drops any frame whose version byte differs from
+   `VERSION`, so a bump cuts old builds off entirely. `FRAME_UPLINK` (0x20) is added in G0 **without**
+   a bump; the bump to 13 happens in G2 when it is wired in, with the existing precedent that new
+   frames bump for discoverability.
+
