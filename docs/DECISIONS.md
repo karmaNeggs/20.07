@@ -4296,3 +4296,35 @@ logic, 26 tests, 546 total, detekt clean. No `VERSION` bump yet because `decode(
 different version byte, so a bump cuts old builds off; it lands in G2. `RelayResponder` ignores the
 frame until then, so v2 behaviour is unchanged.
 
+
+## 70. v3 G1 built and checked against real relays (2026-10-05)
+
+New package `org.offlinemesh.app.gateway`: `Bip340` (pure-Kotlin Schnorr), `NostrProtocol` (events, REQ/EVENT/
+CLOSE, relay-message parsing), `RelayPool` (multi-relay state machine), `GatewayKeyHolder` (7-day throwaway
+key), `NostrGatewayLink` (joins `UplinkGateway` to the pool), `OkHttpRelayConnector` (WebSocket). **Not wired
+into the app, no INTERNET permission yet**, so v2 behaviour is unchanged. 595 tests, detekt and lint clean.
+
+**Checked against independent implementations, not against itself:** the signer reproduces the two official
+BIP-340 vectors and six libsecp256k1 vectors byte for byte (the official ones were first confirmed against
+libsecp256k1); an event with `/`, quotes, backslash, newline, tab and non-ASCII gets the same id and signature
+as Python plus libsecp256k1. Hand-written JSON is deliberate: `org.json` escapes `/` as `\/`, which changes
+event ids for base64 content.
+
+**Real-relay result (opt-in `LiveRelayTest`, report in `docs/spikes/nostr-2026-10-05/`):** Kotlin-signed live
+(22007) and mailbox (7007 + NIP-40 expiration) events were accepted by all five relays tried (snort, nos.lol,
+nostr.mom, primal, damus; primal and damus were failing in the earlier spike, so relay availability changes
+hour to hour). Both frames crossed from one link to another, and **a phone that joined after the publish
+collected the stored text**. Snort answers the ephemeral kind with "will not be stored"; nos.lol and nostr.mom
+stored the live event too, as decision 67 found. Stored-text retrieval was checked in one run on one day.
+
+**Bugs the tests caught (all fixed):** a transport that answers synchronously made the pool miss its own OK and
+time out; a transport that fails before `connect()` returns left a dead socket recorded as connected; stale
+callbacks from a replaced socket could corrupt the new one; queued events never expired when a relay stayed down;
+the link waited a full tick after queuing a publish.
+
+**New dependency to review (Part 12):** `com.squareup.okhttp3:okhttp:4.12.0` (WebSocket; `org.json` for tests
+only). R8 strips it while unused: release APK 2,197,435 bytes versus 2,155,560 before. **Design gap found:**
+a keyless gateway cannot learn hourly mailbox tags; `PLAN-v2.md` §13.16 adds a member-to-gateway interest frame
+for G2. **Not tested:** a phone on cellular, battery and background limits at targetSdk 36, a long run, or real
+BLE clusters.
+

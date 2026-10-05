@@ -1,0 +1,28 @@
+injected at B: 2 of 2 (live + text)
+late collector (joined after publish) got: 2 (1 = the stored text)
+A status: [Status(url=wss://relay.snort.social, state=CONNECTED, queued=0, failures=0), Status(url=wss://nos.lol, state=CONNECTED, queued=0, failures=0), Status(url=wss://nostr.mom, state=CONNECTED, queued=0, failures=0), Status(url=wss://relay.primal.net, state=CONNECTED, queued=0, failures=0), Status(url=wss://relay.damus.io, state=CONNECTED, queued=0, failures=0)]
+B status: [Status(url=wss://relay.snort.social, state=CONNECTED, queued=0, failures=0), Status(url=wss://nos.lol, state=CONNECTED, queued=0, failures=0), Status(url=wss://nostr.mom, state=CONNECTED, queued=0, failures=0), Status(url=wss://relay.primal.net, state=CONNECTED, queued=0, failures=0), Status(url=wss://relay.damus.io, state=CONNECTED, queued=0, failures=0)]
+wss://nos.lol OPEN
+wss://relay.primal.net OPEN
+wss://nostr.mom OPEN
+wss://nostr.mom OPEN
+wss://nos.lol OPEN
+wss://relay.primal.net OPEN
+wss://relay.snort.social OPEN
+wss://relay.snort.social OPEN
+wss://nos.lol ["OK","92543ac3840e8197cf95f421f3d5622c3287810cdc816c9f954f42064078dfae",true,""]
+wss://nostr.mom ["OK","92543ac3840e8197cf95f421f3d5622c3287810cdc816c9f954f42064078dfae",true,""]
+wss://relay.snort.social ["OK","92543ac3840e8197cf95f421f3d5622c3287810cdc816c9f954f42064078dfae",true,"ephemeral: will not be stored"]
+wss://relay.damus.io OPEN
+wss://relay.damus.io OPEN
+wss://relay.primal.net ["OK","92543ac3840e8197cf95f421f3d5622c3287810cdc816c9f954f42064078dfae",true,""]
+wss://relay.damus.io ["OK","92543ac3840e8197cf95f421f3d5622c3287810cdc816c9f954f42064078dfae",true,""]
+wss://nos.lol ["OK","b4d72c36a1bb49fa835c7eadad6ab254f9c7fb296986803e287538dca9ce831b",true,""]
+wss://nostr.mom ["OK","b4d72c36a1bb49fa835c7eadad6ab254f9c7fb296986803e287538dca9ce831b",true,""]
+wss://relay.snort.social ["OK","b4d72c36a1bb49fa835c7eadad6ab254f9c7fb296986803e287538dca9ce831b",true,""]
+wss://relay.damus.io ["OK","b4d72c36a1bb49fa835c7eadad6ab254f9c7fb296986803e287538dca9ce831b",true,""]
+wss://relay.primal.net ["OK","b4d72c36a1bb49fa835c7eadad6ab254f9c7fb296986803e287538dca9ce831b",true,""]
+wss://relay.snort.social OPEN
+wss://nostr.mom OPEN
+wss://nos.lol OPEN
+wss://relay.primal.net OPEN

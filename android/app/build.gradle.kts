@@ -154,6 +154,10 @@ dependencies {
     // which needs its own key-management/serialization story this app has no use for.
     implementation("com.google.crypto.tink:tink-android:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // v3 gateway WebSocket transport (docs/DECISIONS.md decisions 66-69). Android has no built-in WebSocket client;
+    // OkHttp is the standard one. Needs a Part 12 dependency review before release; unused (and shrunk by R8)
+    // until G2 wires the gateway in.
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // zxing:core does both generation AND, as of the in-app QR scanner, decoding — one QR library
     // for both jobs rather than adding a second one. Not zxing-android-embedded's full scanning
@@ -176,6 +180,8 @@ dependencies {
     // hop-count math, radar bearing/distance math, connection-attempt and delivery-dedup state
     // machines. `./gradlew test` runs all of it in seconds; see TESTING.md.
     testImplementation("junit:junit:4.13.2")
+    // org.json is built into Android at runtime; plain-JVM unit tests need the real library (gateway/Nostr parsing).
+    testImplementation("org.json:json:20240303")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
     // Robolectric: only the couple of tests that need a real android.location.Location.distanceBetween
     // (the radar bearing/distance math) pull this in — everything else above is plain JVM/JUnit.

@@ -3302,3 +3302,16 @@ What this changes in the draft above:
    a bump; the bump to 13 happens in G2 when it is wired in, with the existing precedent that new
    frames bump for discoverability.
 
+### 13.16 Design gap found while building G1: how a keyless gateway learns which tags to listen for
+
+A gateway can publish any `FRAME_UPLINK` it is handed, but to **receive** it must subscribe to relay tags,
+and it holds no group key. For LIVE frames the 60 s tag is advertised in the member's BLE beacon, so a
+nearby gateway can scan it. The **hourly mailbox tag (classes 1 and 2) is never advertised**, so a gateway
+cannot learn it, and a recipient cluster's mule would never subscribe to the mail waiting for them.
+
+**Fix (to build in G2): `FRAME_UPLINK_INTEREST` (next unused byte, 0x21).** A member with the switch ON
+periodically sends nearby gateways the small set of opaque relay tags it wants (current and previous 60 s
+tag plus the last N hourly tags, capped at `NostrGatewayLink.MAX_INTEREST_TAGS` = 100). The gateway passes
+them to `NostrGatewayLink.setInterestTags`. The frame carries tags only: no group id, name or key. A gateway
+learns that a nearby phone listens for those opaque values, which a BLE scan of beacons already reveals.
+
