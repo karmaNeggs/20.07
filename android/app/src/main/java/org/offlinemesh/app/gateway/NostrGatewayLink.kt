@@ -43,6 +43,7 @@ class NostrGatewayLink(
     )
 
     @Volatile private var bulkAllowed = false
+    private val backoff = PublishBackoff()
     private val inFlight = HashMap<String, UplinkGateway.Batch>()
     private val lock = Any()
 
@@ -81,7 +82,7 @@ class NostrGatewayLink(
     /** Pushes pool state forward and publishes whatever the gateway has ready. */
     override fun tick() {
         pool.tick()
-        if (!pool.hasConnectedRelay()) return
+        if (!pool.hasConnectedRelay() || backoff.blocked(now())) return
         val batches = gateway.drain(config.maxBatchesPerTick, includeBulk = bulkAllowed)
         for (batch in batches) publish(batch)
         // Flush right away so a freshly queued event does not wait a whole tick (the pool still paces sends).
@@ -125,7 +126,12 @@ class NostrGatewayLink(
 
     private fun onSettled(eventId: String, accepted: Int) {
         val batch = synchronized(lock) { inFlight.remove(eventId) } ?: return
-        if (accepted == 0) gateway.requeue(batch)
+        if (accepted == 0) {
+            gateway.requeue(batch)
+            backoff.failed(now())
+        } else {
+            backoff.succeeded()
+        }
     }
 
     // SwallowedException: undecodable content from an untrusted relay is expected input and is simply dropped.

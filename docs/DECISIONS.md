@@ -4410,3 +4410,23 @@ late-joining phone collecting it 2 s after connecting.
 congestion rule, any real-phone test of files, UI for a "send files on mobile data" choice (files wait for Wi-Fi), and all
 scale measurement (Part 14.3 numbers are still estimates).
 
+
+## 76. Scale and chaos simulation, and the fixes it forced (2026-10-07)
+
+Author: files must go on mobile data too (supersedes decision 75's unmetered-only rule); sideload APK, no Play Store;
+run the scale question logically before the field. `ScaleChaosSimTest` runs the REAL controller, gateway, priorities and tag
+derivation for 1000 users (300 online, groups of 7) against a MODEL of relays (25 events/s each, per-address limit 8/s,
+bans, outages). Not modelled: signing, sockets, BLE, real relay policy. **Findings are about logic and amplification.**
+Found and fixed: (1) a retry storm and saturation (every event to all 3 relays, retry every second): now 2 of 3 relays
+by hash, full-jitter backoff; (2) shared-address collapse (50 phones per address tripped per-address bans, 2% delivered):
+randomised first publish, ban-aware relay skipping (the real pool already backs off 10 min on a ban), now 100%;
+(3) synchronised flash crowd: jittered starts; (4) a flat 3x congestion slow-down: now multiplicative up to 6x.
+Also found and fixed in my own code: `RelayChoice` first used String.hashCode and sent nothing to one relay; the sim's
+first delivery metric wrongly counted the carrier phone as a receiver.
+**Remaining limits (logic level):** relay capacity is the binding constraint: under an alert storm plus file uploads alerts
+still all arrive but p95 rises 5 s -> 15 s, because a relay cannot prioritise; periodic traffic from N online phones is
+O(N) and cannot be merged across phones (each member's own position), so very large crowds rely on the slow-down and on
+the "Last seen" fallback; a malicious client that bypasses the app is stopped only by the relay's own limits; real relay
+capacity and policy are unknown and need the staged field test. Skipping already-online members saves bytes (about 22%)
+but not events. Report: `docs/spikes/scale-sim-2026-10-07/report.txt`.
+

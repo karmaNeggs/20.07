@@ -79,7 +79,9 @@ class InternetReachController(
     data class Config(
         val fileIntervalMs: Long = FILE_INTERVAL_MS,
         val symbolsPerTick: Int = SYMBOLS_PER_TICK,
-        val congestedSlowdown: Int = CONGESTED_SLOWDOWN,
+        val maxSlowdown: Int = MAX_SLOWDOWN,
+        val jitterFraction: Double = JITTER_FRACTION,
+        val random: kotlin.random.Random = kotlin.random.Random.Default,
         val liveIntervalMs: Long = LIVE_INTERVAL_MS,
         val mailboxIntervalMs: Long = MAILBOX_INTERVAL_MS,
         val lastKnownIntervalMs: Long = LAST_KNOWN_INTERVAL_MS,
@@ -91,9 +93,11 @@ class InternetReachController(
     private class Inbound(val cls: Int, val inner: ByteArray)
 
     private var inbound = Channel<Inbound>(Channel.UNLIMITED)
-    private var lastLiveAt = 0L
+    private var nextLiveAt = 0L
+    private var slowFactor = 1
+    private var lastSlowChangeAt = 0L
     private var lastMailboxAt = 0L
-    private var lastKnownAt = 0L
+    private var nextKnownAt = 0L
     private var lastFileAt = 0L
     private val metaSent = HashSet<String>()
     private val symbolsSent = HashMap<String, Int>()
@@ -117,7 +121,14 @@ class InternetReachController(
                 channel.trySend(Inbound(it.cls, it.inner))
             }
         }
-        lastLiveAt = 0; lastMailboxAt = 0; lastKnownAt = 0; lastInterestAt = 0; lastFileAt = 0
+        // First periodic publish at a random moment within one interval (when jitter is on), so a crowd that
+        // switches on together, or a relay coming back after an outage, does not produce a synchronised burst.
+        val t = now()
+        val spread = config.jitterFraction > 0
+        val r = config.random
+        nextLiveAt = if (spread) t + (config.liveIntervalMs * r.nextDouble()).toLong() else 0
+        nextKnownAt = if (spread) t + (config.lastKnownIntervalMs * r.nextDouble()).toLong() else 0
+        lastMailboxAt = 0; lastInterestAt = 0; lastFileAt = 0; slowFactor = 1
     }
 
     fun stop() {
@@ -144,19 +155,42 @@ class InternetReachController(
         // Under congestion (most relays failing or banning us) live and last-known slow down and bulk pauses;
         // messages and SOS alerts are never slowed (PLAN-v2.md Part 14.2 and 14.3).
         val congested = l.congested()
-        val slow = if (congested) config.congestedSlowdown else 1
+        updateSlowFactor(congested, t)
         if (l.hasConnectedRelay()) {
             if (t - lastFileAt >= config.fileIntervalMs) {
                 lastFileAt = t
                 if (bulk && !congested) produceFiles(l, t / MS_PER_SEC)
             }
-            if (t - lastLiveAt >= config.liveIntervalMs * slow) { lastLiveAt = t; produceLive(l, t / MS_PER_SEC) }
+            if (t >= nextLiveAt) {
+                nextLiveAt = t + jittered(config.liveIntervalMs * slowFactor)
+                produceLive(l, t / MS_PER_SEC)
+            }
             if (t - lastMailboxAt >= config.mailboxIntervalMs) { lastMailboxAt = t; produceMailbox(l, t / MS_PER_SEC) }
-            if (t - lastKnownAt >= config.lastKnownIntervalMs * slow) { lastKnownAt = t; produceLastKnown(l,
-                t / MS_PER_SEC) }
+            if (t >= nextKnownAt) {
+                nextKnownAt = t + jittered(config.lastKnownIntervalMs * slowFactor)
+                produceLastKnown(l, t / MS_PER_SEC)
+            }
         }
         l.tick()
         drainInbound()
+    }
+
+    /** Multiplicative-increase, stepwise-decrease slow-down of the periodic traffic (never messages or alerts): doubles
+     *  every 10 s while relays are failing, up to [Config.maxSlowdown], and recovers one step per 20 s. */
+    private fun updateSlowFactor(congested: Boolean, t: Long) {
+        if (congested && t - lastSlowChangeAt >= SLOW_UP_MS) {
+            slowFactor = minOf(slowFactor * 2, config.maxSlowdown)
+            lastSlowChangeAt = t
+        } else if (!congested && slowFactor > 1 && t - lastSlowChangeAt >= SLOW_DOWN_MS) {
+            slowFactor--
+            lastSlowChangeAt = t
+        }
+    }
+
+    /** +/- jitter so phones that started together do not publish in lockstep (flash-crowd synchronisation). */
+    private fun jittered(ms: Long): Long {
+        val j = config.jitterFraction
+        return (ms * (1 - j + 2 * j * config.random.nextDouble())).toLong()
     }
 
     private suspend fun produceLive(l: UplinkLink, nowSec: Long) {
@@ -221,7 +255,10 @@ class InternetReachController(
         const val LAST_KNOWN_INTERVAL_MS = 60_000L
         const val FILE_INTERVAL_MS = 5_000L
         const val SYMBOLS_PER_TICK = 60
-        const val CONGESTED_SLOWDOWN = 3
+        const val MAX_SLOWDOWN = 6
+        const val JITTER_FRACTION = 0.25
+        private const val SLOW_UP_MS = 10_000L
+        private const val SLOW_DOWN_MS = 20_000L
         const val INTEREST_INTERVAL_MS = 30_000L
         const val MAX_UPLINKED_IDS = 2048
         private const val MS_PER_SEC = 1000L

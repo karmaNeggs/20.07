@@ -50,7 +50,7 @@ class FileUplinkTest {
     @Test fun `header goes first, then paced symbol batches, then nothing more`() {
         val served = ArrayList<Int>()
         val link = Link()
-        val c = InternetReachController(Src(key, file(150, served)), { link }, { _, _ -> }, { nowMs }, bulkAllowed = { true })
+        val c = InternetReachController(Src(key, file(150, served)), { link }, { _, _ -> }, { nowMs }, InternetReachController.Config(jitterFraction = 0.0), bulkAllowed = { true })
         c.start(); run(c, 40)
         val classes = link.offered.map { it.cls }
         assertEquals(MeshFrameCodec.UPLINK_CLASS_FILE_META, classes.first())
@@ -62,7 +62,7 @@ class FileUplinkTest {
         val served = ArrayList<Int>()
         val link = Link()
         var allowed = false
-        val c = InternetReachController(Src(key, file(100, served)), { link }, { _, _ -> }, { nowMs }, bulkAllowed = { allowed })
+        val c = InternetReachController(Src(key, file(100, served)), { link }, { _, _ -> }, { nowMs }, InternetReachController.Config(jitterFraction = 0.0), bulkAllowed = { allowed })
         c.start(); run(c, 20)
         assertTrue(link.offered.isEmpty())
         allowed = true; link.congestedNow = true; run(c, 20)
@@ -97,12 +97,12 @@ class FileUplinkTest {
         val sender = InternetReachController(
             Src(key, file(70, ArrayList())),
             { inj -> NostrGatewayLink(UplinkGateway({ nowMs }), listOf("wss://a", "wss://b"), net.connector(), GatewayKeyHolder({ nowMs }), { nowMs }, inj) },
-            { _, _ -> }, { nowMs }, bulkAllowed = { true },
+            { _, _ -> }, { nowMs }, InternetReachController.Config(jitterFraction = 0.0), bulkAllowed = { true },
         )
         val receiver = InternetReachController(
             Src(key, null),
             { inj -> NostrGatewayLink(UplinkGateway({ nowMs }), listOf("wss://a", "wss://b"), net.connector(), GatewayKeyHolder({ nowMs }), { nowMs }, inj) },
-            { cls, inner -> inbound.add(cls to inner) }, { nowMs }, bulkAllowed = { true },
+            { cls, inner -> inbound.add(cls to inner) }, { nowMs }, InternetReachController.Config(jitterFraction = 0.0), bulkAllowed = { true },
         )
         sender.start(); receiver.start()
         repeat(60) { nowMs += 1000; runBlocking { sender.step(); receiver.step() } }

@@ -40,7 +40,10 @@ class InternetReachControllerTest {
     }
 
     private fun fakeController(source: UplinkSource, link: FakeLink, inbound: MutableList<ByteArray> = ArrayList()) =
-        InternetReachController(source, { link }, { _, inner -> inbound.add(inner) }, { nowMs })
+        InternetReachController(
+            source, { link }, { _, inner -> inbound.add(inner) }, { nowMs },
+            InternetReachController.Config(jitterFraction = 0.0),
+        )
 
     private fun step(c: InternetReachController, ms: Long = 1000) = runBlocking { nowMs += ms; c.step() }
 
@@ -125,6 +128,7 @@ class InternetReachControllerTest {
                 target.add(inner)
             },
             { nowMs },
+            InternetReachController.Config(jitterFraction = 0.0),
         )
         c.start()
         return Phone(name, src, c, inbound, lastKnownInbound)

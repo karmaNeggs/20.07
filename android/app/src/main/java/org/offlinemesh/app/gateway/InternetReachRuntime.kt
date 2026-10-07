@@ -52,7 +52,9 @@ class InternetReachRuntime(
             )
         },
         onInbound = ::handleInbound,
-        bulkAllowed = { network.unmetered.value },
+        // Author decision 2026-10-07: any online phone carries files too, on mobile data as well as Wi-Fi.
+        // The size cap, separate bulk budget, pacing and congestion pause protect relays and data plans.
+        bulkAllowed = { network.online.value },
     )
 
     fun start() {

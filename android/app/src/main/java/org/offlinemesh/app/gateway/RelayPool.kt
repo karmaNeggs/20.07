@@ -51,6 +51,7 @@ class RelayPool(
         val banBackoffMs: Long = BAN_BACKOFF_MS,
         val rateLimitPauseMs: Long = RATE_LIMIT_PAUSE_MS,
         val maxQueuePerRelay: Int = MAX_QUEUE_PER_RELAY,
+        val relaysPerEvent: Int = RELAYS_PER_EVENT,
         val queueTtlMs: Long = QUEUE_TTL_MS,
         val seenEventIds: Int = SEEN_EVENT_IDS,
         val subscriptionId: String = SUBSCRIPTION_ID,
@@ -93,7 +94,12 @@ class RelayPool(
     /** Sends [event] to every usable relay. [onPublishSettled] reports how many accepted it. */
     fun publish(event: NostrEvent) = locked { out ->
         val t = now()
-        val usable = relays.values.filter { it.bannedUntil <= t }
+        val notBanned = relays.values.filter { it.bannedUntil <= t }
+        // Prefer relays that are connected, then send to only the same two per tag (spreads load, see RelayChoice).
+        val candidates = notBanned.filter { it.open }.ifEmpty { notBanned }
+        val chosen = RelayChoice.pick(event.tagValue("t") ?: event.id, candidates.map { it.url },
+            config.relaysPerEvent).toSet()
+        val usable = candidates.filter { it.url in chosen }
         val settle = Settle(0, 0, usable.size)
         settles[event.id] = settle
         for (r in usable) {
@@ -324,6 +330,7 @@ class RelayPool(
         const val BAN_BACKOFF_MS = 600_000L
         const val RATE_LIMIT_PAUSE_MS = 5_000L
         const val MAX_QUEUE_PER_RELAY = 32
+        const val RELAYS_PER_EVENT = 2
         const val QUEUE_TTL_MS = 30_000L
         private const val CONGESTED_FAILURES = 3
         const val SEEN_EVENT_IDS = 4096

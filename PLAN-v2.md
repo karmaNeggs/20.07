@@ -3369,7 +3369,7 @@ header and thumbnail) and **FILE_SYMBOLS** (a batch of up to ~60 symbols, about 
 is about 9 events). A bridge holding a file's symbols wraps and publishes them; the far side feeds them to the
 existing `handleEvidSymbol`, then its own BLE mesh floods them on as today, which gives the full chain. The sender's
 own phone publishes first, and any bridge that already holds symbols may add more (any subset works).
-Defaults: **Wi-Fi/unmetered network only** (mobile data needs a tap on "send anyway"), **size cap 500 KB**, thumbnail
+Defaults (updated 2026-10-07, decision 76): **any connection, mobile data included**, **size cap 400 KB**, thumbnail
 first so a mate sees a preview within seconds.
 
 ### 14.2 Priority order (highest first)

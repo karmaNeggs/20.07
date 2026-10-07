@@ -13,7 +13,7 @@ class RelayPoolTest {
     private val settled = ArrayList<Triple<String, Int, Int>>()
     private val sk = ByteArray(32) { (it + 1).toByte() }
 
-    private fun pool(cfg: RelayPool.Config = RelayPool.Config()) = RelayPool(
+    private fun pool(cfg: RelayPool.Config = RelayPool.Config(relaysPerEvent = 3)) = RelayPool(
         urls, net.connector(), { nowMs }, cfg,
         onEvent = { e, url -> delivered.add(e to url) },
         onPublishSettled = { id, ok, n -> settled.add(Triple(id, ok, n)) },
