@@ -3100,333 +3100,40 @@ monitoring) done; remediation deliberately deferred pending user review of the f
 
 ---
 
-## Part 13 — v3 internet gateway: wire design (2026-10-05, draft for the author's sign-off)
+## Part 13 — Internet reach (v3), as built in 0.10.1-dev
+
+**Status:** built and tested in the JVM (691 tests, a 1,000- and a 10,000-user logical simulation, real public relays); tried on two phones with Bluetooth off; **the 3-phone bridge test and a field run are still to do.** Decisions: `docs/DECISIONS.md` 65-79.
+
+### 13.1 What it is
+An optional switch (off by default, one per phone, asked in plain words) that lets a phone with any connection (Wi-Fi, hotspot, mobile data) send and receive its group's end-to-end-encrypted frames through public Nostr relays: a dumb relay, no server of ours, no account. It carries messages, SOS alerts, live and last-known positions, nicknames and files. **Bluetooth stays primary**; the feature works with Bluetooth off, and a phone with it off behaves exactly as in v2. Both mates need it on.
+
+### 13.2 Wire design
+- `FRAME_UPLINK` (0x20): wraps one already-sealed frame. Fields: relay tag (rotating HMAC of the group key: 60 s for live data, 1 h for everything stored), class 0-5, flags (bit 0 = came from the internet, never uploaded again), created-at, inner frame (at most 4 KB). The wrapper adds no crypto.
+- `FRAME_UPLINK_INTEREST` (0x21): up to 16 opaque tags a phone wants, so a gateway knows what to listen for; hop limit 2, ten-minute life.
+- No `VERSION` bump: older builds ignore both bytes.
+- Classes in drain order: SOS alert, text, live position, last-known position, file header, file symbols. Expiry: live 2 min, last-known 6 h, text and alert 7 days, files 24 h.
+
+### 13.3 Roles and flows
+- **Member endpoint:** an online member wraps its own frames and those it holds for other members, publishes them, and listens on its own groups' tags. What arrives goes through the normal frame handler, so chat, radar and the "Last seen" list behave as over Bluetooth. A BLE-only phone, a bridge (BLE + internet) and an internet-only phone can therefore talk in every direction.
+- **Stranger carrier:** a phone with the switch on holds wrapped frames even with no internet and hands a few, each once, to every Bluetooth neighbour; any neighbour with internet uploads them, member or not (no key needed). A stranger that receives frames from a relay passes them into the existing blind-relay custody so members nearby get them. A stranger sees rotating tags, sizes and timing, never content.
+- **Last seen:** the newest position per member is kept in RAM for 6 hours and shown as text ("name, N min ago, distance and direction"), never as a live dot.
+- **Files:** a complete file of at most 400 KB goes as a header with thumbnail, then paced batches of fountain symbols (about 1.3x the source symbols), on any connection, on a separate 1 MB/hour budget, only while relays are healthy.
+
+### 13.4 Relay protocol
+Events are BIP-340 signed (pure Kotlin, no native library) with a throwaway key replaced every 7 days. Live frames use an ephemeral kind, stored classes a regular kind with an expiry tag. Each event goes to 2 relays chosen by SHA-256 of tag and relay among the connected ones; at most one event per relay per 1.1 s; bans and rate limits back a relay off; every event settles exactly once.
+
+### 13.5 Scale and safety controls
+Randomised first publish and ±25 % jitter; periodic traffic (live, last-known) slows up to 12x under congestion and recovers one step a minute; full-jitter backoff after a failed publish, bypassed for SOS alerts; per-tag rate cap and an hourly byte budget (bulk has its own); bounded queues and a global queue cap; dedup; a per-minute cap on frames accepted from relays; chunked subscription filters; skip re-publishing a member already heard online; frames produced while offline are held, only files wait for a connection.
+
+### 13.6 Evidence and limits
+- Two phones, Bluetooth off: 5 of 5 messages in 1.3-13.4 s, positions too.
+- Model (assumed relay capacities, real code): at 10,000 users with about 2,900 online, relays need about 300 events/s each for full delivery (5 s p95); at 100/s about 61 % of texts arrive; shared carrier addresses (150 phones per address) deliver about 39 %; relay outage and alert storms with uploads are handled (alerts 99 %, p95 5 s).
+- Unproven on phones: Bluetooth frame size limits for wrapped frames at low MTU, battery cost of holding and pushing, carrying through two strangers in a row, Android 16 background networking, real relay capacity and policy.
+- Privacy limits: relays see IP, timing, size and rotating tags; relays may store events (positions up to 6 h, messages up to 7 days); the live tag equals the public Bluetooth beacon id; a malicious client that ignores the app's budgets is stopped only by relay limits.
+
+### 13.7 Next
+1. The 3-phone test (checklist in `TESTING.md`: bridge, last seen, files and SOS priority, stranger carrying).
+2. Field test at 20 then 100 phones to replace the assumed relay capacities.
+3. One uplinker per Bluetooth cluster, so events scale with clusters rather than phones; a longer or self-hosted relay list; per-address awareness for shared carrier addresses.
+4. Before any Play Store submission: re-derive Data Safety answers, review the OkHttp dependency, justify background location, check Android 16 behaviour.
 
-**Status: design signed off by the author 2026-10-05 (decision 68), no code yet.** Decisions 66 (goal) and 67 (relay spike) are the inputs.
-
-### 13.1 Goal and non-goals
-
-**Goal:** mates in two groups of phones that are out of BLE range of each other can see each other's
-live position (and presence, SOS) if **one opted-in phone in each cluster has any internet**. The
-payload that matters is *finding your mates*. A GPS position is absolute, so a position that
-arrives over the internet is as useful for navigation as one that arrived over BLE.
-
-**Non-goals (v3):** photos/evidence over the internet, general global chat, any server of ours,
-any account, an iOS gateway. Fully offline operation must be byte-for-byte unchanged when no
-gateway exists.
-
-### 13.2 The one hard problem, and the answer
-
-A gateway holds no group keys, so it cannot compute any group's handle. And the frame's own
-`handle` is the 72 h `GATT_GROUP_HANDLE_WINDOW_SECONDS` value, which decision 67 says must not be
-what a relay sees (relays store "ephemeral" events). A keyless gateway also cannot map a frame's 72 h
-handle to the group's 60 s beacon ID.
-
-**Answer: members, who hold the keys, wrap frames for the uplink; the gateway only forwards.**
-
-New frame **`FRAME_UPLINK = 0x20`** (next unused byte; 0x10/0x14/0x19-0x1B stay retired):
-
-| Field | Meaning |
-|---|---|
-| `relayTag` | `rotatingAdvertisementId(groupKey, now, 60 s)`, the same HMAC the BLE beacon already advertises. Cleartext outer field. |
-| `flags` | bit 0 = `fromInternet` (set by a gateway on frames it injects; gateways never re-uplink these) |
-| `inner` | one complete, already-sealed existing frame (`PositionSealed`, `Presence`, `SosSealed`, `Nickname`), padded with the existing GATT padding buckets |
-
-A **member** wraps a frame into `FRAME_UPLINK` only while a gateway is believed present (13.4). It
-adds no new crypto: `inner` is sealed and signed exactly as it is on BLE today.
-
-### 13.3 Gateway behaviour (blind, keyless)
-
-- **Uplink:** accept an `FRAME_UPLINK` from BLE only if its `relayTag` equals a **beacon ID this
-  phone has itself scanned within the last +-1 window**. That proves a real member is advertising
-  nearby, and kills random-tag junk at the door. Then batch per `relayTag` and publish.
-- **Downlink:** subscribe (`#t` filter) to the current and previous window's tags it has observed
-  locally. Events from the relay are unwrapped to `FRAME_UPLINK` frames, `fromInternet` set, and
-  injected into the BLE mesh through the existing path (`RelayResponder.handleIncoming(bytes,
-  "gateway:<relay>", ...)`). Members open them like any other frame.
-- **Loop control:** never uplink `fromInternet` frames; drop events whose id this gateway published;
-  existing dedup caches (`DedupCache`) handle the rest. Two gateways in one cluster just duplicate
-  traffic; jitter the publish (Trickle-style, `TrickleTimer`) and suppress if the same frame is
-  overheard first. Duplicates are harmless, so v3 does not build coordination.
-- **Opt-in and visible:** controlled by the single global switch in 13.12; off by default. While on
-  and online, a persistent "relaying for nearby people" notice shows, with a data cap and a "stop
-  when battery < X%" rule. It runs inside the existing foreground service. **Patchy-network
-  tolerance:** gateways come and go, so nothing depends on one. Uplink state is RAM-only and
-  latest-wins (a position older than its window is dropped, never queued to disk), and members
-  re-detect gateways from the heartbeat bit (13.4) rather than being told.
-
-### 13.4 How members know a gateway exists
-
-A gateway advertises one extra bit in its presence heartbeat ("uplink available"). A member that
-sees it (directly or through blind relay) starts wrapping its position/presence in `FRAME_UPLINK`.
-When no gateway has been seen for N minutes, members stop wrapping and the mesh is as in v2.
-(Exact flag location in the presence frame is a codec task; any added field bumps `VERSION`.)
-
-### 13.5 Relay protocol (Nostr, decision 67 rules applied)
-
-- Event kind **22007** (ephemeral range; relays may still store it, so we assume they do).
-- Tags: one `["t", <hex relayTag>]` per group-tag in the batch; `content` = base64 of concatenated
-  `FRAME_UPLINK` frames, <= 32 KB (spike-verified on all working relays). Typical event ~1-3 KB.
-- **One event per tag per 5 s tick at most**, and <= 1 event/s per relay connection overall
-  (decision 67 rule 2; damus bans above that).
-- **3 relays in parallel** from a configurable list with fallback (start: relay.snort.social,
-  nos.lol, nostr.mom, relay.damus.io at low rate). Subscribe on all, dedupe by event id.
-- **Signing:** Nostr needs BIP-340 Schnorr on secp256k1. Plan: a ~60-line **pure-Kotlin BigInteger
-  implementation checked against the official BIP-340 test vectors** (the Python version used in the
-  spike already passes a local verify), at 1 signature/s. This adds **no native dependency**; the
-  alternative (`secp256k1-kmp`) stays as a fallback and would need a Part 12 dependency review.
-- **Key:** one random gateway key per install, **replaced every 7 days** (groups live 3-7 days, so
-  that matches their lifetime; decision 68). It is not derived from any group key (a gateway has
-  none). Accepted and not worked around: a relay that drops an unknown key is simply skipped, since
-  3 relays publish in parallel.
-
-### 13.6 Spam and abuse (answer to the author's question 4)
-
-Layers, cheapest first, all in v3: (1) **local-presence gate**, only tags scanned in a nearby
-beacon are uplinked; (2) +-1 window freshness; (3) per-tag token bucket and a global per-gateway
-cap; (4) known frame types and padded fixed sizes only; (5) members drop anything that fails
-AEAD/signature, so junk reaches only radio time, never the UI. **Parked:** per-frame proof-of-work,
-relay allow-lists, any reputation system.
-
-### 13.7 Privacy statement this design must keep true
-
-A relay learns: the gateway's IP, a rotating gateway pubkey, rotating 60 s tags, event sizes and
-timing. It does **not** learn group names, members, or positions (sealed). A rival who watches one
-tag learns "something is being sent under this 60 s tag", then the tag changes. **Known weakness:**
-because relays may store events, a later compromise of a group key lets someone decrypt stored
-positions from that group's windows. Mitigations: positions already carry a timestamp inside the
-seal and short validity; consider per-window content-epoch keys (decision 39 already has them).
-**New exposure vs v2 that the UI must say plainly:** a sealed position leaving over the internet is
-a larger threat surface than BLE-only. Short group lifetimes (3-7 days) bound how long a stored
-event stays useful. Control: **one global switch, off by default (13.12)**, not a per-group one.
-
-### 13.8 Platform and policy consequences
-
-- The manifest has **no INTERNET permission today**. v3 adds it (a normal install-time permission).
-  README and the privacy page currently say "no internet dependency", which must become "works
-  fully offline; optionally reaches further when a nearby phone shares its internet". Play Data
-  Safety answers must be re-done. Decide before coding whether this ships in the main app or a
-  separate gateway-capable variant.
-- Foreground-service and background-network limits at targetSdk 36 apply to the gateway; they can
-  only be learned on a real phone.
-
-### 13.9 Build order and test plan
-
-| Step | What | Proof |
-|---|---|---|
-| G0 | `FRAME_UPLINK` codec + gateway admission/batching/loop logic, pure Kotlin | JVM unit tests, plus the existing simulator (`sim/`) extended with two clusters and a fake relay |
-| G1 | Kotlin BIP-340 + Nostr client (REQ/EVENT/OK, reconnect, 3-relay fan-out) | BIP-340 official vectors; a replay of the spike's results against real relays |
-| G2 | Wire into `MeshService`/`RelayResponder`; opt-in UI; INTERNET permission | Existing 520 tests stay green; new tests per rule in 13.3 and 13.6 |
-| G3 | Real phones: A+B near each other, C+D elsewhere, one gateway each | The done line below |
-
-### 13.10 Done line for v3 "Gateway pilot" (proposed)
-
-With phones A+B in one BLE cluster and C+D in another, out of BLE range of each other, one gateway
-phone in each (on cellular or Wi-Fi), and the Internet-reach switch on for all four: **A's live
-position appears on D's radar within 30 s through a real public relay** (full turnaround, first
-appearance), and afterwards D's view of A refreshes at least every ~15 s while A moves; with the
-switch off on any phone, or no gateway present, behaviour is identical to v2; **a frame with a
-random tag is dropped by the gateway and never reaches a member**; the gateway notice is visible;
-all unit tests plus new ones pass; verified on the 4 phones.
-
-### 13.11 Answers (author, 2026-10-05)
-
-1. **One global switch, off by default, not per group** (13.12). Gateways are "mega emitters" for the
-   whole BLE network around them, so the control belongs to the phone, not to a group.
-2. **Same app, opt-in feature.** No separate variant.
-3. **30 s is a full-turnaround target** (A's phone to D's radar, first appearance), not a refresh
-   rate. Refresh after that is a separate, looser target (~15 s staleness while moving).
-4. **Gateway key expires and is replaced every 7 days;** the app asks in plain words when the user
-   enables the switch. No further complexity for relays that drop unknown keys.
-
-### 13.12 The single switch: "Internet reach" (default OFF)
-
-One setting per phone, asked in the app when first enabled, with a plain explanation:
-
-- **ON means two things:** (a) my frames may be wrapped in `FRAME_UPLINK` and sent out by a nearby
-  gateway; (b) if I have internet, I relay other people's already-sealed frames for them.
-- **OFF means neither:** my phone neither wraps its own frames nor acts as a gateway. A phone with the
-  switch off still blind-relays ordinary BLE frames exactly as in v2.
-- Consequence to state in the UI: **to find a mate through the internet, both mates need the switch
-  on**, and at least one phone in each cluster needs a connection.
-- Reason it is one switch and not two: a member whose frames get wrapped by someone else's gateway
-  must have agreed to that, and a gateway should only carry traffic for a network it chose to help.
-
-### 13.13 Timing budget behind the 30 s target (to be measured, not assumed)
-
-Relay round trip measured at 0.15-0.4 s (decision 67). Expected costs on top: up to 5 s publish tick,
-up to one beacon window for the receiving gateway to learn the tag, and one BLE hop per side where
-the frame is injected. The BLE hops dominate: earlier live testing showed each hop needs its own
-reconnect cycle. If a real round exceeds 30 s, the first thing to shorten is the tick.
-
-### 13.14 Next action
-
-G0 (13.9): `FRAME_UPLINK` codec and gateway logic with JVM tests, no network code.
-
-### 13.15 Mule semantics (author clarification, 2026-10-05; supersedes parts of 13.3 and 13.4)
-
-The model is a **mule carrier**, to and fro. With the switch ON a phone carries sealed frames between
-the BLE mesh and the internet as it moves. A message written with no internet goes onto the BLE mesh;
-if nobody nearby is online it waits; later someone with the app, the switch ON and a connection passes
-by and uploads it; the intended person receives it when *their* app is on and connected (or via their
-own cluster's mule). A phone that is itself online is its own endpoint: it publishes its own frames
-and subscribes to its own tags directly, no BLE gateway needed.
-
-What this changes in the draft above:
-
-1. **Wrap always while ON** (replaces 13.4's "only while a gateway is seen"). The frame must already be
-   wrapped when a mule appears later. No heartbeat bit is needed for correctness.
-2. **Store-and-forward uses the existing courier custody** (`CourierPool`, `FRAME_COURIER`, decisions 43+):
-   a wrapped frame waits on blind carriers until a mule uploads it. **Three classes** (author: "messages
-   mean texts, and especially location packets"):
-   - **LIVE** (class 0): a fresh position/presence for a mule that is already there. Useful ~2 minutes,
-     never held, 60 s tag, ephemeral relay kind.
-   - **POSITION_LAST_KNOWN** (class 1): the same position packets, deposited as **last known location**
-     (the mate-finding payload for someone who is out of reach right now). Carriers and gateways keep
-     only the **newest K per tag** (start K = 16, about 2x a 7-person group), because a blind carrier
-     cannot see sender ids inside the seal. Max age **6 hours** (author to confirm; shorter than texts on
-     purpose, since a stored location trail is the most sensitive thing this feature creates). The
-     receiver shows it as "last seen N min ago", never as live.
-   - **TEXT** (class 2): chat messages and SOS (`SosEntity` frames today). Not replaced, held up to the
-     group's life (<= 7 days), bounded by the pool and the per-hour budget.
-3. **The local-presence gate becomes a priority, not a hard rule** (replaces 13.3 and 13.6 layer 1):
-   a held MAILBOX frame comes from a sender who has walked away, so its tag will not match any beacon
-   the mule scans. Frames whose tag was seen recently go first; others are admitted from a fixed
-   per-hour data budget. Junk that gets through costs radio time and budget only, and members drop it.
-4. **Classes 1 and 2 (the "mailbox" classes) use a longer-window relay tag** and a *stored* relay event kind, so a recipient who
-   connects later can still collect: tag = `rotatingAdvertisementId(key, t, 3600 s)` (its window
-   numbers cannot collide with the 60 s or 72 h ones), event kind in the regular range with a NIP-40
-   expiration tag, recipient subscribes to the last N hourly tags (start N = 48, test relay filter
-   size limits). LIVE keeps the 60 s tag and ephemeral kind 22007. Trade-off, stated plainly: a
-   mailbox tag is linkable on a relay for one hour instead of one minute, and a stored last-known
-   location exists on third-party relays until it expires.
-5. **Version policy:** `MeshFrameCodec.decode` drops any frame whose version byte differs from
-   `VERSION`, so a bump cuts old builds off entirely. `FRAME_UPLINK` (0x20) is added in G0 **without**
-   a bump; the bump to 13 happens in G2 when it is wired in, with the existing precedent that new
-   frames bump for discoverability.
-
-### 13.16 Design gap found while building G1: how a keyless gateway learns which tags to listen for
-
-A gateway can publish any `FRAME_UPLINK` it is handed, but to **receive** it must subscribe to relay tags,
-and it holds no group key. For LIVE frames the 60 s tag is advertised in the member's BLE beacon, so a
-nearby gateway can scan it. The **hourly mailbox tag (classes 1 and 2) is never advertised**, so a gateway
-cannot learn it, and a recipient cluster's mule would never subscribe to the mail waiting for them.
-
-**Fix (to build in G2): `FRAME_UPLINK_INTEREST` (next unused byte, 0x21).** A member with the switch ON
-periodically sends nearby gateways the small set of opaque relay tags it wants (current and previous 60 s
-tag plus the last N hourly tags, capped at `NostrGatewayLink.MAX_INTEREST_TAGS` = 100). The gateway passes
-them to `NostrGatewayLink.setInterestTags`. The frame carries tags only: no group id, name or key. A gateway
-learns that a nearby phone listens for those opaque values, which a BLE scan of beacons already reveals.
-
-### 13.17 The win condition, and the resulting build order (author, 2026-10-05)
-
-**Win 1 (internet-only):** two phones with **Bluetooth off** and only the Internet-reach switch on can
-message each other and see each other's location, with no BLE at all.
-**Win 2 (bridge):** three phones, A on BLE only, B on BLE plus internet, C on internet only (Bluetooth
-off). **A and C message each other in both directions**, through B.
-
-Consequences:
-1. **An online phone is a full endpoint**, not only a relay. It wraps and publishes its own frames, and it
-   subscribes to its own groups' tags itself (no interest frame needed). This was in 13.15 but not in G1.
-2. **Members are the bridge.** B is a member of the group and holds the key, so B can wrap any frame of its
-   own groups (its own, and the positions and texts it holds for A) without being a blind mule. The
-   keyless stranger-mule, the interest frame (13.16), BLE carry of `FRAME_UPLINK` and its `VERSION` bump
-   are **deferred to G3**; they are not needed for either win.
-3. **The service must run with Bluetooth off** when the switch is on, and the UI must not block on
-   Bluetooth in that case.
-4. **Receiving needs no new path:** an `inner` frame from the relay goes through the existing
-   `RelayResponder.handleIncoming`, so a text lands in chat and a position on the radar exactly as over BLE,
-   and the existing BLE flood-forward then carries it from B on to A.
-
-Revised order: **G2a** tags and wrapper (pure, tested); **G2b** the service controller (switch state,
-connectivity, link lifecycle, own-frame producers, inbound injection, Bluetooth-off operation);
-**G2c** switch UI and consent, INTERNET and network-state permissions, privacy page and Data Safety text;
-**G3** blind mule, interest frame, `VERSION` 13, last-known position display. Class POSITION_LAST_KNOWN
-stays in the codec but is not produced until G3, because showing "last seen N min ago" needs radar work.
-**Done line for G2:** Win 1 and Win 2 on real phones, with the switch off meaning behaviour identical to v2.
-
-### 13.18 G3 split (2026-10-05): last-known first, the stranger mule after the real round
-
-**G3a, built:** last-known positions and the "Last seen" list (decision 73). It also works over Bluetooth alone: any
-member who goes quiet is listed as last seen for up to 6 hours, held in RAM only.
-**G3b, deliberately paused:** the keyless stranger mule, `FRAME_UPLINK_INTEREST`, BLE carry of `FRAME_UPLINK` and the
-`VERSION` 13 bump. Reasons: neither win condition needs it; it changes the BLE push path and cuts old builds off
-(`decode` drops any other version), so it would invalidate the build the first real round is about to test; and the
-round may show problems in the synthetic `internet` peer seam that change G3b's design. Do it after the round.
-
-
-
----
-
-## Part 14 — Files over the internet, traffic priority, and scale (1000 users in one place) (2026-10-07, design)
-
-**Author's goal:** files must cross too, along any chain such as BLE-only → BLE+internet → other BLE+internet →
-BLE-only, in every direction; and the protocol must be thought through for safety, clogging and jamming at
-roughly 1000 users in one place. **Design only, nothing built.**
-
-### 14.1 Files
-
-Evidence is already fountain-coded (`FRAME_EVID_META` with a ≤256 B thumbnail, then `FRAME_EVID_SYMBOL` of 400 B,
-decodable from any sufficient subset). That suits a lossy relay. Plan: two new uplink classes, **FILE_META** (the
-header and thumbnail) and **FILE_SYMBOLS** (a batch of up to ~60 symbols, about 24 KB, per relay event; a 200 KB file
-is about 9 events). A bridge holding a file's symbols wraps and publishes them; the far side feeds them to the
-existing `handleEvidSymbol`, then its own BLE mesh floods them on as today, which gives the full chain. The sender's
-own phone publishes first, and any bridge that already holds symbols may add more (any subset works).
-Defaults (updated 2026-10-07, decision 76): **any connection, mobile data included**, **size cap 400 KB**, thumbnail
-first so a mate sees a preview within seconds.
-
-### 14.2 Priority order (highest first)
-
-| P | Class | Why / rule |
-|---|---|---|
-| 0 | SOS alert (`isAlert`) | Life safety. Always first, never shed, own small reserved budget. |
-| 1 | Text messages | Small, high value. |
-| 2 | Live position | Useful for about 2 minutes, so latest-wins; adaptive interval (14.3). |
-| 3 | Presence, nicknames | Small, low urgency. |
-| 4 | Last-known position | Mostly repeats; lowest-cost safe to thin. |
-| 5 | File meta, then file symbols | Bulk. First to be shed, only on unmetered network, hard budget. |
-
-Implementation: classes ALERT (3) and FILE (4/5) beside the existing 0-2; `UplinkGateway.drain` orders by
-priority then age (today: live, text, last-known); a per-class share of the hourly budget with P0-P2 reserved at
-about 60 %; when relays refuse or acks time out, shed from P5 upward, never P0.
-
-### 14.3 Scale model for 1000 users (estimates, NOT measurements)
-
-Assume 1000 people in about 140 groups of 7, 30 % with the switch on (300 phones), all with internet.
-Today each online member publishes its own frames AND bridges the whole group's, so the same positions are
-published about 7 times. Rough load: about 0.12 events/s per phone → 36 events/s, times 3 relays = about 108 events/s
-at roughly 2-3 KB each, about 2 Mbit/s into free public relays. That is too much to ask of volunteers' servers.
-Three fixes, each local and needing no new protocol:
-1. **Don't bridge a member who is already online.** If frames from member X arrived from the relay in the last 60 s,
-   do not republish X's BLE-held position. Cuts duplication from about 7× to about 1-2×.
-2. **Adaptive interval.** Live position 10 s → 30 s → 60 s as relay errors, ack timeouts or the number of nearby
-   same-group online phones rise; last-known and presence stretch further.
-3. **One uplinker per BLE cluster per group** by Trickle-style suppression (overhear another phone's recent uplink of
-   the same frame and stay quiet), the same idea `TrickleTimer` already implements for BLE.
-Expected combined effect: 5-15× fewer events. To be **measured** in a staged field test (20, then 100 phones) before
-any claim.
-
-### 14.4 Jamming, clogging and abuse
-
-- **The internet path may be the thing that fails** (that is why the app exists). BLE stays primary; the internet is
-  opportunistic. On repeated failure back off exponentially (the pool already does), stop spending battery, and never
-  block BLE delivery on it.
-- **Shared IP at a venue:** carrier-grade NAT can make 300 phones look like one address to a relay, so per-IP limits
-  trigger sooner than per-phone ones. Spread across more relays, keep a small configurable list, allow a
-  user-supplied or self-hosted relay.
-- **Junk on a known tag:** anyone nearby can scan a group's 60 s beacon tag and flood it. Members drop junk cheaply
-  (an authentication check fails fast) but airtime and data are wasted. Mitigations: per-tag rate caps (built),
-  the hourly byte budget (built), subscribe only to current windows, report relays that serve junk, proof-of-work
-  per frame stays parked until measured.
-- **Privacy at scale:** relays see IP, timing, size and rotating tags; stored last-known positions are the most
-  sensitive item (6 h, author to confirm). Optional later: route through a user-chosen proxy.
-- **Battery and data:** the hourly byte budget, the unmetered-only rule for files, and "stop below X % battery".
-- **Malicious or lazy mule:** redundancy (several relays, several bridges) is the defence; a bridge that drops
-  traffic costs only delay.
-
-### 14.5 Build order, and what to measure first
-
-F1 priority classes and the "already online" suppression (small, testable in the simulator), F2 FILE_META with
-thumbnail, F3 FILE_SYMBOLS with unmetered-only and size cap, F4 adaptive interval and cluster suppression,
-F5 staged scale tests. **Measure on the next real round:** events per phone per minute, bytes per hour, relay
-accept rate, and end-to-end delay for each class, from the new `internet-reach` log lines.

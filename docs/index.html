@@ -4,342 +4,103 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>20.07 — offline mesh coordination</title>
-<meta name="description" content="A phone-to-phone Bluetooth mesh app for staying in contact, navigating to your group, and sharing incident photos when cellular networks are jammed, overloaded, unavailable, or not trusted. No servers, no accounts.">
+<meta name="description" content="20.07 is a free, open-source Android app that keeps your group connected when the network fails: Bluetooth mesh, live radar, SOS, photos, and an optional internet bridge. No accounts, no servers of ours, everything encrypted for your group.">
+<meta name="theme-color" content="#000000">
+<meta property="og:title" content="20.07 — find your people when the network fails">
+<meta property="og:description" content="Bluetooth mesh with an optional internet bridge. Radar, SOS, photos. Encrypted for your group. No accounts.">
+<meta property="og:image" content="banner.png">
+<link rel="icon" href="banner.png">
 <style>
-  /* Palette pulled directly from the app's own Theme.kt (AppColors) — and, on purpose, the ONLY
-     palette this page has. The app itself is deliberately dark-only (Theme.kt's own doc: "Dark,
-     low-glare, and deliberately mostly monochrome"); it has no light mode to be an "inverse" of,
-     so this page doesn't invent one either — a `prefers-color-scheme: light` visitor got a
-     browser-dependent, unrelated palette here before, which is exactly the inconsistency this
-     removes. `color-scheme: dark` tells the browser chrome itself (scrollbars, form controls) to
-     render dark too, regardless of OS preference. */
-  :root {
-    color-scheme: dark;
-    --bg: #0a0d10;
-    --surface: #14181c;
-    --surface-2: #1c2126;
-    --border: #262b31;
-    --text: #edeff1;
-    --text-muted: #8b95a1;
-    --accent: #818cf8;
-    --accent-contrast: #0a0d10;
-    --danger: #ef4444;
-    --safe: #34d399;
-    --safe-a: rgba(52, 211, 153, .55);
-    --code-bg: #1c2126;
-  }
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
-  body {
-    background: var(--bg);
-    color: var(--text);
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    line-height: 1.5;
-    max-width: 100%;
-    overflow-x: hidden;
-  }
-  main {
-    max-width: 720px;
-    margin: 0 auto;
-    padding: 48px 24px 64px;
-  }
-
-  /* ---- radar motif — the app's own core visual, not decoration borrowed from nowhere ---- */
-  .radar {
-    position: relative;
-    width: 168px;
-    height: 168px;
-    margin: 0 auto 20px;
-    border-radius: 50%;
-    background: radial-gradient(circle at 50% 50%, var(--surface-2) 0%, var(--surface) 72%);
-    border: 1px solid #3a424b;
-    overflow: hidden;
-  }
-  .radar::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background:
-      radial-gradient(circle, transparent 0 23%, #3a424b 23% 23.8%, transparent 23.8%),
-      radial-gradient(circle, transparent 0 48%, #3a424b 48% 48.8%, transparent 48.8%),
-      radial-gradient(circle, transparent 0 73%, #3a424b 73% 73.8%, transparent 73.8%);
-  }
-  .radar-sweep {
-    position: absolute;
-    inset: 0;
-    border-radius: 50%;
-    background: conic-gradient(from 0deg, var(--safe-a), transparent 30%);
-    animation: radar-spin 4.5s linear infinite;
-  }
-  .radar-dot {
-    position: absolute;
-    left: var(--x);
-    top: var(--y);
-    width: 7px;
-    height: 7px;
-    margin: -3.5px;
-    border-radius: 50%;
-    background: var(--safe);
-    animation: radar-pulse 2.6s ease-out infinite;
-    animation-delay: var(--delay);
-  }
-  @keyframes radar-spin { to { transform: rotate(360deg); } }
-  @keyframes radar-pulse {
-    0% { box-shadow: 0 0 0 0 var(--safe-a); }
-    70% { box-shadow: 0 0 0 12px transparent; }
-    100% { box-shadow: 0 0 0 0 transparent; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .radar-sweep, .radar-dot { animation: none; }
-  }
-
-  h1 {
-    text-align: center;
-    font-size: 2.6rem;
-    font-weight: 800;
-    letter-spacing: -0.02em;
-    margin: 0 0 4px;
-  }
-  .tagline {
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 1.05rem;
-    margin: 0 0 24px;
-  }
-  h2 {
-    font-size: 1.15rem;
-    font-weight: 700;
-    margin: 36px 0 12px;
-    letter-spacing: -0.01em;
-  }
-  p { margin: 0 0 14px; }
-  a { color: var(--accent); text-decoration: none; }
-  a:hover { text-decoration: underline; }
-  .badges {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
-    margin: 0 0 24px;
-  }
-  .badge {
-    padding: 4px 10px;
-    border-radius: 999px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 0.78rem;
-    font-weight: 500;
-  }
-  .cta-row {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 10px;
-    margin: 4px 0 8px;
-  }
-  .btn {
-    display: inline-block;
-    padding: 8px 22px;
-    border-radius: 10px;
-    font-weight: 600;
-    font-size: 0.95rem;
-    text-decoration: none;
-    border: 1px solid var(--border);
-  }
-  .btn:hover { text-decoration: none; opacity: 0.9; }
-  .btn-primary {
-    background: var(--safe);
-    color: var(--accent-contrast);
-    border-color: var(--safe);
-  }
-  .btn-secondary {
-    background: transparent;
-    color: var(--text);
-  }
-  .cta-note {
-    text-align: center;
-    color: var(--text-muted);
-    font-size: 0.82rem;
-    margin: 0 0 8px;
-  }
-  .features {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-    gap: 12px;
-    margin: 16px 0 8px;
-  }
-  .feature {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 14px 16px;
-  }
-  .feature h3 {
-    margin: 0 0 4px;
-    font-size: 0.95rem;
-    font-weight: 700;
-  }
-  .feature p {
-    margin: 0;
-    color: var(--text-muted);
-    font-size: 0.86rem;
-  }
-  ul.compare {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-  }
-  ul.compare li {
-    padding: 11px 0;
-    border-bottom: 1px solid var(--border);
-  }
-  ul.compare li:last-child { border-bottom: none; }
-  ul.compare strong { display: block; margin-bottom: 2px; font-size: 0.95rem; }
-  ul.compare span.detail { color: var(--text-muted); font-size: 0.86rem; }
-  .warning-box {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-left: 3px solid var(--danger);
-    border-radius: 8px;
-    padding: 12px 16px;
-    font-size: 0.86rem;
-    color: var(--text-muted);
-    margin: 16px 0;
-  }
-  .warning-box strong { color: var(--text); }
-  code {
-    background: var(--code-bg);
-    color: var(--safe);
-    padding: 1px 6px;
-    border-radius: 4px;
-    font-size: 0.85em;
-  }
-  footer {
-    margin-top: 48px;
-    padding-top: 18px;
-    border-top: 1px solid var(--border);
-    color: var(--text-muted);
-    font-size: 0.82rem;
-    text-align: center;
-  }
-  footer a { color: var(--text-muted); }
+  :root{--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86;--green-d:#3fbf55;--red:#ff4d4d}
+  @media (prefers-color-scheme:light){:root{--bg:#f4faf5;--panel:#fff;--line:#d3e6d8;--ink:#0d1a10;--muted:#53705a;--green:#1f9d3a;--green-d:#157a2b}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
+  header.hero{text-align:center;padding:48px 0 24px}
+  header.hero img{width:min(100%,300px);height:auto;border-radius:20px}
+  h1{font-size:clamp(28px,5vw,44px);line-height:1.15;margin:20px 0 8px}
+  h1 span{color:var(--green)}
+  .lead{max-width:640px;margin:0 auto;color:var(--muted);font-size:18px}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:28px 0 8px}
+  .btn{display:inline-block;padding:12px 22px;border-radius:999px;text-decoration:none;font-weight:600}
+  .btn.primary{background:var(--green);color:#03150a}
+  .btn.ghost{border:1px solid var(--line);color:var(--ink)}
+  .badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:18px}
+  .badge{font-size:13px;padding:4px 12px;border:1px solid var(--line);border-radius:999px;color:var(--muted)}
+  section{padding:36px 0;border-top:1px solid var(--line)}
+  h2{font-size:26px;margin:0 0 16px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px}
+  .card h3{margin:0 0 6px;font-size:17px;color:var(--green)}
+  .card p{margin:0;color:var(--muted);font-size:15px}
+  .steps{counter-reset:s;display:grid;gap:12px}
+  .step{counter-increment:s;display:flex;gap:14px;align-items:flex-start}
+  .step:before{content:counter(s);flex:none;width:32px;height:32px;border-radius:50%;background:var(--green);color:#03150a;font-weight:700;display:grid;place-items:center}
+  .note{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--green);border-radius:12px;padding:14px 18px;color:var(--muted)}
+  .warn{border-left-color:var(--red)}
+  ul{padding-left:20px} li{margin:6px 0}
+  footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
+  a{color:var(--green)}
 </style>
 </head>
 <body>
-<main>
-
-  <div class="radar" aria-hidden="true">
-    <div class="radar-sweep"></div>
-    <div class="radar-dot" style="--x: 64%; --y: 28%; --delay: 0s"></div>
-    <div class="radar-dot" style="--x: 32%; --y: 66%; --delay: .7s"></div>
-    <div class="radar-dot" style="--x: 72%; --y: 70%; --delay: 1.4s"></div>
-  </div>
-
-  <img src="banner.png" alt="20.07 logo: a location pin with a signal trace" style="display:block;margin:0 auto 16px;max-width:min(100%,360px);height:auto;border-radius:16px">
-    <h1>20.07</h1>
-  <p class="tagline">Find your group and stay reachable — in a crowd or off the grid, even with no signal.</p>
-
-  <div class="badges">
-    <span class="badge">MIT licensed</span>
-    <span class="badge">Android · Kotlin</span>
-    <span class="badge">No servers of ours</span>
-    <span class="badge">No accounts</span>
-    <span class="badge">Bluetooth LE, optional internet</span>
-  </div>
-
-  <div class="cta-row">
-    <a class="btn btn-primary" href="https://github.com/karmaNeggs/20.07/releases/latest">Download the latest APK</a>
-    <a class="btn btn-secondary" href="https://github.com/karmaNeggs/20.07">Source</a>
-    <a class="btn btn-secondary" href="https://github.com/karmaNeggs/20.07/blob/main/README.md">Full writeup</a>
-  </div>
-  <p class="cta-note">Sideloaded APK — allow installs from this source once in Android settings. Min SDK 26 (8.0+).</p>
-
-  <p>
-    When cell towers are jammed, throttled, or unavailable, people lose the ability to find each
-    other, call for help, or share proof of what's happening. 20.07 fixes that with zero
-    infrastructure: phones relay for each other directly over Bluetooth. No SIM, no servers of
-    ours, no accounts — everything's encrypted under a key only your group holds. An optional,
-    off-by-default Internet reach switch lets a phone with any connection carry your group's encrypted
-    messages, locations and photos further, even with Bluetooth off.
-  </p>
-
-  <h2>Three solutions</h2>
-  <div class="features">
-    <div class="feature">
-      <h3>Navigate</h3>
-      <p>A live radar of your group around you — walk toward the dot, don't read a map.</p>
+<div class="wrap">
+  <header class="hero">
+    <img src="banner.png" alt="20.07 logo: a location pin with a signal trace">
+    <h1>Find your people <span>when the network fails.</span></h1>
+    <p class="lead">20.07 keeps a group connected with no signal at all: phones relay for each other over Bluetooth, and an optional internet bridge carries your group further, even with Bluetooth off. Free, open source, no accounts.</p>
+    <div class="cta">
+      <a class="btn primary" href="https://github.com/karmaNeggs/20.07/releases/latest">Download the APK</a>
+      <a class="btn ghost" href="https://github.com/karmaNeggs/20.07">Source on GitHub</a>
+      <a class="btn ghost" href="privacy.html">Privacy</a>
     </div>
-    <div class="feature">
-      <h3>SOS</h3>
-      <p>An authenticated distress broadcast that hops phone to phone, distance shown in hops.</p>
+    <div class="badges">
+      <span class="badge">Android 8+</span><span class="badge">MIT licensed</span><span class="badge">No accounts</span>
+      <span class="badge">No servers of ours</span><span class="badge">Encrypted for your group</span>
     </div>
-    <div class="feature">
-      <h3>Incident photos</h3>
-      <p>Photos encrypted and relayed across the mesh — proof that doesn't live on just one phone.</p>
+  </header>
+
+  <section>
+    <h2>What you get</h2>
+    <div class="grid">
+      <div class="card"><h3>Live radar</h3><p>See which way, and how far, your group is. Works on Bluetooth alone, with a hot/cold fallback if you decline location.</p></div>
+      <div class="card"><h3>SOS that goes first</h3><p>A flagged SOS jumps the queue on every path: Bluetooth and internet. Quiet messages and a loud alert are separate on purpose.</p></div>
+      <div class="card"><h3>Last seen</h3><p>A mate who dropped out shows as "Priya, 14 min ago, 3.2 km NE" for up to six hours. Held in memory only.</p></div>
+      <div class="card"><h3>Photos and files</h3><p>Share incident photos and files up to 400 KB. They hop over Bluetooth and, if you allow it, over the internet.</p></div>
+      <div class="card"><h3>Internet reach <small>(optional)</small></h3><p>One switch. A phone with Wi-Fi or mobile data carries your group's encrypted traffic to mates out of Bluetooth range. Off by default.</p></div>
+      <div class="card"><h3>Stranger carrying</h3><p>Phones outside your group, with the switch on, can carry your sealed frames onward. They see sizes and timing, never content.</p></div>
     </div>
-  </div>
+  </section>
 
-  <h2>Why this exists</h2>
-  <p>
-    Cellular networks assume normal conditions. That breaks down in a specific, recurring set of
-    situations, whether the network is overloaded by too many people or there was never much of
-    it to begin with: natural disasters and blackouts, stampedes and crowd crush, festivals and
-    events with no signal or no local data plan, hiking and remote areas with no towers nearby,
-    and demonstrations where networks are jammed, throttled, or not trusted. In every case the
-    same three needs recur — find your group, call for help, get incident photos out — and 20.07
-    does exactly that, phone-to-phone, with no infrastructure required.
-  </p>
+  <section>
+    <h2>How it works</h2>
+    <div class="steps">
+      <div class="step"><div><strong>Make a group.</strong> One code or QR creates a random key. Share it in person; the app never brokers trust.</div></div>
+      <div class="step"><div><strong>Phones relay for each other.</strong> Bluetooth links form a mesh; positions, messages, SOS and photos hop between members.</div></div>
+      <div class="step"><div><strong>Out of range? The bridge.</strong> With Internet reach on, any phone that has a connection sends and receives for the group through public relays, so two phones with Bluetooth off can still talk.</div></div>
+    </div>
+  </section>
 
-  <h2>Design choices</h2>
-  <ul class="compare">
-    <li>
-      <strong>No accounts, ever</strong>
-      <span class="detail">One QR code creates a group. No owner tied to it — removing one person doesn't expose or kill the group.</span>
-    </li>
-    <li>
-      <strong>Blind relay by design</strong>
-      <span class="detail">Every phone, even ones outside your group, carries your traffic — architecturally opaque to them, not just "encrypted so please don't."</span>
-    </li>
-    <li>
-      <strong>The radio ID itself rotates</strong>
-      <span class="detail">Your Bluetooth advertising ID changes every 60 seconds, so passive scanning sees a changing, meaningless value instead of a stable fingerprint.</span>
-    </li>
-    <li>
-      <strong>GPS never touches disk</strong>
-      <span class="detail">Lives in memory only — gone the instant the app is force-quit.</span>
-    </li>
-    <li>
-      <strong>Incident photos outlive any one phone</strong>
-      <span class="detail">Photos relay across the mesh as they're captured — copies exist elsewhere before any single phone stops being available.</span>
-    </li>
-    <li>
-      <strong>The app can disguise itself</strong>
-      <span class="detail">One switch shows the home-screen icon and notification as a plain utility app instead.</span>
-    </li>
-  </ul>
+  <section>
+    <h2>Safety and privacy, plainly</h2>
+    <ul>
+      <li>Everything is sealed with your group's key before it leaves the phone. Relays and carriers can't read it.</li>
+      <li>Relays do see your phone's internet address, message sizes and timing, and a short rotating group code. Some relays keep what they receive: positions up to 6 hours, messages up to 7 days.</li>
+      <li>Built to avoid clogging servers in a crowd: SOS first, files last, slow-downs under congestion, per-hour limits. Tested in simulation up to 10,000 users.</li>
+      <li>No account, no phone number, no servers of ours; nothing is sent to us. A seized phone holds no location history.</li>
+    </ul>
+    <p class="note warn">Honest status: pre-1.0 (0.10.1-dev). The internet bridge works on two phones with Bluetooth off and in simulation; three-phone and large-crowd field tests are still to do. Don't rely on it as your only safety device. <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">Known limitations</a>.</p>
+  </section>
 
-  <div class="warning-box">
-    <strong>Read before relying on this for anything real.</strong> Not yet validated at real
-    crowd scale, some components are compile-tested but not device-tested, and the release build
-    isn't signed yet. All documented plainly in the
-    <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">README's Known Limitations</a>.
-  </div>
-
-  <h2>Build it yourself</h2>
-  <p>
-    <code>git clone</code> the repo, then from <code>20.07/android/</code>: <code>./gradlew assembleDebug</code>
-    builds the APK, <code>./gradlew test detekt</code> runs the suite. Needs JDK 17 + Android SDK
-    (platform 34). Full steps in the <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#get-the-app">README</a>.
-  </p>
+  <section>
+    <h2>Install</h2>
+    <p>There is no Play Store build: download the signed APK from <a href="https://github.com/karmaNeggs/20.07/releases/latest">GitHub Releases</a>, open it, and allow installs from that source once. Share the same file with friends, offline, by any means. <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#get-the-app">Details and building from source</a>.</p>
+  </section>
 
   <footer>
-    MIT licensed · maintained by <a href="https://github.com/karmaNeggs">karmaNeggs</a> on
-    <a href="https://github.com/karmaNeggs/20.07">GitHub</a> · issues and PRs welcome ·
-    <a href="privacy.html">Privacy Policy</a>
+    20.07 · MIT licensed · <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md">README</a> ·
+    <a href="privacy.html">Privacy</a> · <a href="https://github.com/karmaNeggs">karmaNeggs</a>
   </footer>
-
-</main>
+</div>
 </body>
 </html>

@@ -4317,11 +4317,6 @@ hour to hour). Both frames crossed from one link to another, and **a phone that 
 collected the stored text**. Snort answers the ephemeral kind with "will not be stored"; nos.lol and nostr.mom
 stored the live event too, as decision 67 found. Stored-text retrieval was checked in one run on one day.
 
-**Bugs the tests caught (all fixed):** a transport that answers synchronously made the pool miss its own OK and
-time out; a transport that fails before `connect()` returns left a dead socket recorded as connected; stale
-callbacks from a replaced socket could corrupt the new one; queued events never expired when a relay stayed down;
-the link waited a full tick after queuing a publish.
-
 **New dependency to review (Part 12):** `com.squareup.okhttp3:okhttp:4.12.0` (WebSocket; `org.json` for tests
 only). R8 strips it while unused: release APK 2,197,435 bytes versus 2,155,560 before. **Design gap found:**
 a keyless gateway cannot learn hourly mailbox tags; `PLAN-v2.md` §13.16 adds a member-to-gateway interest frame
@@ -4378,10 +4373,6 @@ the newest position held for others, never anything that itself came from the in
 update. On the relay it expires after 6 hours, sooner than a text (7 days), because a stored location trail is the
 most sensitive thing this feature creates. **The 6 hour window is still the author's to confirm.**
 
-**Bug caught before shipping:** `learnPeerIdentity("internet", senderId)` would have mapped the synthetic peer to a
-member, which breaks both the split-horizon echo control and the flood-forward exclusion. It now ignores the
-synthetic peer. 622 tests, detekt, lint and both release builds green; version 0.8.1-dev.
-
 **G3b paused on purpose** (stranger mule, interest frame, BLE carry of `FRAME_UPLINK`, `VERSION` 13): neither win
 condition needs it, it changes the BLE push path and cuts old builds off, and the first real round may change its
 design. See `PLAN-v2.md` §13.18.
@@ -4411,36 +4402,30 @@ congestion rule, any real-phone test of files, UI for a "send files on mobile da
 scale measurement (Part 14.3 numbers are still estimates).
 
 
-## 76. Scale and chaos simulation, and the fixes it forced (2026-10-07)
+## 76. Scale and chaos simulation and the scale controls (2026-10-07)
 
-Author: files must go on mobile data too (supersedes decision 75's unmetered-only rule); sideload APK, no Play Store;
-run the scale question logically before the field. `ScaleChaosSimTest` runs the REAL controller, gateway, priorities and tag
-derivation for 1000 users (300 online, groups of 7) against a MODEL of relays (25 events/s each, per-address limit 8/s,
-bans, outages). Not modelled: signing, sockets, BLE, real relay policy. **Findings are about logic and amplification.**
-Found and fixed: (1) a retry storm and saturation (every event to all 3 relays, retry every second): now 2 of 3 relays
-by hash, full-jitter backoff; (2) shared-address collapse (50 phones per address tripped per-address bans, 2% delivered):
-randomised first publish, ban-aware relay skipping (the real pool already backs off 10 min on a ban), now 100%;
-(3) synchronised flash crowd: jittered starts; (4) a flat 3x congestion slow-down: now multiplicative up to 6x.
-Also found and fixed in my own code: `RelayChoice` first used String.hashCode and sent nothing to one relay; the sim's
-first delivery metric wrongly counted the carrier phone as a receiver.
-**Remaining limits (logic level):** relay capacity is the binding constraint: under an alert storm plus file uploads alerts
-still all arrive but p95 rises 5 s -> 15 s, because a relay cannot prioritise; periodic traffic from N online phones is
-O(N) and cannot be merged across phones (each member's own position), so very large crowds rely on the slow-down and on
-the "Last seen" fallback; a malicious client that bypasses the app is stopped only by the relay's own limits; real relay
-capacity and policy are unknown and need the staged field test. Skipping already-online members saves bytes (about 22%)
-but not events. Report: `docs/spikes/scale-sim-2026-10-07/report.txt`.
+Author: files must go on mobile data too (supersedes decision 75's unmetered-only rule); sideload APK, no Play Store; run the scale
+question logically before the field. `ScaleChaosSimTest` runs the REAL controller, gateway, priorities and tag derivation for 1000
+users (300 online, groups of 7) against a MODEL of relays (25 events/s each, per-address limit 8/s, bans, outages). Not modelled:
+signing, sockets, BLE, real relay policy; findings are about logic and amplification. The controls it led to: each event goes to 2
+of the connected relays by SHA-256 of tag and relay; full-jitter exponential backoff after a failed publish; ban-aware relay
+skipping (the pool backs off 10 minutes on a ban); randomised first publish and jitter; multiplicative slow-down of periodic
+traffic. Results with them: shared-address delivery 100 %, alert delivery 100 % (p95 15 s during an alert storm plus 60 file
+uploads), rejections about 100x lower. Remaining limits: relay capacity is the binding constraint (a relay cannot prioritise);
+periodic traffic from N online phones is O(N) and cannot be merged across phones, so very large crowds rely on slow-down and the
+"Last seen" fallback; a malicious client that bypasses the app is stopped only by relay limits; real relay capacity and policy are
+unknown. Report: `docs/spikes/scale-sim-2026-10-07/report.txt`.
 
+## 77. Independent blind review of the internet code (2026-10-08)
 
-## 77. Blind QC pass found 15 defects, all fixed (2026-10-08)
-
-A helper agent was told not to read any record (docs, decisions, existing tests) and to judge the v3 internet code only against a
-short statement of intended behaviour, writing its own tests (`qc/` package). Result: 15 confirmed defects (listed in the changelog),
-a RelayPool fuzz of 300 seeds with no double or lost settle, and unconfirmed suspicions still open: the pool falls back to
-non-connected relays when none are connected; the live relay tag equals the public BLE beacon id (relay operators and BLE
-sniffers can link them); the mailbox lookback is 24 h while texts live 7 days; a hostile relay can deliver any validly signed event
-(only the link filters by kind, and the `t` tag is not checked against the frame's tag); congested() with zero relays now false.
+A helper agent, forbidden to read any record (docs, decisions, existing tests) and given only a short statement of intended
+behaviour, reviewed the v3 internet code and wrote 49 tests of its own (`app/src/test/.../qc/`, kept as regression tests). Its
+findings hardened strict priority ordering, global memory bounds against hostile tags, budget accounting, relay-ban rules,
+subscription coverage across window rolls, key and timestamp validation, and restart behaviour. Its 300-seed fuzz of the relay pool
+found no double or lost settle. Open suspicions it could not confirm: the pool falls back to non-connected relays when none are
+connected; the live relay tag equals the public Bluetooth beacon id (relay operators and sniffers can link them); the mailbox
+lookback is 24 h while texts live 7 days; a hostile relay can deliver any validly signed event (only the link filters by kind).
 Not testable in the JVM: the Android runtime, OkHttp, NetworkMonitor, real relay behaviour, real threads.
-
 
 ## 78. Stranger carrying built (G3b) (2026-10-08)
 

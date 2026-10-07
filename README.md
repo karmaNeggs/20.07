@@ -9,6 +9,18 @@ Built for a specific, recurring shape of problem: a group that needs to stay tog
 network that can't help them do it — whether that network is overloaded by too many people, or
 there was never much of one there to begin with.
 
+
+## What's new in 0.10.1-dev
+
+- **Internet reach** (optional, off by default): a phone with Wi-Fi or mobile data sends and receives its group's encrypted frames through public Nostr relays, with Bluetooth on or off. Messages, SOS alerts, live and last-known positions, nicknames and files (up to 400 KB).
+- **SOS first, files last:** a strict priority order on the internet path, with separate hourly budgets.
+- **"Last seen" list:** a mate who went quiet shows as name, minutes ago, distance and direction, for up to 6 hours, in memory only.
+- **Stranger carrying:** phones outside your group, with the switch on, can carry your sealed frames over Bluetooth and upload them.
+- **Built for crowds:** two relays per event chosen by hash, jittered timing, backoff, slow-down under congestion, bounded queues; simulated at 10,000 users.
+- **Chat input redesigned** (wide message box, big SEND SOS button), new icon, target SDK 36.
+
+Full list: [`CHANGELOG.md`](CHANGELOG.md). Design: `PLAN-v2.md` Part 13. Test plan: `TESTING.md`.
+
 ## Why this exists
 
 Cellular networks assume normal conditions — towers up, signal available, infrastructure standing
@@ -405,7 +417,7 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 36.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.9.1-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.10.1-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
@@ -424,12 +436,12 @@ internet bridges nearby Bluetooth-only phones to internet-only ones. Relays see 
 codes, your IP address and timing; **both mates need the switch on**. Design: `PLAN-v2.md` Part 13 and
 `docs/DECISIONS.md` decisions 66-72.
 
-**Status honestly:** tried on two real phones with Bluetooth off (messages and positions arrived both ways in 1-13 s), and
+**Status honestly (0.10.1-dev):** tried on two real phones with Bluetooth off (messages and positions arrived both ways in 1-13 s), and
 tested in simulation (1000 users, outages, shared carrier addresses, alert storms) and against real public relays. **The 3-phone
 bridge test and a long field run are still to do.** Files travel too (any connection, up to 400 KB, paced, lowest priority),
 SOS alerts have top priority, and a mate who went quiet shows under "Last seen" for up to 6 hours. The stranger-carrying
 "mule" mode is built (0.10.0-dev): phones that are not in your group, with Internet reach on, carry your encrypted
-frames over Bluetooth and upload them; **not yet tried on phones**.
+frames over Bluetooth and upload them; **not yet tried on phones**. Design and evidence: `PLAN-v2.md` Part 13.
 
 ## Get the app
 
@@ -438,7 +450,7 @@ frames over Bluetooth and upload them; **not yet tried on phones**.
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
 Releases page.) This is the signed **release** build (minified, no debug-only tooling). The newest build
-(0.9.1-dev) adds Internet reach, which has been tried on two phones so far; see "Internet reach" and Known
+(0.10.1-dev) adds Internet reach, which has been tried on two phones so far; see "Internet reach" and Known
 Limitations above for what is still thin about its testing history.
 
 **Build from source**:

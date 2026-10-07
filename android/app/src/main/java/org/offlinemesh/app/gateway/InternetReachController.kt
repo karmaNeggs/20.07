@@ -22,7 +22,7 @@ interface UplinkLink {
     /** True when most relays are failing or banning us: slow down and pause bulk. */
     fun congested(): Boolean = false
 
-    /** Whether file (bulk) frames may be sent now (unmetered network only). */
+    /** Whether file (bulk) frames may be sent now. */
     fun setBulkAllowed(allowed: Boolean) {}
 
     /** One line describing each relay's state, for diagnostics only. */
