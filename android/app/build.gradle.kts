@@ -27,8 +27,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.8.1-dev"
+        versionCode = 43
+        versionName = "0.8.2-dev"
         // True for every build type except playstoreRelease below, which overrides it to false.
         // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
         // Play's Deceptive Behavior / impersonation policy specifically targets apps that change

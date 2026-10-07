@@ -93,6 +93,10 @@ class NostrGatewayLink(
 
     override fun hasConnectedRelay(): Boolean = pool.hasConnectedRelay()
 
+    override fun summary(): String = pool.status().joinToString(" ") {
+        it.url.removePrefix("wss://").substringBefore('.') + "=" + it.state.name.lowercase()
+    }
+
     /** A last-known position is the most sensitive thing stored on a relay, so it expires sooner than a text. */
     private fun expirySec(cls: Int): Long =
         if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {

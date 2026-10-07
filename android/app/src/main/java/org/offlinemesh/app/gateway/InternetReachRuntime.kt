@@ -39,6 +39,9 @@ class InternetReachRuntime(
     private val _status = MutableStateFlow(Status.OFF)
     val status: StateFlow<Status> = _status
     private var job: Job? = null
+    private var lastLoggedStatus: Status? = null
+    private var lastSummaryAt = 0L
+    private val inboundByClass = IntArray(INBOUND_CLASSES)
 
     private val controller = InternetReachController(
         source = ResponderUplinkSource(repo, responder),
@@ -83,6 +86,7 @@ class InternetReachRuntime(
             controller.relayConnected() -> Status.ACTIVE
             else -> Status.CONNECTING
         }
+        logChanges()
         try {
             controller.step()
             persistKeyIfChanged()
@@ -90,6 +94,24 @@ class InternetReachRuntime(
             throw e
         } catch (@Suppress("TooGenericExceptionCaught") e: Exception) {
             DiagnosticsLog.event("internet-reach", "step failed: ${e::class.simpleName} ${e.message}")
+        }
+    }
+
+    /** Diagnostics only (a no-op in release builds): status changes at once, and a relay/inbound summary every 30 s. */
+    private fun logChanges() {
+        val s = _status.value
+        if (s != lastLoggedStatus) {
+            DiagnosticsLog.event("internet-reach", "status $lastLoggedStatus -> $s")
+            lastLoggedStatus = s
+        }
+        val t = System.currentTimeMillis()
+        if (s != Status.OFF && t - lastSummaryAt >= SUMMARY_MS) {
+            lastSummaryAt = t
+            DiagnosticsLog.event(
+                "internet-reach",
+                "relays ${controller.summary()} inbound live/last/text=" +
+                    "${inboundByClass[0]}/${inboundByClass[1]}/${inboundByClass[2]}",
+            )
         }
     }
 
@@ -102,6 +124,7 @@ class InternetReachRuntime(
 
     /** A frame that arrived over the internet goes through the same handler as one from a BLE neighbour. */
     private suspend fun handleInbound(cls: Int, inner: ByteArray) {
+        if (cls in 0 until INBOUND_CLASSES) inboundByClass[cls]++
         if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {
             responder.ingestLastKnownPosition(inner)
             return
@@ -113,6 +136,8 @@ class InternetReachRuntime(
 
     companion object {
         private const val TICK_MS = 1000L
+        private const val SUMMARY_MS = 30_000L
+        private const val INBOUND_CLASSES = 3
 
         /** A member endpoint publishes its own and its group's frames, so it needs far more headroom per tag
          *  than a blind carrier (about ten frames every ten seconds for a full group). */

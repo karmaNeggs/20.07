@@ -11,6 +11,9 @@ interface UplinkLink {
     fun tick()
     fun close()
     fun hasConnectedRelay(): Boolean
+
+    /** One line describing each relay's state, for diagnostics only. */
+    fun summary(): String = ""
 }
 
 /** One group this phone belongs to, with its root key. */
@@ -75,6 +78,8 @@ class InternetReachController(
     val running: Boolean get() = link != null
 
     fun relayConnected(): Boolean = link?.hasConnectedRelay() == true
+
+    fun summary(): String = link?.summary() ?: "stopped"
 
     fun start() {
         if (link != null) return

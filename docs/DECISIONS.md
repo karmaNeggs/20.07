@@ -4386,3 +4386,14 @@ synthetic peer. 622 tests, detekt, lint and both release builds green; version 0
 condition needs it, it changes the BLE push path and cuts old builds off, and the first real round may change its
 design. See `PLAN-v2.md` §13.18.
 
+
+## 74. First real round: internet messaging works; files are a designed gap (2026-10-07)
+
+Two phones, Bluetooth off, Internet reach on. Logs (`20.07 8 mesh diagnostics`, `20.07 8-1 mesh diagnostics`, kept in the
+project wrapper folder): 5 of 5 messages delivered both ways in 13.4, 4.7, 4.6, 2.7 and 1.3 s (target 30 s); positions also
+arrived while Bluetooth was off. Files/photos did not cross over the internet and do over Bluetooth in range: expected,
+since `FRAME_UPLINK` carries only presence, positions, messages and nicknames (`PLAN-v2.md` §13.1 non-goal). **Gap
+found:** the logs held no internet-path events at all, so delivery had to be inferred from `[send]/[recv]` lines; 0.8.2-dev
+adds status and 30 s summary lines. **Not tested:** the 3-phone bridge, last-seen, screen-off behaviour. Chat input
+layout fixed (two rows). Whether to send small files over the internet is an open author decision.
+
