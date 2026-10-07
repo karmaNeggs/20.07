@@ -204,3 +204,17 @@ Deliberately excluded: the crypto/authentication model as a whole (README's Secu
 that, including what it doesn't protect against), every fixed bug (the changelog owns that), and
 anything still marked not-device-tested in README's Known Limitations — those are flagged there as
 unverified, not claimed here as working engineering.
+
+
+## Optional internet transport (v3, off by default)
+
+The cryptography is unchanged: group messages, positions and files are still sealed under the group's key before they leave the phone.
+With the Internet reach switch on, sealed frames may also travel through public Nostr relays. **What a relay can learn:** the
+sender phone's IP address, event sizes and timing, a rotating group tag (60 s for live data, 1 h for messages and last-known
+positions, derived from the group key so only members can compute it), and a throwaway signing key replaced every 7 days.
+**What it cannot learn:** content, group names, member identities or positions. **Residual risks:** relays may store events (positions
+for up to 6 h, messages up to 7 days), so a later compromise of a group key exposes stored data from that period; a carrier or venue
+can see that a phone talks to relays; relays can drop or delay traffic (mitigated by using several relays); a malicious client that
+ignores the app's budgets is stopped only by relay limits. Traffic is prioritised (SOS first, files last), rate-limited per tag,
+budgeted per hour and slowed under congestion so a crowd cannot easily clog the relays. The feature is not available to phones that
+have not switched it on, and a phone that has it off behaves exactly as in v2.

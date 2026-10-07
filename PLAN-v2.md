@@ -1,5 +1,8 @@
 # 20.07 v2 — scaling plan
 
+> **Superseded 2026-10-08 for current status:** the live state is in `HANDOFF.md` (project wrapper folder) and Parts 13-14 at the
+> end of this file (internet gateway, files, priority, scale). The block below is the v2 status as of 2026-08-10 and is kept as history.
+
 **RESUME HERE — current status as of 2026-08-10 (session continued past the P6 checkpoint below).**
 This is the single status block to trust; anything else in this document (including inline "STATUS"
 notes inside Part 7 below) is detail underneath this, not a competing source. If a phase's own
