@@ -27,7 +27,7 @@ later extended for the epoch-aware cooldown-skip behind the passerby-relay fix) 
 tracked hop reading used to be able to freeze indefinitely in a redundant mesh — see decision 60 —
 now rebuilt so each reporting source ages out independently, tested with a fake clock the same way).
 
-525 tests, all passing. This is what should catch a broken build *before* you spend twenty minutes
+634 tests (1 opt-in live-relay test skipped), all passing, including a 1000-user logical scale and chaos simulation of the internet path. This is what should catch a broken build *before* you spend twenty minutes
 manually testing it — a crypto or wire-format regression shows up here in seconds, not after a
 confusing live session.
 
@@ -81,14 +81,14 @@ full manual pass against `test_rubric.md` on a real release build before trustin
 distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
 deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
 
-## Test day — Internet reach (v0.8.1-dev, targetSdk 36)
+## Test day — Internet reach (v0.9.1-dev, targetSdk 36)
 
 First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
 until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
 
 **Before you start**
 - [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
-- [ ] Install `20.07-v0.8.1-dev-debug-internet-reach.apk` on every phone. Grant every permission it asks for.
+- [ ] Install `20.07-v0.9.1-dev-debug.apk` on every phone. Grant every permission it asks for.
 - [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
 - [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
 - [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).
@@ -128,6 +128,13 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 - [ ] A phone that joins late (turn Internet reach on for a fourth phone after C went quiet) shows C under Last seen within about a minute. If not, record it.
 - [ ] PASS = last-seen age, distance and direction are right and it never appears as a live dot.
 
+**Test 2c — Files and SOS priority (15 min)**
+- [ ] On A (Bluetooth only) send a small photo to the group. B should receive it over Bluetooth and relay it; C (Wi-Fi/mobile data only) should get a thumbnail within seconds and the full photo within a minute or two. Repeat from C towards A.
+- [ ] Do it once on mobile data and once on Wi-Fi. Both should work.
+- [ ] While a photo is still sending, press SEND SOS on C. A must show the SOS in a few seconds, not after the photo.
+- [ ] A file over 400 KB must not be sent over the internet (it still moves over Bluetooth). Note what the sender sees.
+- [ ] PASS = photo arrives intact on the far phone, and SOS overtakes the photo.
+
 **Test 3 — the awkward cases (20 min)**
 - [ ] Turn C's Wi-Fi off, wait 30 seconds, turn it on. Status goes "waiting for Wi-Fi or mobile data", then back to connected. Messages sent meanwhile arrive afterwards.
 - [ ] Turn on the app's Offline tile on C. Status shows "paused by Offline mode" and C stops sending.
@@ -141,7 +148,7 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 - [ ] A screenshot of the home screen showing the status line.
 
 **Do NOT report these as bugs, they are known and not built yet**
-- A message sent to a phone that has never been online does not wait for it (stranger-carrying is G3).
+- Phones that are not members of your group do not carry your traffic (stranger-carrying mode is not built yet).
 - Phones that only have Bluetooth and are not members of the group do not carry anything over the internet.
 
 **Also record, because it is unmeasured**

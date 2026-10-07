@@ -404,8 +404,8 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 
 ## Specs
 
-- **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 34.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.7.25-dev` — pre-1.0, see Known Limitations.
+- **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 36.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.9.1-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
@@ -424,8 +424,11 @@ internet bridges nearby Bluetooth-only phones to internet-only ones. Relays see 
 codes, your IP address and timing; **both mates need the switch on**. Design: `PLAN-v2.md` Part 13 and
 `docs/DECISIONS.md` decisions 66-72.
 
-**Status honestly:** built and tested in simulation and against real public relays, **not yet tested on phones**.
-The stranger-carrying "mule" mode and last-known-position display are not built yet.
+**Status honestly:** tried on two real phones with Bluetooth off (messages and positions arrived both ways in 1-13 s), and
+tested in simulation (1000 users, outages, shared carrier addresses, alert storms) and against real public relays. **The 3-phone
+bridge test and a long field run are still to do.** Files travel too (any connection, up to 400 KB, paced, lowest priority),
+SOS alerts have top priority, and a mate who went quiet shows under "Last seen" for up to 6 hours. The stranger-carrying
+"mule" mode (phones that are not in your group carrying your traffic) is **not built yet**.
 
 ## Get the app
 
@@ -433,9 +436,9 @@ The stranger-carrying "mule" mode and last-known-position display are not built 
 [**Releases**](https://github.com/karmaNeggs/20.07/releases/latest) page and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
-Releases page.) This is the signed **release** build (minified, no debug-only tooling) as of
-v0.7.28-dev — see Known Limitations above for what's still newer/thinner about this specific
-build's own testing history.
+Releases page.) This is the signed **release** build (minified, no debug-only tooling). The newest build
+(0.9.1-dev) adds Internet reach, which has been tried on two phones so far; see "Internet reach" and Known
+Limitations above for what is still thin about its testing history.
 
 **Build from source**:
 ```
