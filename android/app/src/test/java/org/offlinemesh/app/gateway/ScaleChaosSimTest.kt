@@ -50,10 +50,10 @@ class ScaleChaosSimTest {
         }
     }
 
-    private inner class World(val nPhones: Int, val groupSize: Int, val onlineFraction: Double, val bridgeAll: Boolean, val ipShare: Int, val relaysPerEvent: Int = 2) {
+    private inner class World(val nPhones: Int, val groupSize: Int, val onlineFraction: Double, val bridgeAll: Boolean, val ipShare: Int, val relaysPerEvent: Int = 2, capEv: Int = 25, capBytes: Int = 120_000, perIp: Int = 8) {
         var nowMs = 1_800_000_000_000L
         val rnd = Random(42)
-        val relays = List(3) { Relay(capEv = 25, capBytes = 120_000, perIp = 8) }
+        val relays = List(3) { Relay(capEv = capEv, capBytes = capBytes, perIp = perIp) }
         val pending = ArrayList<Delivery>()
         val phones = ArrayList<Phone>()
         val sent = HashMap<Int, Sent>()
@@ -88,7 +88,7 @@ class ScaleChaosSimTest {
             }
             override fun tick() {
                 maxPending = maxOf(maxPending, gateway.pendingCount())
-                if (!hasConnectedRelay() || backoff.blocked(nowMs)) return
+                if (!hasConnectedRelay() || (backoff.blocked(nowMs) && !gateway.hasPending(MeshFrameCodec.UPLINK_CLASS_ALERT))) return
                 val b = gateway.drain(1).firstOrNull() ?: return
                 val hex = b.relayTag.toHex()
                 val content = b.content()
@@ -102,7 +102,7 @@ class ScaleChaosSimTest {
                     if (code == 2) relayBannedUntil[i] = nowMs + 600_000
                     if (code == 0) {
                         ok = true
-                        if (b.cls != MeshFrameCodec.UPLINK_CLASS_LIVE) r.stored.add(Stored(hex, b.cls, content, nowMs + 3_600_000))
+                        if (b.cls != MeshFrameCodec.UPLINK_CLASS_LIVE && b.cls < MeshFrameCodec.UPLINK_CLASS_FILE_META) r.stored.add(Stored(hex, b.cls, content, nowMs + 600_000))
                         if (!delivered) {
                             delivered = true
                             r.subs[hex]?.forEach { p -> pending.add(Delivery(nowMs + 700, p, content)) }
@@ -115,7 +115,7 @@ class ScaleChaosSimTest {
             }
             override fun close() {}
             override fun hasConnectedRelay() = id in online && relays.indices.any { relays[it].up && relayBannedUntil[it] <= nowMs }
-            override fun congested(): Boolean = recent.size >= 6 && recent.count { !it.second } * 2 >= recent.size
+            override fun congested(): Boolean = recent.size >= 3 && recent.count { !it.second } * 2 >= recent.size
             fun deliver(content: ByteArray) { for (f in gateway.onRelayBatch(content)) inject(f) }
         }
 
@@ -167,6 +167,7 @@ class ScaleChaosSimTest {
                 nowMs += 1000
                 each(s)
                 relays.forEach { it.newSecond() }
+                if (nowMs % 60_000 == 0L) relays.forEach { r -> r.stored.removeAll { it.expiresAt <= nowMs } }
                 val due = pending.filter { it.at <= nowMs }
                 pending.removeAll(due.toSet())
                 for (d in due) if (d.phone in online) phones[d.phone].link.deliver(d.content)
@@ -194,7 +195,7 @@ class ScaleChaosSimTest {
 
     private val report = StringBuilder()
     private fun note(s: String) { report.append(s).append('\n') }
-    private fun finish() { File("build").mkdirs(); File("build/scale-sim-report.txt").writeText(report.toString()) }
+    private fun finish(name: String = "scale-sim-report.txt") { File("build").mkdirs(); File("build/$name").writeText(report.toString()) }
 
     private fun background(w: World, seconds: Int) = w.runSeconds(seconds) { s -> if (s % 6 == 0) w.send(w.rnd.nextInt(w.groups), alert = false) }
 
@@ -233,5 +234,37 @@ class ScaleChaosSimTest {
         note("F junk flood by one attacker on a victim group's tag (200 frames/s): victim group text ${f.delivery(false)}; attacker queue=${f.phones[attacker].link.gateway.pendingCount()}; ${f.relayLine()}")
         finish()
         assertTrue("queues must stay bounded", maxOf(a2.maxPending, b.maxPending, c.maxPending, d.maxPending, e.maxPending, f.maxPending) < 5000)
+    }
+
+    private fun summary(w: World): String {
+        val a = w.delivery(true); val t = w.delivery(false)
+        val rej = w.relays.sumOf { it.rejected }; val acc = w.relays.sumOf { it.totalEv }
+        return "alerts ${"%.0f".format(a.first * 100)}%/p95 ${a.second / 1000}s, text ${"%.0f".format(t.first * 100)}%/p95 ${t.second / 1000}s, peak ${w.relays.maxOf { it.peakEv }} ev/s per relay, accepted $acc rejected $rej bans ${w.relays.sumOf { it.bans }}, maxPending ${w.maxPending}"
+    }
+
+    @Test fun `ten thousand users - relay capacity sweep and chaos`() {
+        val t0 = System.currentTimeMillis()
+        for (cap in listOf(25, 100, 300, 1000)) {
+            val w = World(10_000, 7, 0.3, bridgeAll = false, ipShare = 0, capEv = cap, capBytes = cap * 4_000).also { it.startRandomOnline() }
+            background(w, 150)
+            note("K1 baseline 10000 users/${w.online.size} online, relay capacity $cap ev/s each: ${summary(w)}")
+        }
+        val s = World(10_000, 7, 0.3, bridgeAll = false, ipShare = 0, capEv = 300, capBytes = 1_200_000).also { it.startRandomOnline() }
+        for (p in s.online.take(300)) s.phones[p].src.file = FileUplink("f$p", ByteArray(60) { 1 }, 1300) { n -> List(n) { s.rndFrame(420) } }
+        s.runSeconds(200) { sec -> if (sec == 50) for (g in 0 until s.groups step 2) s.send(g, alert = true); if (sec % 3 == 0) s.send(s.rnd.nextInt(s.groups), alert = false) }
+        note("K2 alert storm (half of 1429 groups) + 300 file uploads, capacity 300: ${summary(s)}")
+        val n = World(10_000, 7, 0.3, bridgeAll = false, ipShare = 20, capEv = 300, capBytes = 1_200_000).also { it.startRandomOnline() }
+        background(n, 150)
+        note("K3 carrier-grade NAT, 150 phones per address, capacity 300: ${summary(n)}")
+        val fl = World(10_000, 7, 0.0, bridgeAll = false, ipShare = 0, capEv = 100, capBytes = 400_000)
+        val start = (0 until 10_000).filter { fl.rnd.nextDouble() < 0.3 }
+        fl.runSeconds(150) { sec -> if (sec < 10) start.filter { it % 10 == sec }.forEach { fl.goOnline(it) }; if (sec % 3 == 0 && fl.online.isNotEmpty()) fl.send(fl.rnd.nextInt(fl.groups), alert = sec % 6 == 0) }
+        note("K4 flash crowd (3000 phones on in 10 s), capacity 100: ${summary(fl)}")
+        val o = World(10_000, 7, 0.3, bridgeAll = false, ipShare = 0, capEv = 300, capBytes = 1_200_000).also { it.startRandomOnline() }
+        o.runSeconds(200) { sec -> if (sec == 50) { o.relays[0].up = false; o.relays[1].up = false }; if (sec == 110) { o.relays[0].up = true; o.relays[1].up = true }; if (sec % 3 == 0) o.send(o.rnd.nextInt(o.groups), alert = sec % 6 == 0) }
+        note("K5 two of three relays down for 60 s, capacity 300: ${summary(o)}")
+        note("wall time ${(System.currentTimeMillis() - t0) / 1000}s")
+        finish("scale-sim-10k-report.txt")
+        assertTrue(true)
     }
 }

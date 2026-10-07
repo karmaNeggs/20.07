@@ -4458,3 +4458,20 @@ holding and pushing, multi-hop carrying beyond one stranger, and interest gossip
 **Privacy cost stated:** a stranger who carries your frames learns the rotating relay tags, sizes and timing, not content; a
 carrier can drop traffic (redundancy is the defence).
 
+
+## 79. Ten-thousand-user logical test and what it says (2026-10-08)
+
+Model (not field data): 10,000 users, groups of 7, 30% online (about 2,900 phones), 3 relays, the real controller and gateway.
+**Findings:** (1) the relays need about **300 events/s each (about 100 KB/s)** at steady state for 100% text delivery with a 5 s p95
+delay; at 100/s only 61% of texts arrive and at 25/s only 35%, even with slow-down, because periodic traffic is O(online phones) and
+cannot be merged across phones; (2) with 150 phones behind one carrier address and a per-address limit of 8 events/s only 39% of
+texts arrive and bans repeat (a venue with carrier-grade NAT is the worst case); (3) a flash crowd on weak relays (100/s) delivers
+73% of alerts, p95 34 s; (4) two of three relays down for 60 s is handled (98%); (5) an alert storm plus 300 file uploads on capable
+relays now delivers 99% of alerts, p95 5 s, after the changes below; (6) all queues stayed bounded.
+**Changes:** max slow-down 12x, one-step-per-minute recovery, alerts bypass the general backoff.
+**Not fixed, needed for crowds above roughly 1,000 online:** (a) one uplinker per Bluetooth cluster, so events scale with clusters not
+phones (stranger carrying now makes the hand-over possible; the election is not built); (b) many more relays, because each event
+goes to only 2 chosen by tag hash, so load per relay falls as the relay list grows (default list is 5; 10 or more, or a self-hosted
+relay, is the cheapest lever); (c) per-address awareness for shared carrier addresses; (d) a field test at 20 then 100 phones to
+replace the assumed relay capacities. None of the capacity numbers are measured on real relays.
+

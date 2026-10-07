@@ -284,10 +284,13 @@ class InternetReachController(
         const val LAST_KNOWN_INTERVAL_MS = 60_000L
         const val FILE_INTERVAL_MS = 5_000L
         const val SYMBOLS_PER_TICK = 60
-        const val MAX_SLOWDOWN = 6
+        const val MAX_SLOWDOWN = 12
         const val JITTER_FRACTION = 0.25
         private const val SLOW_UP_MS = 10_000L
-        private const val SLOW_DOWN_MS = 20_000L
+        // Recover slowly (one step per minute): the 10,000-user simulation showed a fast recovery makes every
+        // phone speed up
+        // together and saturate the relays again (a sawtooth).
+        private const val SLOW_DOWN_MS = 60_000L
         const val INTEREST_INTERVAL_MS = 30_000L
         const val MAX_UPLINKED_IDS = 2048
         private const val MS_PER_SEC = 1000L

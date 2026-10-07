@@ -27,8 +27,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 47
-        versionName = "0.10.0-dev"
+        versionCode = 48
+        versionName = "0.10.1-dev"
         // True for every build type except playstoreRelease below, which overrides it to false.
         // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
         // Play's Deceptive Behavior / impersonation policy specifically targets apps that change
@@ -109,6 +109,7 @@ android {
     testOptions {
         unitTests {
             isIncludeAndroidResources = true // needed for Robolectric-backed tests
+            all { it.maxHeapSize = "3g" } // the 10,000-user logical simulation holds a lot of model state
             isReturnDefaultValues = true
         }
     }

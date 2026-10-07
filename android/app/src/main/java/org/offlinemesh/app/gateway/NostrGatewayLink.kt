@@ -87,7 +87,9 @@ class NostrGatewayLink(
     /** Pushes pool state forward and publishes whatever the gateway has ready. */
     override fun tick() {
         pool.tick()
-        if (!pool.hasConnectedRelay() || backoff.blocked(now())) return
+        // An SOS alert is never held back by the general backoff (the simulation showed alerts waiting out congestion).
+        val alertWaiting = gateway.hasPending(MeshFrameCodec.UPLINK_CLASS_ALERT)
+        if (!pool.hasConnectedRelay() || (backoff.blocked(now()) && !alertWaiting)) return
         val batches = gateway.drain(config.maxBatchesPerTick, includeBulk = bulkAllowed)
         for (batch in batches) publish(batch)
         // Flush right away so a freshly queued event does not wait a whole tick (the pool still paces sends).

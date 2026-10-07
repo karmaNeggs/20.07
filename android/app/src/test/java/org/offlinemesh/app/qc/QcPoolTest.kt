@@ -296,17 +296,18 @@ class QcPoolTest {
         assertEquals(0, link3.offers.count { it.cls >= 4 })
     }
 
-    @Test fun congestionSlowsLiveUpToSixAndRecovers() = runBlocking {
+    @Test fun congestionSlowsLiveUpToTwelveAndRecovers() = runBlocking {
         val link = FakeLink(); link.cong = true
         val c = ctl(Src(), link); c.start()
         val liveTimes = ArrayList<Long>()
         var seen = 0
         repeat(600) { t += 1000; c.step(); val n = link.offers.count { it.cls == 0 }; if (n > seen) { liveTimes.add(t); seen = n } }
         val gaps = liveTimes.zipWithNext { a, b -> (b - a) / 1000 }
-        assertTrue("max gap ${gaps.max()}", gaps.max() <= 60)
-        assertTrue("min late gap", gaps.takeLast(3).all { it >= 59 })
+        // Updated 2026-10-08 (decision 79): cap is now 12x (120 s) and recovery is one step per minute.
+        assertTrue("max gap ${gaps.max()}", gaps.max() <= 120)
+        assertTrue("min late gap", gaps.takeLast(3).all { it >= 119 })
         link.cong = false; liveTimes.clear(); seen = link.offers.count { it.cls == 0 }
-        repeat(400) { t += 1000; c.step(); val n = link.offers.count { it.cls == 0 }; if (n > seen) { liveTimes.add(t); seen = n } }
+        repeat(1500) { t += 1000; c.step(); val n = link.offers.count { it.cls == 0 }; if (n > seen) { liveTimes.add(t); seen = n } }
         val g2 = liveTimes.zipWithNext { a, b -> (b - a) / 1000 }
         assertEquals(10L, g2.last())
     }

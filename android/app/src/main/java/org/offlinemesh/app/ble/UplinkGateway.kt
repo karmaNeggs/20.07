@@ -216,6 +216,9 @@ class UplinkGateway(
             .map { hex(md.digest(it.encoded).copyOf(DEDUP_KEY_BYTES)) to it.encoded }
     }
 
+    /** True if any frame of class [cls] is waiting (used to let SOS alerts bypass the general publish backoff). */
+    fun hasPending(cls: Int): Boolean = queues.values.any { q -> q.any { it.cls == cls } }
+
     /** Frames currently held for upload (for tests and the UI notice). */
     fun pendingCount(): Int = queues.values.sumOf { it.size }
 

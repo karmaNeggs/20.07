@@ -1,0 +1,9 @@
+K1 baseline 10000 users/2924 online, relay capacity 25 ev/s each: alerts 100%/p95 0s, text 35%/p95 102s, peak 25 ev/s per relay, accepted 11250 rejected 70448 bans 0, maxPending 43
+K1 baseline 10000 users/2924 online, relay capacity 100 ev/s each: alerts 100%/p95 0s, text 61%/p95 24s, peak 100 ev/s per relay, accepted 45000 rejected 43690 bans 0, maxPending 42
+K1 baseline 10000 users/2924 online, relay capacity 300 ev/s each: alerts 100%/p95 0s, text 100%/p95 5s, peak 291 ev/s per relay, accepted 98326 rejected 0 bans 0, maxPending 14
+K1 baseline 10000 users/2924 online, relay capacity 1000 ev/s each: alerts 100%/p95 0s, text 100%/p95 5s, peak 291 ev/s per relay, accepted 98326 rejected 0 bans 0, maxPending 14
+K2 alert storm (half of 1429 groups) + 300 file uploads, capacity 300: alerts 99%/p95 5s, text 99%/p95 5s, peak 300 ev/s per relay, accepted 57273 rejected 47789 bans 0, maxPending 160
+K3 carrier-grade NAT, 150 phones per address, capacity 300: alerts 100%/p95 0s, text 39%/p95 1s, peak 158 ev/s per relay, accepted 910 rejected 9012 bans 60, maxPending 88
+K4 flash crowd (3000 phones on in 10 s), capacity 100: alerts 73%/p95 34s, text 70%/p95 34s, peak 100 ev/s per relay, accepted 44158 rejected 44194 bans 0, maxPending 42
+K5 two of three relays down for 60 s, capacity 300: alerts 98%/p95 5s, text 99%/p95 5s, peak 300 ev/s per relay, accepted 103760 rejected 2890 bans 0, maxPending 30
+wall time 165s
