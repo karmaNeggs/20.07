@@ -70,6 +70,12 @@ object MeshFrameCodec {
     const val UPLINK_CLASS_POSITION_LAST_KNOWN = 1
     const val UPLINK_CLASS_TEXT = 2
 
+    /** Priority classes added for the internet uplink (PLAN-v2.md Part 14): a flagged SOS alert (always first),
+     *  a file's header and thumbnail, and batches of a file's fountain symbols (bulk, always last). */
+    const val UPLINK_CLASS_ALERT = 3
+    const val UPLINK_CLASS_FILE_META = 4
+    const val UPLINK_CLASS_FILE_SYMBOLS = 5
+
     /** [Frame.Uplink.flags] bit 0: set by a gateway on frames it injects from the internet; gateways
      *  never uplink a frame carrying it (loop control). */
     const val UPLINK_FLAG_FROM_INTERNET = 1

@@ -52,6 +52,7 @@ class InternetReachRuntime(
             )
         },
         onInbound = ::handleInbound,
+        bulkAllowed = { network.unmetered.value },
     )
 
     fun start() {
@@ -109,8 +110,8 @@ class InternetReachRuntime(
             lastSummaryAt = t
             DiagnosticsLog.event(
                 "internet-reach",
-                "relays ${controller.summary()} inbound live/last/text=" +
-                    "${inboundByClass[0]}/${inboundByClass[1]}/${inboundByClass[2]}",
+                "relays ${controller.summary()} inbound live/last/text/alert/meta/sym=" +
+                    inboundByClass.joinToString("/"),
             )
         }
     }
@@ -137,7 +138,7 @@ class InternetReachRuntime(
     companion object {
         private const val TICK_MS = 1000L
         private const val SUMMARY_MS = 30_000L
-        private const val INBOUND_CLASSES = 3
+        private const val INBOUND_CLASSES = 6
 
         /** A member endpoint publishes its own and its group's frames, so it needs far more headroom per tag
          *  than a blind carrier (about ten frames every ten seconds for a full group). */

@@ -500,15 +500,16 @@ class RelayResponder(
 
     /** v3 internet uplink: this group's stored messages and nicknames as (stable id, sealed frame), so each is
      *  published once. */
-    suspend fun uplinkMailboxItems(groupId: String): List<Pair<String, ByteArray>> {
-        val items = mutableListOf<Pair<String, ByteArray>>()
+    suspend fun uplinkMailboxItems(groupId: String): List<Triple<String, ByteArray, Boolean>> {
+        val items = mutableListOf<Triple<String, ByteArray, Boolean>>()
         for (sos in relay.sosForUplink(groupId)) {
             val sealed = sos.sealed ?: continue
             val handle = sos.handle ?: continue
-            items += "sos:${sos.id}" to MeshFrameCodec.reframeSosForRelay(handle, sos.id, sos.ttl, sos.hop, sealed)
+            items += Triple("sos:${sos.id}", MeshFrameCodec.reframeSosForRelay(handle, sos.id, sos.ttl,
+                sos.hop, sealed), sos.isAlert)
         }
         for (n in relay.nicknamesForGroup(groupId)) {
-            items += "nick:${n.groupId}:${n.senderId}:${n.updatedAt}" to MeshFrameCodec.encodeNickname(n)
+            items += Triple("nick:${n.groupId}:${n.senderId}:${n.updatedAt}", MeshFrameCodec.encodeNickname(n), false)
         }
         return items
     }
@@ -570,13 +571,29 @@ class RelayResponder(
         for ((sender, record) in known) {
             val sealed = record.sealed
             val handle = record.handle
-            val relayable = sender != me && record.viaPeer != INTERNET_PEER
+            val relayable = sender != me && record.viaPeer != INTERNET_PEER &&
+                !positionTracker.heardViaInternetWithin(groupId, sender, ONLINE_WITHIN_SECONDS)
             if (relayable && sealed != null && handle != null) {
                 frames.add(MeshFrameCodec.reframePositionForRelay(handle, record.hop + 1, sealed))
             }
         }
         return frames
     }
+
+    /** Complete files of [groupId] small enough for the internet: (id, header frame, how many symbols to send).
+     *  Sends about 1.3x the source symbols so ordinary loss is covered (PLAN-v2.md Part 14.1). */
+    suspend fun uplinkEvidenceHeads(groupId: String): List<Triple<String, ByteArray, Int>> =
+        relay.heldEvidenceIds().mapNotNull { id ->
+            val meta = relay.evidenceMeta(id) ?: return@mapNotNull null
+            val ok = meta.groupId == groupId && meta.complete && meta.contentLength <= UPLINK_MAX_FILE_BYTES
+            if (ok) Triple(id, MeshFrameCodec.encodeEvidMeta(meta),
+                meta.totalChunks * SYMBOL_OVERHEAD_PERCENT / PERCENT + SYMBOL_SPARE) else null
+        }
+
+    /** The next [count] fountain symbols of file [evidenceId], as frames ready to wrap. */
+    suspend fun uplinkSymbols(evidenceId: String, count: Int): List<ByteArray> =
+        relay.symbolsToSend(evidenceId,
+            count).map { MeshFrameCodec.encodeEvidSymbol(MeshFrameCodec.Frame.EvidSymbol(evidenceId, it.esi, it.data)) }
 
     /** v3: a position that arrived over the internet as "last known". Recorded for the "last seen" list only, never
      *  as a live dot, and never fed to presence or hop tracking (it may be hours old). */
@@ -1579,6 +1596,13 @@ class RelayResponder(
         /** Synthetic peer address for frames that arrived over the internet rather than a BLE link (v3). Used so
          *  the existing split-horizon rules keep internet-learned positions from being re-published to the relay. */
         const val INTERNET_PEER = "internet"
+
+        /** Largest file sent over the internet (the fountain code's 1024-symbol limit is about 409 KB). */
+        const val UPLINK_MAX_FILE_BYTES = 400 * 1024
+        private const val ONLINE_WITHIN_SECONDS = 60L
+        private const val SYMBOL_OVERHEAD_PERCENT = 130
+        private const val PERCENT = 100
+        private const val SYMBOL_SPARE = 8
 
         // How much of a sender/group id may appear in a log line — enough to tell peers apart
         // while never writing a full identifier to disk (see DiagnosticsLog's class doc).

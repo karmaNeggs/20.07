@@ -12,6 +12,12 @@ interface UplinkLink {
     fun close()
     fun hasConnectedRelay(): Boolean
 
+    /** True when most relays are failing or banning us: slow down and pause bulk. */
+    fun congested(): Boolean = false
+
+    /** Whether file (bulk) frames may be sent now (unmetered network only). */
+    fun setBulkAllowed(allowed: Boolean) {}
+
     /** One line describing each relay's state, for diagnostics only. */
     fun summary(): String = ""
 }
@@ -20,7 +26,16 @@ interface UplinkLink {
 class UplinkGroup(val id: String, val rootKey: ByteArray)
 
 /** A text-like item (message or nickname) with a stable [id] so it is wrapped only once. */
-class MailboxItem(val id: String, val frame: ByteArray)
+class MailboxItem(val id: String, val frame: ByteArray, val alert: Boolean = false)
+
+/** A complete file this phone can send: its header frame and a source of fountain symbol frames
+ *  (PLAN-v2.md Part 14). */
+class FileUplink(
+    val id: String,
+    val metaFrame: ByteArray,
+    val symbolsWanted: Int,
+    val nextSymbols: suspend (count: Int) -> List<ByteArray>,
+)
 
 /** Where the controller gets frames to send. The app implements this over `RelayResponder`. */
 interface UplinkSource {
@@ -34,6 +49,9 @@ interface UplinkSource {
 
     /** The newest position known for each member (own included), sealed, ready to wrap as POSITION_LAST_KNOWN. */
     suspend fun lastKnownFrames(groupId: String): List<ByteArray>
+
+    /** Complete files small enough to send over the internet. Default none. */
+    suspend fun fileUplinks(groupId: String): List<FileUplink> = emptyList()
 }
 
 /**
@@ -48,14 +66,20 @@ interface UplinkSource {
  * Drive it with [start]/[stop] (the switch and connectivity) and [step] about once a second. All work
  * happens inside [step] on the caller's coroutine; the link's own callbacks only enqueue.
  */
+// TooManyFunctions: one small producer per traffic class plus start/stop/step, sharing one clock and link.
+@Suppress("TooManyFunctions")
 class InternetReachController(
     private val source: UplinkSource,
     private val newLink: (inject: (ByteArray) -> Unit) -> UplinkLink,
     private val onInbound: suspend (cls: Int, inner: ByteArray) -> Unit,
     private val now: () -> Long = System::currentTimeMillis,
     private val config: Config = Config(),
+    private val bulkAllowed: () -> Boolean = { false },
 ) {
     data class Config(
+        val fileIntervalMs: Long = FILE_INTERVAL_MS,
+        val symbolsPerTick: Int = SYMBOLS_PER_TICK,
+        val congestedSlowdown: Int = CONGESTED_SLOWDOWN,
         val liveIntervalMs: Long = LIVE_INTERVAL_MS,
         val mailboxIntervalMs: Long = MAILBOX_INTERVAL_MS,
         val lastKnownIntervalMs: Long = LAST_KNOWN_INTERVAL_MS,
@@ -70,6 +94,9 @@ class InternetReachController(
     private var lastLiveAt = 0L
     private var lastMailboxAt = 0L
     private var lastKnownAt = 0L
+    private var lastFileAt = 0L
+    private val metaSent = HashSet<String>()
+    private val symbolsSent = HashMap<String, Int>()
     private var lastInterestAt = 0L
     private val uplinkedIds = object : LinkedHashMap<String, Boolean>(INITIAL_CAPACITY, LOAD_FACTOR, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > config.maxUplinkedIds
@@ -90,7 +117,7 @@ class InternetReachController(
                 channel.trySend(Inbound(it.cls, it.inner))
             }
         }
-        lastLiveAt = 0; lastMailboxAt = 0; lastKnownAt = 0; lastInterestAt = 0
+        lastLiveAt = 0; lastMailboxAt = 0; lastKnownAt = 0; lastInterestAt = 0; lastFileAt = 0
     }
 
     fun stop() {
@@ -98,6 +125,8 @@ class InternetReachController(
         link = null
         inbound.close()
         uplinkedIds.clear()
+        metaSent.clear()
+        symbolsSent.clear()
     }
 
     /** Remember an item that arrived from the relay so it is never re-published back (echo control). */
@@ -110,10 +139,21 @@ class InternetReachController(
             lastInterestAt = t
             l.setInterestTags(source.groups().flatMap { UplinkTags.interestTags(it.rootKey, t / MS_PER_SEC) })
         }
+        val bulk = bulkAllowed()
+        l.setBulkAllowed(bulk)
+        // Under congestion (most relays failing or banning us) live and last-known slow down and bulk pauses;
+        // messages and SOS alerts are never slowed (PLAN-v2.md Part 14.2 and 14.3).
+        val congested = l.congested()
+        val slow = if (congested) config.congestedSlowdown else 1
         if (l.hasConnectedRelay()) {
-            if (t - lastLiveAt >= config.liveIntervalMs) { lastLiveAt = t; produceLive(l, t / MS_PER_SEC) }
+            if (t - lastFileAt >= config.fileIntervalMs) {
+                lastFileAt = t
+                if (bulk && !congested) produceFiles(l, t / MS_PER_SEC)
+            }
+            if (t - lastLiveAt >= config.liveIntervalMs * slow) { lastLiveAt = t; produceLive(l, t / MS_PER_SEC) }
             if (t - lastMailboxAt >= config.mailboxIntervalMs) { lastMailboxAt = t; produceMailbox(l, t / MS_PER_SEC) }
-            if (t - lastKnownAt >= config.lastKnownIntervalMs) { lastKnownAt = t; produceLastKnown(l, t / MS_PER_SEC) }
+            if (t - lastKnownAt >= config.lastKnownIntervalMs * slow) { lastKnownAt = t; produceLastKnown(l,
+                t / MS_PER_SEC) }
         }
         l.tick()
         drainInbound()
@@ -136,11 +176,32 @@ class InternetReachController(
         }
     }
 
+    /** One file's next paced step per call: its header first, then a batch of symbols until enough are sent. */
+    private suspend fun produceFiles(l: UplinkLink, nowSec: Long) {
+        for (g in source.groups()) {
+            for (f in source.fileUplinks(g.id)) {
+                if (metaSent.add(f.id)) {
+                    l.offerLocal(UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_FILE_META,
+                        f.metaFrame, nowSec))
+                    return
+                }
+                val done = symbolsSent[f.id] ?: 0
+                if (done >= f.symbolsWanted) continue
+                val symbols = f.nextSymbols(minOf(config.symbolsPerTick, f.symbolsWanted - done))
+                symbolsSent[f.id] = done + symbols.size
+                for (s in symbols) l.offerLocal(UplinkWrapper.wrap(g.rootKey,
+                    MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS, s, nowSec))
+                return
+            }
+        }
+    }
+
     private suspend fun produceMailbox(l: UplinkLink, nowSec: Long) {
         for (g in source.groups()) {
             for (item in source.mailboxItems(g.id)) {
                 if (uplinkedIds.containsKey(item.id)) continue
-                val wrapped = UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_TEXT, item.frame, nowSec)
+                val cls = if (item.alert) MeshFrameCodec.UPLINK_CLASS_ALERT else MeshFrameCodec.UPLINK_CLASS_TEXT
+                val wrapped = UplinkWrapper.wrap(g.rootKey, cls, item.frame, nowSec)
                 val decision = l.offerLocal(wrapped)
                 if (decision is UplinkGateway.Decision.Accepted) uplinkedIds[item.id] = true
             }
@@ -158,6 +219,9 @@ class InternetReachController(
         const val LIVE_INTERVAL_MS = 10_000L
         const val MAILBOX_INTERVAL_MS = 5_000L
         const val LAST_KNOWN_INTERVAL_MS = 60_000L
+        const val FILE_INTERVAL_MS = 5_000L
+        const val SYMBOLS_PER_TICK = 60
+        const val CONGESTED_SLOWDOWN = 3
         const val INTEREST_INTERVAL_MS = 30_000L
         const val MAX_UPLINKED_IDS = 2048
         private const val MS_PER_SEC = 1000L

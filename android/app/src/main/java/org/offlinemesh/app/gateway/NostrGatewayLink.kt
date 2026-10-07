@@ -42,6 +42,7 @@ class NostrGatewayLink(
         val poolConfig: RelayPool.Config = RelayPool.Config(),
     )
 
+    @Volatile private var bulkAllowed = false
     private val inFlight = HashMap<String, UplinkGateway.Batch>()
     private val lock = Any()
 
@@ -81,7 +82,7 @@ class NostrGatewayLink(
     override fun tick() {
         pool.tick()
         if (!pool.hasConnectedRelay()) return
-        val batches = gateway.drain(config.maxBatchesPerTick)
+        val batches = gateway.drain(config.maxBatchesPerTick, includeBulk = bulkAllowed)
         for (batch in batches) publish(batch)
         // Flush right away so a freshly queued event does not wait a whole tick (the pool still paces sends).
         if (batches.isNotEmpty()) pool.tick()
@@ -93,16 +94,21 @@ class NostrGatewayLink(
 
     override fun hasConnectedRelay(): Boolean = pool.hasConnectedRelay()
 
+    override fun congested(): Boolean = pool.congested()
+
+    override fun setBulkAllowed(allowed: Boolean) { bulkAllowed = allowed }
+
     override fun summary(): String = pool.status().joinToString(" ") {
-        it.url.removePrefix("wss://").substringBefore('.') + "=" + it.state.name.lowercase()
+        it.url.removePrefix("wss://").removePrefix("relay.") + "=" + it.state.name.lowercase()
     }
 
     /** A last-known position is the most sensitive thing stored on a relay, so it expires sooner than a text. */
     private fun expirySec(cls: Int): Long =
-        if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {
-            UplinkGateway.POSITION_MAX_AGE_SEC
-        } else {
-            MAILBOX_EXPIRY_SEC
+        when (cls) {
+            MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN -> UplinkGateway.POSITION_MAX_AGE_SEC
+            MeshFrameCodec.UPLINK_CLASS_FILE_META,
+                MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS -> UplinkGateway.FILE_MAX_AGE_SEC
+            else -> MAILBOX_EXPIRY_SEC
         }
 
     private fun publish(batch: UplinkGateway.Batch) {

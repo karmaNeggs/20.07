@@ -121,6 +121,12 @@ class RelayPool(
         }
     }
 
+    /** True when half or more of the relays are banned or failing: the owner should slow down and pause bulk. */
+    fun congested(): Boolean = synchronized(lock) {
+        val t = now()
+        relays.values.count { it.bannedUntil > t || it.failures >= CONGESTED_FAILURES } * 2 >= relays.size
+    }
+
     fun hasConnectedRelay(): Boolean = synchronized(lock) { relays.values.any { it.open && it.bannedUntil <= now() } }
 
     fun status(): List<Status> = synchronized(lock) {
@@ -319,6 +325,7 @@ class RelayPool(
         const val RATE_LIMIT_PAUSE_MS = 5_000L
         const val MAX_QUEUE_PER_RELAY = 32
         const val QUEUE_TTL_MS = 30_000L
+        private const val CONGESTED_FAILURES = 3
         const val SEEN_EVENT_IDS = 4096
         const val SUBSCRIPTION_ID = "2007"
         private const val SEEN_INITIAL_CAPACITY = 256

@@ -73,6 +73,14 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
     // ago". RAM only like [table], same "nothing durable to find on a seized phone" property, and capped at
     // [LAST_SEEN_MAX_AGE_SECONDS] so a stored trail is short-lived.
     private val lastSeen = ConcurrentHashMap<Key, Record>()
+    private val internetHeardMs = ConcurrentHashMap<Key, Long>()
+
+    /** True if a position from [senderId] arrived over the internet within [seconds], i.e. they are online themselves
+     *  and need no one to bridge them (PLAN-v2.md §14.3, rule 1). */
+    fun heardViaInternetWithin(groupId: String, senderId: String, seconds: Long): Boolean {
+        val t = internetHeardMs[Key(groupId, senderId)] ?: return false
+        return now() - t <= seconds * 1000
+    }
 
     // Live-tested gap: ConnectionAttemptTracker already skips a peer's reconnect cooldown early
     // when there's genuinely new CONTENT to offer them (RelayEngine.catalogEpoch — see that
@@ -110,6 +118,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
             )
         if (staleOrWorse) return
         val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
+        if (viaPeer == RelayResponder.INTERNET_PEER) internetHeardMs[key] = now()
         table[key] = record
         rememberLastSeen(key, record)
         epoch.incrementAndGet()
@@ -132,6 +141,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         handle: ByteArray? = null,
     ) {
         val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
+        if (viaPeer == RelayResponder.INTERNET_PEER) internetHeardMs[Key(groupId, senderId)] = now()
         rememberLastSeen(Key(groupId, senderId), record)
     }
 

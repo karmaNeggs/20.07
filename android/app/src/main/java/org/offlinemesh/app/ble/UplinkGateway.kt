@@ -74,6 +74,10 @@ class UplinkGateway(
         val liveKeepPerTag: Int = LIVE_KEEP_PER_TAG,
         val positionKeepPerTag: Int = POSITION_KEEP_PER_TAG,
         val textKeepPerTag: Int = TEXT_KEEP_PER_TAG,
+        val fileMaxAgeSec: Long = FILE_MAX_AGE_SEC,
+        val fileMetaKeepPerTag: Int = FILE_META_KEEP_PER_TAG,
+        val fileSymbolKeepPerTag: Int = FILE_SYMBOL_KEEP_PER_TAG,
+        val bulkHourlyBudgetBytes: Int = BULK_HOURLY_BUDGET_BYTES,
         val framesPerTagPerMinute: Int = FRAMES_PER_TAG_PER_MINUTE,
         val hourlyBudgetBytes: Int = HOURLY_BUDGET_BYTES,
         val maxBatchBytes: Int = MAX_BATCH_BYTES,
@@ -107,6 +111,7 @@ class UplinkGateway(
     }
     private var budgetWindowStartMs = now()
     private var budgetUsedBytes = 0
+    private var bulkUsedBytes = 0
 
     /** Records that a member's beacon with this 60 s tag was scanned nearby (a priority hint only). */
     fun noteBeaconSeen(tag: ByteArray) {
@@ -131,12 +136,12 @@ class UplinkGateway(
     }
 
     /** Batches ready to publish now, at most [maxBatches], within this hour's remaining budget. */
-    fun drain(maxBatches: Int = Int.MAX_VALUE): List<Batch> {
+    fun drain(maxBatches: Int = Int.MAX_VALUE, includeBulk: Boolean = true): List<Batch> {
         expire()
         resetBudgetIfNeeded()
         val batches = ArrayList<Batch>()
         val order = queues.entries
-            .filter { it.value.isNotEmpty() }
+            .filter { it.value.isNotEmpty() && (includeBulk || !isBulk(it.value.first().cls)) }
             .sortedWith(
                 compareBy<Map.Entry<String, ArrayDeque<Held>>>(
                     { if (isPriority(it.key.substringBefore('/'))) 0 else 1 },
@@ -153,7 +158,8 @@ class UplinkGateway(
 
     /** Puts a batch whose publish failed back, and refunds its budget. Never re-checks dedup or rate. */
     fun requeue(batch: Batch) {
-        budgetUsedBytes = (budgetUsedBytes - batch.bytes).coerceAtLeast(0)
+        if (isBulk(batch.cls)) bulkUsedBytes = (bulkUsedBytes - batch.bytes).coerceAtLeast(0)
+        else budgetUsedBytes = (budgetUsedBytes - batch.bytes).coerceAtLeast(0)
         for (encoded in batch.frames) {
             val f = MeshFrameCodec.decode(encoded) as? MeshFrameCodec.Frame.Uplink ?: continue
             enqueue(hex(f.relayTag), Held(f.relayTag, f.cls, f.createdAtSec, encoded))
@@ -192,12 +198,18 @@ class UplinkGateway(
         isStale(f) -> Reject.STALE
         isFuture(f) -> Reject.FUTURE
         dedup.containsKey(key) -> Reject.DUPLICATE
-        tagRateExceeded(tagHex) -> Reject.TAG_RATE
+        !isBulk(f.cls) && tagRateExceeded(tagHex) -> Reject.TAG_RATE
         else -> null
     }
 
     private fun takeBatch(queue: ArrayDeque<Held>): Batch? {
-        val room = minOf(config.maxBatchBytes, config.hourlyBudgetBytes - budgetUsedBytes)
+        val bulk = queue.isNotEmpty() && isBulk(queue.first().cls)
+        val remaining = if (bulk) {
+            config.bulkHourlyBudgetBytes - bulkUsedBytes
+        } else {
+            config.hourlyBudgetBytes - budgetUsedBytes
+        }
+        val room = minOf(config.maxBatchBytes, remaining)
         val taken = ArrayList<Held>()
         var bytes = 0
         for (h in queue.sortedBy { it.createdAtSec }) {
@@ -208,7 +220,7 @@ class UplinkGateway(
         }
         if (taken.isEmpty()) return null
         queue.removeAll(taken.toSet())
-        budgetUsedBytes += bytes
+        if (bulk) bulkUsedBytes += bytes else budgetUsedBytes += bytes
         return Batch(taken.first().tag, taken.first().cls, taken.map { it.encoded })
     }
 
@@ -218,6 +230,8 @@ class UplinkGateway(
         val keep = when (held.cls) {
             MeshFrameCodec.UPLINK_CLASS_LIVE -> config.liveKeepPerTag
             MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN -> config.positionKeepPerTag
+            MeshFrameCodec.UPLINK_CLASS_FILE_META -> config.fileMetaKeepPerTag
+            MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS -> config.fileSymbolKeepPerTag
             else -> config.textKeepPerTag
         }
         while (queue.size > keep) {
@@ -235,6 +249,7 @@ class UplinkGateway(
         if (now() - budgetWindowStartMs >= HOUR_MS) {
             budgetWindowStartMs = now()
             budgetUsedBytes = 0
+            bulkUsedBytes = 0
         }
     }
 
@@ -255,6 +270,7 @@ class UplinkGateway(
     private fun maxAgeSec(cls: Int): Long = when (cls) {
         MeshFrameCodec.UPLINK_CLASS_LIVE -> config.liveMaxAgeSec
         MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN -> config.positionMaxAgeSec
+        MeshFrameCodec.UPLINK_CLASS_FILE_META, MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS -> config.fileMaxAgeSec
         else -> config.textMaxAgeSec
     }
 
@@ -262,11 +278,18 @@ class UplinkGateway(
     private fun isStale(cls: Int, createdAtSec: Long) = now() / MS_PER_SEC - createdAtSec > maxAgeSec(cls)
     private fun isFuture(f: MeshFrameCodec.Frame.Uplink) = f.createdAtSec - now() / MS_PER_SEC > FUTURE_SKEW_SEC
 
+    /** Drain priority, lowest number first: SOS alert, text, live position, last-known, file header, file bulk. */
     private fun classRank(cls: Int) = when (cls) {
-        MeshFrameCodec.UPLINK_CLASS_LIVE -> 0
-        MeshFrameCodec.UPLINK_CLASS_TEXT -> 1
-        else -> 2
+        MeshFrameCodec.UPLINK_CLASS_ALERT -> RANK_ALERT
+        MeshFrameCodec.UPLINK_CLASS_TEXT -> RANK_TEXT
+        MeshFrameCodec.UPLINK_CLASS_LIVE -> RANK_LIVE
+        MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN -> RANK_LAST_KNOWN
+        MeshFrameCodec.UPLINK_CLASS_FILE_META -> RANK_FILE_META
+        else -> RANK_FILE_BULK
     }
+
+    private fun isBulk(cls: Int) =
+        cls == MeshFrameCodec.UPLINK_CLASS_FILE_META || cls == MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS
 
     private fun dedupKey(f: MeshFrameCodec.Frame.Uplink): String {
         val md = MessageDigest.getInstance("SHA-256")
@@ -291,9 +314,21 @@ class UplinkGateway(
         const val PRIORITY_TAG_SEEN_SEC = 180L
         const val DEDUP_ENTRIES = 2048
         const val MAX_DOWNLINK_FRAMES_PER_EVENT = 256
+        const val FILE_MAX_AGE_SEC = 24L * 3600
+        const val FILE_META_KEEP_PER_TAG = 64
+        const val FILE_SYMBOL_KEEP_PER_TAG = 160
 
-        private val CLASS_RANGE = MeshFrameCodec.UPLINK_CLASS_LIVE..MeshFrameCodec.UPLINK_CLASS_TEXT
+        /** Files get their own pool so they can never starve messages and positions (1 MB per hour). */
+        const val BULK_HOURLY_BUDGET_BYTES = 1024 * 1024
+
+        private val CLASS_RANGE = MeshFrameCodec.UPLINK_CLASS_LIVE..MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS
         private const val FUTURE_SKEW_SEC = 120L
+        private const val RANK_ALERT = 0
+        private const val RANK_TEXT = 1
+        private const val RANK_LIVE = 2
+        private const val RANK_LAST_KNOWN = 3
+        private const val RANK_FILE_META = 4
+        private const val RANK_FILE_BULK = 5
         private const val SEEN_TAGS_MAX = 4096
         private const val RATE_ENTRIES_MAX = 1024
         private const val DEDUP_INITIAL_CAPACITY = 256

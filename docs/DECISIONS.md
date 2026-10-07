@@ -4397,3 +4397,16 @@ found:** the logs held no internet-path events at all, so delivery had to be inf
 adds status and 30 s summary lines. **Not tested:** the 3-phone bridge, last-seen, screen-off behaviour. Chat input
 layout fixed (two rows). Whether to send small files over the internet is an open author decision.
 
+
+## 75. Anti-jam internet logic, priority classes and file transfer built (2026-10-07)
+
+Implements `PLAN-v2.md` Part 14 steps F1-F3 and F4's congestion part: classes ALERT/FILE_META/FILE_SYMBOLS and the strict
+priority order; a separate 1 MB/hour bulk budget; bulk exempt from the per-tag rate cap; files only on an unmetered
+network, at most 400 KB, paced; `RelayPool.congested()` (half or more relays banned or failing) slows live and last-known 3x
+and pauses bulk while messages and alerts continue; members heard over the internet within 60 s are not re-bridged.
+Round 2 logs (`20.07 mesh diagnostics j` and `v`) showed reconnects working and a message delivered in about 11 s, with a
+late-joining phone collecting it 2 s after connecting.
+**Not yet done:** stranger-carrying mode (G3b), cluster-wide single-uplinker suppression, adaptive intervals beyond the 3x
+congestion rule, any real-phone test of files, UI for a "send files on mobile data" choice (files wait for Wi-Fi), and all
+scale measurement (Part 14.3 numbers are still estimates).
+
