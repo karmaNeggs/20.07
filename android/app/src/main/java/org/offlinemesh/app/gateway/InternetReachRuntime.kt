@@ -39,6 +39,7 @@ class InternetReachRuntime(
     private val _status = MutableStateFlow(Status.OFF)
     val status: StateFlow<Status> = _status
     private var job: Job? = null
+    private val registry = InterestRegistry()
     private var lastLoggedStatus: Status? = null
     private var lastSummaryAt = 0L
     private val inboundByClass = IntArray(INBOUND_CLASSES)
@@ -52,13 +53,17 @@ class InternetReachRuntime(
             )
         },
         onInbound = ::handleInbound,
+        extraInterest = { registry.tags() },
         // Author decision 2026-10-07: any online phone carries files too, on mobile data as well as Wi-Fi.
         // The size cap, separate bulk budget, pacing and congestion pause protect relays and data plans.
         bulkAllowed = { network.online.value },
     )
 
+    private val bridge = UplinkBleBridge(controller, registry) { settings.enabled.value && meshActive.value }
+
     fun start() {
         if (job != null) return
+        responder.uplinkHook = bridge
         network.start()
         job = scope.launch {
             while (isActive) {
@@ -69,6 +74,7 @@ class InternetReachRuntime(
     }
 
     fun stop() {
+        responder.uplinkHook = null
         job?.cancel()
         job = null
         controller.stop()
@@ -81,7 +87,9 @@ class InternetReachRuntime(
         val online = network.online.value
         // The app's own "Offline" mode silences every emitter, so it silences this one too.
         val allowed = meshActive.value
-        if (on && online && allowed) controller.start() else controller.stop()
+        // Runs whenever the switch is on, online or not: an offline phone still wraps and holds its frames for a
+        // Bluetooth neighbour that has internet (stranger carrying). Only publishing needs a connection.
+        if (on && allowed) controller.start() else controller.stop()
         _status.value = when {
             !on -> Status.OFF
             !allowed -> Status.OFFLINE_MODE
@@ -129,7 +137,9 @@ class InternetReachRuntime(
     private suspend fun handleInbound(cls: Int, inner: ByteArray) {
         if (cls in 0 until INBOUND_CLASSES) inboundByClass[cls]++
         if (cls == MeshFrameCodec.UPLINK_CLASS_POSITION_LAST_KNOWN) {
-            responder.ingestLastKnownPosition(inner)
+            // A member records it as last seen; a stranger cannot open it, so it enters the mesh like any sealed frame.
+            if (!responder.ingestLastKnownPosition(inner)) responder.handleIncoming(inner,
+                RelayResponder.INTERNET_PEER) { }
             return
         }
         val sos = MeshFrameCodec.decode(inner) as? MeshFrameCodec.Frame.SosSealed

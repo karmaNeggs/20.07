@@ -202,6 +202,20 @@ class UplinkGateway(
         )
     }
 
+    /**
+     * A non-draining look at what is held, in drain priority order, as (key, encoded frame) pairs no larger than
+     * [maxFrameBytes]: what a carrier hands to a Bluetooth neighbour so any phone with internet can upload it.
+     */
+    fun heldFrames(maxFrames: Int, maxFrameBytes: Int): List<Pair<String, ByteArray>> {
+        expire()
+        val md = MessageDigest.getInstance("SHA-256")
+        return queues.values.flatMap { it.toList() }
+            .filter { it.encoded.size <= maxFrameBytes }
+            .sortedWith(compareBy({ classRank(it.cls) }, { -it.createdAtSec }))
+            .take(maxFrames)
+            .map { hex(md.digest(it.encoded).copyOf(DEDUP_KEY_BYTES)) to it.encoded }
+    }
+
     /** Frames currently held for upload (for tests and the UI notice). */
     fun pendingCount(): Int = queues.values.sumOf { it.size }
 

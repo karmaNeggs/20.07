@@ -215,6 +215,8 @@ positions, derived from the group key so only members can compute it), and a thr
 **What it cannot learn:** content, group names, member identities or positions. **Residual risks:** relays may store events (positions
 for up to 6 h, messages up to 7 days), so a later compromise of a group key exposes stored data from that period; a carrier or venue
 can see that a phone talks to relays; relays can drop or delay traffic (mitigated by using several relays); a malicious client that
-ignores the app's budgets is stopped only by relay limits. Traffic is prioritised (SOS first, files last), rate-limited per tag,
+ignores the app's budgets is stopped only by relay limits. **Stranger carrying:** a phone outside your group that has the switch
+on may hold and forward your sealed frames and upload them; it learns rotating tags, sizes and timing, can drop or delay traffic
+(redundancy is the defence), and cannot read, forge or alter anything. Traffic is prioritised (SOS first, files last), rate-limited per tag,
 budgeted per hour and slowed under congestion so a crowd cannot easily clog the relays. The feature is not available to phones that
 have not switched it on, and a phone that has it off behaves exactly as in v2.

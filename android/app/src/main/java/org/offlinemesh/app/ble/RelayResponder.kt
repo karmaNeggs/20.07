@@ -469,6 +469,9 @@ class RelayResponder(
         // them. opaqueNickname is new this decision — nickname's old vacuous-auth blind-relay never
         // actually re-served a held row to anyone (traced: every nickname push path is scoped to
         // getActiveGroups() only), so this is the first time it genuinely propagates.
+        // v3 stranger carrying: wrapped frames and interest tags handed to this neighbour (empty unless Internet
+        // reach is on).
+        uplinkHook?.let { frames += it.framesToPush(toPeer ?: "", defaultMaxFrameBytes) }
         val carried = opaquePositions.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
             opaquePresence.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
             opaqueSos.framesToRelay(excludePeer = toPeer, limit = MAX_OPAQUE_FRAMES_PER_SESSION) +
@@ -479,6 +482,16 @@ class RelayResponder(
         }
         return frames
     }
+
+    /** v3 stranger-carrying hook (PLAN-v2.md §13.16): set by the internet-reach runtime, null when the switch is
+     *  off. */
+    interface UplinkHook {
+        suspend fun onUplink(frame: MeshFrameCodec.Frame.Uplink)
+        fun onInterest(frame: MeshFrameCodec.Frame.UplinkInterest)
+        suspend fun framesToPush(peer: String, maxFrameBytes: Int): List<ByteArray>
+    }
+
+    @Volatile var uplinkHook: UplinkHook? = null
 
     /** v3 internet uplink (decision 71): this group's presence plus positions (own, and those held for other
      *  members), sealed exactly as for BLE. Positions that themselves arrived over the internet are excluded by
@@ -597,17 +610,20 @@ class RelayResponder(
 
     /** v3: a position that arrived over the internet as "last known". Recorded for the "last seen" list only, never
      *  as a live dot, and never fed to presence or hop tracking (it may be hours old). */
-    suspend fun ingestLastKnownPosition(inner: ByteArray) {
-        val frame = MeshFrameCodec.decode(inner) as? MeshFrameCodec.Frame.PositionSealed ?: return
-        val (groupId, rootKey) = repo.resolveGroupKeyByHandle(frame.handle) ?: return
+    suspend fun ingestLastKnownPosition(inner: ByteArray): Boolean {
+        val frame = MeshFrameCodec.decode(inner) as? MeshFrameCodec.Frame.PositionSealed ?: return false
+        val (groupId, rootKey) = repo.resolveGroupKeyByHandle(frame.handle) ?: return false
         val body = CryptoUtils.candidateContentEpochKeys(rootKey)
-            .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return
-        if (body.senderId == repo.senderIdFor(groupId)) return
-        if (!verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)) return
-        positionTracker.offerLastSeen(
-            groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, frame.hop,
-            viaPeer = INTERNET_PEER, sealed = frame.sealed, handle = frame.handle,
-        )
+            .firstNotNullOfOrNull { MeshFrameCodec.openPosition(frame.sealed, it) } ?: return false
+        val mine = body.senderId == repo.senderIdFor(groupId)
+        val genuine = verifySignatureIfPinned(groupId, body.senderId, body.signature, body.signedBytes)
+        if (!mine && genuine) {
+            positionTracker.offerLastSeen(
+                groupId, body.senderId, body.lat, body.lon, body.accuracyM, body.timestampSec, frame.hop,
+                viaPeer = INTERNET_PEER, sealed = frame.sealed, handle = frame.handle,
+            )
+        }
+        return true
     }
 
     /** My own fix, plus whatever I'm holding on behalf of other group members, one hop further out
@@ -1581,7 +1597,8 @@ class RelayResponder(
                 is MeshFrameCodec.Frame.L2capCap -> handleL2capCap(frame, peerAddress)
                 is MeshFrameCodec.Frame.Courier -> handleCourier(frame, peerAddress)
                 // v3 gateway frame: wired in G2 (PLAN-v2.md Part 13.9). Ignored until then, so G0 changes no behaviour.
-                is MeshFrameCodec.Frame.Uplink -> Unit
+                is MeshFrameCodec.Frame.Uplink -> uplinkHook?.onUplink(frame)
+                is MeshFrameCodec.Frame.UplinkInterest -> uplinkHook?.onInterest(frame)
             }
         } catch (e: Exception) {
             Log.w("RelayResponder", "frame handling failed: ${e.message}")

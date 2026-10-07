@@ -12,6 +12,13 @@ interface UplinkLink {
     fun close()
     fun hasConnectedRelay(): Boolean
 
+    /** A frame a Bluetooth neighbour handed us to carry (we may hold it, and upload it once we have internet). */
+    fun offerFromBle(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision =
+        UplinkGateway.Decision.Rejected(UplinkGateway.Reject.BAD_CLASS)
+
+    /** Frames held for upload, as (key, encoded), to hand to Bluetooth neighbours. */
+    fun heldFrames(maxFrames: Int, maxFrameBytes: Int): List<Pair<String, ByteArray>> = emptyList()
+
     /** True when most relays are failing or banning us: slow down and pause bulk. */
     fun congested(): Boolean = false
 
@@ -67,7 +74,7 @@ interface UplinkSource {
  * happens inside [step] on the caller's coroutine; the link's own callbacks only enqueue.
  */
 // TooManyFunctions: one small producer per traffic class plus start/stop/step, sharing one clock and link.
-@Suppress("TooManyFunctions")
+@Suppress("TooManyFunctions", "LongParameterList")
 class InternetReachController(
     private val source: UplinkSource,
     private val newLink: (inject: (ByteArray) -> Unit) -> UplinkLink,
@@ -75,6 +82,7 @@ class InternetReachController(
     private val now: () -> Long = System::currentTimeMillis,
     private val config: Config = Config(),
     private val bulkAllowed: () -> Boolean = { false },
+    private val extraInterest: () -> Collection<ByteArray> = { emptyList() },
 ) {
     data class Config(
         val fileIntervalMs: Long = FILE_INTERVAL_MS,
@@ -107,6 +115,15 @@ class InternetReachController(
     }
 
     val running: Boolean get() = link != null
+
+    /** The relay tags this phone's own groups listen on (for the link, and for interest frames to neighbours). */
+    suspend fun ownInterestTags(): List<ByteArray> =
+        source.groups().flatMap { UplinkTags.interestTags(it.rootKey, now() / MS_PER_SEC) }
+
+    fun heldFrames(maxFrames: Int, maxFrameBytes: Int): List<Pair<String, ByteArray>> =
+        link?.heldFrames(maxFrames, maxFrameBytes) ?: emptyList()
+
+    fun offerFromBle(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision? = link?.offerFromBle(frame)
 
     fun relayConnected(): Boolean = link?.hasConnectedRelay() == true
 
@@ -149,7 +166,7 @@ class InternetReachController(
         val t = now()
         if (t - lastInterestAt >= config.interestIntervalMs) {
             lastInterestAt = t
-            l.setInterestTags(source.groups().flatMap { UplinkTags.interestTags(it.rootKey, t / MS_PER_SEC) })
+            l.setInterestTags(ownInterestTags() + extraInterest())
         }
         val bulk = bulkAllowed()
         l.setBulkAllowed(bulk)
@@ -157,10 +174,13 @@ class InternetReachController(
         // messages and SOS alerts are never slowed (PLAN-v2.md Part 14.2 and 14.3).
         val congested = l.congested()
         updateSlowFactor(congested, t)
-        if (l.hasConnectedRelay()) {
+        // Frames are produced and HELD even with no relay connected, so a phone with no internet can hand them to a
+        // Bluetooth neighbour that has some (stranger carrying); only files wait for a real connection.
+        val connected = l.hasConnectedRelay()
+        run {
             if (t - lastFileAt >= config.fileIntervalMs) {
                 lastFileAt = t
-                if (bulk && !congested) produceFiles(l, t / MS_PER_SEC)
+                if (bulk && !congested && connected) produceFiles(l, t / MS_PER_SEC)
             }
             if (t >= nextLiveAt) {
                 nextLiveAt = t + jittered(config.liveIntervalMs * slowFactor)

@@ -57,14 +57,14 @@ class InternetReachControllerTest {
         assertFalse(c.running)
     }
 
-    @Test fun `live frames are wrapped under the live tag on an interval and not before a relay is connected`() {
+    @Test fun `live frames are wrapped under the live tag on an interval, and held even before a relay is connected`() {
         val link = FakeLink(); link.connected = false
         val src = FakeSource(groupKey); src.live.add(ByteArray(40) { 1 })
         val c = fakeController(src, link); c.start()
         step(c)
-        assertTrue(link.offered.isEmpty())
+        // Stranger carrying (decision 78): an offline phone still wraps and holds frames for a Bluetooth neighbour.
+        assertEquals(1, link.offered.size)
         link.connected = true
-        step(c)
         val f = link.offered.single()
         assertEquals(MeshFrameCodec.UPLINK_CLASS_LIVE, f.cls)
         assertArrayEquals(UplinkTags.liveTag(groupKey, nowMs / 1000), f.relayTag)

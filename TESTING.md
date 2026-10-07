@@ -81,14 +81,14 @@ full manual pass against `test_rubric.md` on a real release build before trustin
 distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
 deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
 
-## Test day — Internet reach (v0.9.1-dev, targetSdk 36)
+## Test day — Internet reach (v0.10.0-dev, targetSdk 36)
 
 First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
 until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
 
 **Before you start**
 - [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
-- [ ] Install `20.07-v0.9.1-dev-debug.apk` on every phone. Grant every permission it asks for.
+- [ ] Install `20.07-v0.10.0-dev-debug.apk` on every phone. Grant every permission it asks for.
 - [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
 - [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
 - [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).
@@ -135,6 +135,13 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 - [ ] A file over 400 KB must not be sent over the internet (it still moves over Bluetooth). Note what the sender sees.
 - [ ] PASS = photo arrives intact on the far phone, and SOS overtakes the photo.
 
+**Test 2d — Stranger carrying (20 min)**
+- [ ] Add a 4th phone S that is NOT in the group, with Internet reach ON and Wi-Fi on. A (group member, Bluetooth only, NO internet, Internet reach ON) sends a message and stays near S only; keep B and C away from A.
+- [ ] C (member, internet) should receive A's message within about a minute, though A has no internet and S is not a member. Reply from C: S should pick it up and A should show it.
+- [ ] Turn Internet reach OFF on S. A and C stop hearing each other within a minute. Turn it back on: they resume.
+- [ ] Record battery use on A and S, and whether any phone gets warm or lags.
+- [ ] PASS = A and C talk through a stranger; nothing readable by S (S shows no group content).
+
 **Test 3 — the awkward cases (20 min)**
 - [ ] Turn C's Wi-Fi off, wait 30 seconds, turn it on. Status goes "waiting for Wi-Fi or mobile data", then back to connected. Messages sent meanwhile arrive afterwards.
 - [ ] Turn on the app's Offline tile on C. Status shows "paused by Offline mode" and C stops sending.
@@ -148,7 +155,7 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 - [ ] A screenshot of the home screen showing the status line.
 
 **Do NOT report these as bugs, they are known and not built yet**
-- Phones that are not members of your group do not carry your traffic (stranger-carrying mode is not built yet).
+- Only direct Bluetooth neighbours exchange held frames and interest tags; carrying through two strangers in a row is unproven.
 - Phones that only have Bluetooth and are not members of the group do not carry anything over the internet.
 
 **Also record, because it is unmeasured**

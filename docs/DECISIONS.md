@@ -4441,3 +4441,20 @@ sniffers can link them); the mailbox lookback is 24 h while texts live 7 days; a
 (only the link filters by kind, and the `t` tag is not checked against the frame's tag); congested() with zero relays now false.
 Not testable in the JVM: the Android runtime, OkHttp, NetworkMonitor, real relay behaviour, real threads.
 
+
+## 78. Stranger carrying built (G3b) (2026-10-08)
+
+Author insisted it not be deferred again. Design (PLAN-v2 §13.16, §13.19): the held-frame queue that uploads is also the carrier.
+Phones with the switch on wrap and hold frames even offline; `UplinkBleBridge` pushes held frames and interest tags to each
+Bluetooth neighbour once; a neighbour with internet uploads them, member or not (it needs no key). Downlink needs no new path: a
+stranger gateway hands relay frames to `handleIncoming`, whose existing blind-relay custody carries sealed frames for groups it is
+not in; last-known positions that a stranger cannot open also enter as ordinary sealed positions, and members record them as
+last-seen through the normal path. **No VERSION bump** (new frame bytes 0x20/0x21 are ignored by older builds, so mixed fleets work).
+Verified in the JVM: member with no internet reaches a distant member through a stranger and the reply returns (the stranger
+subscribes because the offline member sent interest); each frame handed once per neighbour; disabled phone carries nothing;
+fromInternet frames are not carried over Bluetooth; codec fuzz. **Unproven on phones:** GATT frame size limits for wrapped
+frames (cap is the push's default max frame bytes; larger texts and file symbols may not fit at low MTU), battery cost of
+holding and pushing, multi-hop carrying beyond one stranger, and interest gossip beyond direct neighbours.
+**Privacy cost stated:** a stranger who carries your frames learns the rotating relay tags, sizes and timing, not content; a
+carrier can drop traffic (redundancy is the defence).
+

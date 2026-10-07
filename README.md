@@ -428,7 +428,8 @@ codes, your IP address and timing; **both mates need the switch on**. Design: `P
 tested in simulation (1000 users, outages, shared carrier addresses, alert storms) and against real public relays. **The 3-phone
 bridge test and a long field run are still to do.** Files travel too (any connection, up to 400 KB, paced, lowest priority),
 SOS alerts have top priority, and a mate who went quiet shows under "Last seen" for up to 6 hours. The stranger-carrying
-"mule" mode (phones that are not in your group carrying your traffic) is **not built yet**.
+"mule" mode is built (0.10.0-dev): phones that are not in your group, with Internet reach on, carry your encrypted
+frames over Bluetooth and upload them; **not yet tried on phones**.
 
 ## Get the app
 

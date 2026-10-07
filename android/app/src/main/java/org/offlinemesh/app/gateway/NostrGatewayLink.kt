@@ -53,7 +53,10 @@ class NostrGatewayLink(
         onPublishSettled = { id, accepted, _ -> onSettled(id, accepted) },
     )
 
-    fun offerFromBle(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision = gateway.offer(frame)
+    override fun offerFromBle(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision = gateway.offer(frame)
+
+    override fun heldFrames(maxFrames: Int, maxFrameBytes: Int): List<Pair<String, ByteArray>> =
+        gateway.heldFrames(maxFrames, maxFrameBytes)
 
     /** This phone's own (or its group's) frame, wrapped by a member. Same admission rules as one heard over BLE. */
     override fun offerLocal(frame: MeshFrameCodec.Frame.Uplink): UplinkGateway.Decision = gateway.offer(frame)

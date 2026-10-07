@@ -63,6 +63,12 @@ object MeshFrameCodec {
     // the bump to 13 lands in G2 when this is wired in.
     const val FRAME_UPLINK: Byte = 0x20
 
+    /** "These opaque relay tags are wanted nearby": sent by members so a gateway (member or stranger) knows what to
+     *  subscribe to on the relays (PLAN-v2.md §13.16). Carries tags only, never a group id or key. */
+    const val FRAME_UPLINK_INTEREST: Byte = 0x21
+    const val MAX_INTEREST_TAGS_PER_FRAME = 16
+    const val MAX_INTEREST_HOP = 2
+
     /** [Frame.Uplink.cls] values. LIVE = fresh position/presence for a mule already present;
      *  POSITION_LAST_KNOWN = a position deposited as "last seen" for later delivery; TEXT = chat and
      *  SOS. See PLAN-v2.md §13.15. */
@@ -467,6 +473,8 @@ object MeshFrameCodec {
          *  `UPLINK_CLASS_*` values; [flags] carries `UPLINK_FLAG_*`; [createdAtSec] is cleartext so a
          *  keyless carrier can expire it; [inner] is one complete, already-sealed existing frame,
          *  moved verbatim and never opened by a gateway. */
+        data class UplinkInterest(val hop: Int, val tags: List<ByteArray>) : Frame()
+
         data class Uplink(
             val relayTag: ByteArray,
             val cls: Int,
@@ -918,6 +926,15 @@ object MeshFrameCodec {
 
     fun encodeL2capCap(psm: Int): ByteArray = frame(FRAME_L2CAP_CAP) { d -> d.writeInt(psm) }
 
+    fun encodeUplinkInterest(hop: Int, tags: List<ByteArray>): ByteArray {
+        val ok = tags.size in 1..MAX_INTEREST_TAGS_PER_FRAME && tags.all { it.size in 1..MAX_UPLINK_TAG_BYTES }
+        require(ok) { "bad interest" }
+        return frame(FRAME_UPLINK_INTEREST) { d ->
+            d.writeByte(hop.coerceIn(0, MAX_INTEREST_HOP)); d.writeByte(tags.size)
+            for (t in tags) d.writeBlob(t)
+        }
+    }
+
     /** Wraps one sealed [inner] frame for the internet uplink. Throws on an empty/oversize tag or an
      *  oversize [inner] — callers build these themselves, so a bad value is a bug, not input. */
     fun encodeUplink(relayTag: ByteArray, cls: Int, flags: Int, createdAtSec: Long, inner: ByteArray): ByteArray {
@@ -1199,6 +1216,14 @@ object MeshFrameCodec {
                     val copiesRemaining = buf.get().toInt() and 0xFF
                     val sealed = buf.readStr16Bytes()
                     Frame.Courier(tag, id, createdAt, copiesRemaining, sealed)
+                }
+                FRAME_UPLINK_INTEREST -> {
+                    val hop = buf.get().toInt() and 0xFF
+                    val n = buf.get().toInt() and 0xFF
+                    if (hop > MAX_INTEREST_HOP || n !in 1..MAX_INTEREST_TAGS_PER_FRAME) return null
+                    val tags = List(n) { buf.readBlob() ?: return null }
+                    if (tags.any { it.size > MAX_UPLINK_TAG_BYTES }) return null
+                    Frame.UplinkInterest(hop, tags)
                 }
                 FRAME_UPLINK -> {
                     val tag = buf.readBlob() ?: return null
