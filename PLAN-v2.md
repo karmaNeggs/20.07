@@ -3351,3 +3351,79 @@ member who goes quiet is listed as last seen for up to 6 hours, held in RAM only
 (`decode` drops any other version), so it would invalidate the build the first real round is about to test; and the
 round may show problems in the synthetic `internet` peer seam that change G3b's design. Do it after the round.
 
+
+
+---
+
+## Part 14 — Files over the internet, traffic priority, and scale (1000 users in one place) (2026-10-07, design)
+
+**Author's goal:** files must cross too, along any chain such as BLE-only → BLE+internet → other BLE+internet →
+BLE-only, in every direction; and the protocol must be thought through for safety, clogging and jamming at
+roughly 1000 users in one place. **Design only, nothing built.**
+
+### 14.1 Files
+
+Evidence is already fountain-coded (`FRAME_EVID_META` with a ≤256 B thumbnail, then `FRAME_EVID_SYMBOL` of 400 B,
+decodable from any sufficient subset). That suits a lossy relay. Plan: two new uplink classes, **FILE_META** (the
+header and thumbnail) and **FILE_SYMBOLS** (a batch of up to ~60 symbols, about 24 KB, per relay event; a 200 KB file
+is about 9 events). A bridge holding a file's symbols wraps and publishes them; the far side feeds them to the
+existing `handleEvidSymbol`, then its own BLE mesh floods them on as today, which gives the full chain. The sender's
+own phone publishes first, and any bridge that already holds symbols may add more (any subset works).
+Defaults: **Wi-Fi/unmetered network only** (mobile data needs a tap on "send anyway"), **size cap 500 KB**, thumbnail
+first so a mate sees a preview within seconds.
+
+### 14.2 Priority order (highest first)
+
+| P | Class | Why / rule |
+|---|---|---|
+| 0 | SOS alert (`isAlert`) | Life safety. Always first, never shed, own small reserved budget. |
+| 1 | Text messages | Small, high value. |
+| 2 | Live position | Useful for about 2 minutes, so latest-wins; adaptive interval (14.3). |
+| 3 | Presence, nicknames | Small, low urgency. |
+| 4 | Last-known position | Mostly repeats; lowest-cost safe to thin. |
+| 5 | File meta, then file symbols | Bulk. First to be shed, only on unmetered network, hard budget. |
+
+Implementation: classes ALERT (3) and FILE (4/5) beside the existing 0-2; `UplinkGateway.drain` orders by
+priority then age (today: live, text, last-known); a per-class share of the hourly budget with P0-P2 reserved at
+about 60 %; when relays refuse or acks time out, shed from P5 upward, never P0.
+
+### 14.3 Scale model for 1000 users (estimates, NOT measurements)
+
+Assume 1000 people in about 140 groups of 7, 30 % with the switch on (300 phones), all with internet.
+Today each online member publishes its own frames AND bridges the whole group's, so the same positions are
+published about 7 times. Rough load: about 0.12 events/s per phone → 36 events/s, times 3 relays = about 108 events/s
+at roughly 2-3 KB each, about 2 Mbit/s into free public relays. That is too much to ask of volunteers' servers.
+Three fixes, each local and needing no new protocol:
+1. **Don't bridge a member who is already online.** If frames from member X arrived from the relay in the last 60 s,
+   do not republish X's BLE-held position. Cuts duplication from about 7× to about 1-2×.
+2. **Adaptive interval.** Live position 10 s → 30 s → 60 s as relay errors, ack timeouts or the number of nearby
+   same-group online phones rise; last-known and presence stretch further.
+3. **One uplinker per BLE cluster per group** by Trickle-style suppression (overhear another phone's recent uplink of
+   the same frame and stay quiet), the same idea `TrickleTimer` already implements for BLE.
+Expected combined effect: 5-15× fewer events. To be **measured** in a staged field test (20, then 100 phones) before
+any claim.
+
+### 14.4 Jamming, clogging and abuse
+
+- **The internet path may be the thing that fails** (that is why the app exists). BLE stays primary; the internet is
+  opportunistic. On repeated failure back off exponentially (the pool already does), stop spending battery, and never
+  block BLE delivery on it.
+- **Shared IP at a venue:** carrier-grade NAT can make 300 phones look like one address to a relay, so per-IP limits
+  trigger sooner than per-phone ones. Spread across more relays, keep a small configurable list, allow a
+  user-supplied or self-hosted relay.
+- **Junk on a known tag:** anyone nearby can scan a group's 60 s beacon tag and flood it. Members drop junk cheaply
+  (an authentication check fails fast) but airtime and data are wasted. Mitigations: per-tag rate caps (built),
+  the hourly byte budget (built), subscribe only to current windows, report relays that serve junk, proof-of-work
+  per frame stays parked until measured.
+- **Privacy at scale:** relays see IP, timing, size and rotating tags; stored last-known positions are the most
+  sensitive item (6 h, author to confirm). Optional later: route through a user-chosen proxy.
+- **Battery and data:** the hourly byte budget, the unmetered-only rule for files, and "stop below X % battery".
+- **Malicious or lazy mule:** redundancy (several relays, several bridges) is the defence; a bridge that drops
+  traffic costs only delay.
+
+### 14.5 Build order, and what to measure first
+
+F1 priority classes and the "already online" suppression (small, testable in the simulator), F2 FILE_META with
+thumbnail, F3 FILE_SYMBOLS with unmetered-only and size cap, F4 adaptive interval and cluster suppression,
+F5 staged scale tests. **Measure on the next real round:** events per phone per minute, bytes per hour, relay
+accept rate, and end-to-end delay for each class, from the new `internet-reach` log lines.
