@@ -1202,6 +1202,7 @@ object MeshFrameCodec {
                 }
                 FRAME_UPLINK -> {
                     val tag = buf.readBlob() ?: return null
+                    if (tag.size > MAX_UPLINK_TAG_BYTES) return null
                     val cls = buf.get().toInt() and 0xFF
                     val flags = buf.get().toInt() and 0xFF
                     val createdAt = buf.long

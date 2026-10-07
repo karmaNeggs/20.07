@@ -68,15 +68,17 @@ class NostrGatewayLink(
             return
         }
         val nowSec = now() / MS_PER_SEC
-        pool.setSubscription(
+        // Several smaller filters instead of one huge tag list (relays cap filter size; 4 groups need over 100 tags).
+        val filters = hex.chunked(TAGS_PER_FILTER).flatMap { chunk ->
             listOf(
-                NostrFilter(listOf(LIVE_KIND), mapOf("t" to hex), since = nowSec - config.liveLookbackSec),
+                NostrFilter(listOf(LIVE_KIND), mapOf("t" to chunk), since = nowSec - config.liveLookbackSec),
                 NostrFilter(
-                    listOf(MAILBOX_KIND), mapOf("t" to hex),
+                    listOf(MAILBOX_KIND), mapOf("t" to chunk),
                     since = nowSec - config.mailboxLookbackSec, limit = config.mailboxLimit,
                 ),
-            ),
-        )
+            )
+        }
+        pool.setSubscription(filters)
     }
 
     /** Pushes pool state forward and publishes whatever the gateway has ready. */
@@ -155,7 +157,8 @@ class NostrGatewayLink(
         const val MAILBOX_LOOKBACK_SEC = 24L * 60 * 60
         const val LIVE_LOOKBACK_SEC = 30L
         const val MAILBOX_LIMIT = 200
-        const val MAX_INTEREST_TAGS = 100
+        const val MAX_INTEREST_TAGS = 300
+        private const val TAGS_PER_FILTER = 50
         const val MAILBOX_EXPIRY_SEC = 7L * 24 * 60 * 60
         private const val MS_PER_SEC = 1000L
     }

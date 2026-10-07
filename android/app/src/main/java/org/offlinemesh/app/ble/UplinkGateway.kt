@@ -83,6 +83,8 @@ class UplinkGateway(
         val maxBatchBytes: Int = MAX_BATCH_BYTES,
         val priorityTagSeenSec: Long = PRIORITY_TAG_SEEN_SEC,
         val dedupEntries: Int = DEDUP_ENTRIES,
+        val maxQueues: Int = MAX_QUEUES,
+        val maxDownlinkFramesPerMinute: Int = MAX_DOWNLINK_PER_MINUTE,
         val maxDownlinkFramesPerEvent: Int = MAX_DOWNLINK_FRAMES_PER_EVENT,
     )
 
@@ -95,7 +97,7 @@ class UplinkGateway(
     }
 
     /** One relay event's worth of frames for a single tag and class. */
-    class Batch(val relayTag: ByteArray, val cls: Int, val frames: List<ByteArray>) {
+    class Batch(val relayTag: ByteArray, val cls: Int, val frames: List<ByteArray>, val drainedAtMs: Long = 0L) {
         val bytes: Int get() = frames.sumOf { UplinkBatch.sizeOf(it) }
         fun content(): ByteArray = UplinkBatch.encode(frames)
     }
@@ -112,10 +114,14 @@ class UplinkGateway(
     private var budgetWindowStartMs = now()
     private var budgetUsedBytes = 0
     private var bulkUsedBytes = 0
+    private var downWindowStartMs = 0L
+    private var downCount = 0
 
     /** Records that a member's beacon with this 60 s tag was scanned nearby (a priority hint only). */
     fun noteBeaconSeen(tag: ByteArray) {
-        seenTags[hex(tag)] = now()
+        val h = hex(tag)
+        seenTags.remove(h)
+        seenTags[h] = now()
         if (seenTags.size > SEEN_TAGS_MAX) seenTags.remove(seenTags.keys.first())
     }
 
@@ -144,8 +150,8 @@ class UplinkGateway(
             .filter { it.value.isNotEmpty() && (includeBulk || !isBulk(it.value.first().cls)) }
             .sortedWith(
                 compareBy<Map.Entry<String, ArrayDeque<Held>>>(
-                    { if (isPriority(it.key.substringBefore('/'))) 0 else 1 },
                     { classRank(it.value.first().cls) },
+                    { if (isPriority(it.key.substringBefore('/'))) 0 else 1 },
                     { it.value.minOf { h -> h.createdAtSec } },
                 ),
             )
@@ -158,8 +164,11 @@ class UplinkGateway(
 
     /** Puts a batch whose publish failed back, and refunds its budget. Never re-checks dedup or rate. */
     fun requeue(batch: Batch) {
-        if (isBulk(batch.cls)) bulkUsedBytes = (bulkUsedBytes - batch.bytes).coerceAtLeast(0)
-        else budgetUsedBytes = (budgetUsedBytes - batch.bytes).coerceAtLeast(0)
+        // Refund only if the batch was charged in the CURRENT budget window; an older one already reset with it.
+        if (batch.drainedAtMs >= budgetWindowStartMs) {
+            if (isBulk(batch.cls)) bulkUsedBytes = (bulkUsedBytes - batch.bytes).coerceAtLeast(0)
+            else budgetUsedBytes = (budgetUsedBytes - batch.bytes).coerceAtLeast(0)
+        }
         for (encoded in batch.frames) {
             val f = MeshFrameCodec.decode(encoded) as? MeshFrameCodec.Frame.Uplink ?: continue
             enqueue(hex(f.relayTag), Held(f.relayTag, f.cls, f.createdAtSec, encoded))
@@ -171,8 +180,14 @@ class UplinkGateway(
      * already seen (including this gateway's own published frames echoing back, and the same event
      * arriving from several relays), or oversize. Returned frames carry `UPLINK_FLAG_FROM_INTERNET`.
      */
-    fun onRelayBatch(content: ByteArray): List<ByteArray> =
-        UplinkBatch.decode(content).take(config.maxDownlinkFramesPerEvent).mapNotNull { acceptDownlink(it) }
+    fun onRelayBatch(content: ByteArray): List<ByteArray> {
+        val t = now()
+        if (t - downWindowStartMs >= MINUTE_MS) { downWindowStartMs = t; downCount = 0 }
+        val room = (config.maxDownlinkFramesPerMinute - downCount).coerceAtLeast(0)
+        val frames = UplinkBatch.decode(content).take(minOf(config.maxDownlinkFramesPerEvent, room))
+        downCount += frames.size
+        return frames.mapNotNull { acceptDownlink(it) }
+    }
 
     private fun acceptDownlink(raw: ByteArray): ByteArray? {
         val f = MeshFrameCodec.decode(raw) as? MeshFrameCodec.Frame.Uplink
@@ -221,7 +236,7 @@ class UplinkGateway(
         if (taken.isEmpty()) return null
         queue.removeAll(taken.toSet())
         if (bulk) bulkUsedBytes += bytes else budgetUsedBytes += bytes
-        return Batch(taken.first().tag, taken.first().cls, taken.map { it.encoded })
+        return Batch(taken.first().tag, taken.first().cls, taken.map { it.encoded }, now())
     }
 
     private fun enqueue(tagHex: String, held: Held) {
@@ -238,6 +253,16 @@ class UplinkGateway(
             val oldest = queue.minByOrNull { it.createdAtSec } ?: break
             queue.remove(oldest)
         }
+        if (queues.size > config.maxQueues) evictWorstQueue()
+    }
+
+    /** Bounds memory against hostile or accidental floods of distinct tags: drop the lowest-priority, oldest queue. */
+    private fun evictWorstQueue() {
+        val worst = queues.entries.maxWithOrNull(
+            compareBy<Map.Entry<String, ArrayDeque<Held>>>({ classRank(it.value.firstOrNull()?.cls ?: 0) })
+                .thenByDescending { it.value.maxOfOrNull { h -> h.createdAtSec } ?: Long.MAX_VALUE },
+        ) ?: return
+        queues.remove(worst.key)
     }
 
     private fun expire() {
@@ -256,6 +281,7 @@ class UplinkGateway(
     private fun tagRateExceeded(tagHex: String): Boolean {
         val t = now()
         if (rate.size > RATE_ENTRIES_MAX) rate.entries.removeAll { t - it.value.startMs > MINUTE_MS }
+        if (rate.size > RATE_ENTRIES_MAX * RATE_HARD_CAP_FACTOR) rate.clear()
         val w = rate.getOrPut(tagHex) { RateWindow(t, 0) }
         if (t - w.startMs >= MINUTE_MS) { w.startMs = t; w.count = 0 }
         w.count++
@@ -312,7 +338,9 @@ class UplinkGateway(
         const val HOURLY_BUDGET_BYTES = 256 * 1024
         const val MAX_BATCH_BYTES = 32 * 1024
         const val PRIORITY_TAG_SEEN_SEC = 180L
-        const val DEDUP_ENTRIES = 2048
+        const val DEDUP_ENTRIES = 8192
+        const val MAX_QUEUES = 512
+        const val MAX_DOWNLINK_PER_MINUTE = 3000
         const val MAX_DOWNLINK_FRAMES_PER_EVENT = 256
         const val FILE_MAX_AGE_SEC = 24L * 3600
         const val FILE_META_KEEP_PER_TAG = 64
@@ -331,6 +359,7 @@ class UplinkGateway(
         private const val RANK_FILE_BULK = 5
         private const val SEEN_TAGS_MAX = 4096
         private const val RATE_ENTRIES_MAX = 1024
+        private const val RATE_HARD_CAP_FACTOR = 4
         private const val DEDUP_INITIAL_CAPACITY = 256
         private const val LOAD_FACTOR = 0.75f
         private const val DEDUP_KEY_BYTES = 16

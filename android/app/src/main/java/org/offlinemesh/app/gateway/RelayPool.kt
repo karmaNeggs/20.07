@@ -76,7 +76,7 @@ class RelayPool(
 
     private class Queued(val event: NostrEvent, val at: Long)
 
-    private class Settle(var pending: Int, var accepted: Int, val attempted: Int)
+    private class Settle(var pending: Int, var accepted: Int, val attempted: Int, var duplicates: Int = 0)
 
     private val relays = urls.associateWith { Relay(it) }
     private val settles = HashMap<String, Settle>()
@@ -93,6 +93,8 @@ class RelayPool(
 
     /** Sends [event] to every usable relay. [onPublishSettled] reports how many accepted it. */
     fun publish(event: NostrEvent) = locked { out ->
+        // Already in flight: settle both when the first settles.
+        settles[event.id]?.let { it.duplicates++; return@locked }
         val t = now()
         val notBanned = relays.values.filter { it.bannedUntil <= t }
         // Prefer relays that are connected, then send to only the same two per tag (spreads load, see RelayChoice).
@@ -129,6 +131,7 @@ class RelayPool(
 
     /** True when half or more of the relays are banned or failing: the owner should slow down and pause bulk. */
     fun congested(): Boolean = synchronized(lock) {
+        if (relays.isEmpty()) return@synchronized false
         val t = now()
         relays.values.count { it.bannedUntil > t || it.failures >= CONGESTED_FAILURES } * 2 >= relays.size
     }
@@ -302,7 +305,7 @@ class RelayPool(
         if (accepted) s.accepted++
         if (s.pending <= 0) {
             settles.remove(eventId)
-            out.add { onPublishSettled(eventId, s.accepted, s.attempted) }
+            repeat(1 + s.duplicates) { out.add { onPublishSettled(eventId, s.accepted, s.attempted) } }
         }
     }
 
@@ -311,9 +314,12 @@ class RelayPool(
         return (config.reconnectBaseMs shl shift).coerceAtMost(config.reconnectMaxMs)
     }
 
+    /** A relay refusing us for who we are (banned, blocked, restricted, paywalled, web-of-trust), judged by the
+     *  message PREFIX the way NIP-01 machine-readable replies work. A benign "invalid: ... restricted to 64KB"
+     *  must not ban a relay for 10 minutes. */
     private fun looksLikeBlock(message: String): Boolean {
-        val m = message.lowercase()
-        return BLOCK_MARKERS.any { m.contains(it) }
+        val m = message.trim().lowercase()
+        return BLOCK_PREFIXES.any { m.startsWith(it) } || m.contains("web of trust")
     }
 
     private fun locked(block: (MutableList<() -> Unit>) -> Unit) {
@@ -338,8 +344,7 @@ class RelayPool(
         private const val SEEN_INITIAL_CAPACITY = 256
         private const val SEEN_LOAD_FACTOR = 0.75f
         private const val MAX_BACKOFF_SHIFT = 10
-        private val BLOCK_MARKERS = listOf(
-            "banned", "blocked", "restricted", "web of trust", "auth-required", "paid", "not authorized",
-        )
+        private val BLOCK_PREFIXES =
+            listOf("banned", "blocked", "restricted", "auth-required", "paid", "not authorized")
     }
 }

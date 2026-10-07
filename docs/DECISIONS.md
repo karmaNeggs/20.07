@@ -4430,3 +4430,14 @@ the "Last seen" fallback; a malicious client that bypasses the app is stopped on
 capacity and policy are unknown and need the staged field test. Skipping already-online members saves bytes (about 22%)
 but not events. Report: `docs/spikes/scale-sim-2026-10-07/report.txt`.
 
+
+## 77. Blind QC pass found 15 defects, all fixed (2026-10-08)
+
+A helper agent was told not to read any record (docs, decisions, existing tests) and to judge the v3 internet code only against a
+short statement of intended behaviour, writing its own tests (`qc/` package). Result: 15 confirmed defects (listed in the changelog),
+a RelayPool fuzz of 300 seeds with no double or lost settle, and unconfirmed suspicions still open: the pool falls back to
+non-connected relays when none are connected; the live relay tag equals the public BLE beacon id (relay operators and BLE
+sniffers can link them); the mailbox lookback is 24 h while texts live 7 days; a hostile relay can deliver any validly signed event
+(only the link filters by kind, and the `t` tag is not checked against the frame's tag); congested() with zero relays now false.
+Not testable in the JVM: the Android runtime, OkHttp, NetworkMonitor, real relay behaviour, real threads.
+

@@ -45,7 +45,7 @@ class UplinkTagsTest {
 
     @Test fun `interest covers this and the previous live window and a day of mailbox hours`() {
         val tags = UplinkTags.interestTags(keyA, t0)
-        assertEquals(2 + UplinkTags.MAILBOX_LOOKBACK_HOURS + 1, tags.size)
+        assertEquals(3 + UplinkTags.MAILBOX_LOOKBACK_HOURS + 1, tags.size)
         assertEquals(tags.size, tags.map { it.toHex() }.distinct().size)
         val set = tags.map { it.toHex() }.toSet()
         assertTrue(UplinkTags.liveTag(keyA, t0).toHex() in set)

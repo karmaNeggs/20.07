@@ -30,7 +30,12 @@ object UplinkTags {
     /** Every tag a member should listen on: this and the previous 60 s window (clock skew and in-flight
      *  frames) plus the current and last [MAILBOX_LOOKBACK_HOURS] hourly mailbox windows. */
     fun interestTags(groupKey: ByteArray, nowSec: Long): List<ByteArray> {
-        val live = listOf(liveTag(groupKey, nowSec), liveTag(groupKey, nowSec - LIVE_WINDOW_SEC))
+        // Next window too: the subscription is refreshed only every 30 s, so a window can roll in between.
+        val live = listOf(
+            liveTag(groupKey, nowSec + LIVE_WINDOW_SEC),
+            liveTag(groupKey, nowSec),
+            liveTag(groupKey, nowSec - LIVE_WINDOW_SEC),
+        )
         val mailbox = (0..MAILBOX_LOOKBACK_HOURS).map { mailboxTag(groupKey, nowSec - it * MAILBOX_WINDOW_SEC) }
         return live + mailbox
     }

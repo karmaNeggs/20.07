@@ -118,7 +118,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
             )
         if (staleOrWorse) return
         val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
-        if (viaPeer == RelayResponder.INTERNET_PEER) internetHeardMs[key] = now()
+        if (viaPeer == RelayResponder.INTERNET_PEER && isLiveFresh(timestampSec)) internetHeardMs[key] = now()
         table[key] = record
         rememberLastSeen(key, record)
         epoch.incrementAndGet()
@@ -141,11 +141,18 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         handle: ByteArray? = null,
     ) {
         val record = Record(lat, lon, accuracyM, timestampSec, hop, viaPeer, sealed, handle)
-        if (viaPeer == RelayResponder.INTERNET_PEER) internetHeardMs[Key(groupId, senderId)] = now()
+        if (viaPeer == RelayResponder.INTERNET_PEER && isLiveFresh(timestampSec)) {
+            internetHeardMs[Key(groupId, senderId)] = now()
+        }
         rememberLastSeen(Key(groupId, senderId), record)
     }
 
+    /** A position as young as a live one: a 5-hour-old mailbox delivery does not mean the member is online now. */
+    private fun isLiveFresh(timestampSec: Long) = now() / 1000 - timestampSec <= LIVE_FRESH_SECONDS
+
     private fun rememberLastSeen(key: Key, record: Record) {
+        // A future timestamp would win "newest" and pin the entry (and block real updates) until it passes.
+        if (record.timestampSec > now() / 1000 + FUTURE_SKEW_SECONDS) return
         val existing = lastSeen[key]
         if (existing == null || existing.timestampSec <= record.timestampSec) lastSeen[key] = record
     }
@@ -155,6 +162,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
     fun lastSeenForGroup(groupId: String): Map<String, Record> {
         val nowSec = now() / 1000
         lastSeen.entries.removeAll { nowSec - it.value.timestampSec > LAST_SEEN_MAX_AGE_SECONDS }
+        internetHeardMs.entries.removeAll { now() - it.value > INTERNET_HEARD_KEEP_MS }
         val live = forGroup(groupId).keys
         return lastSeen.filterKeys { it.groupId == groupId && it.senderId !in live }.mapKeys { it.key.senderId }
     }
@@ -185,6 +193,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
     fun clearForGroup(groupId: String) {
         table.keys.filter { it.groupId == groupId }.forEach { table.remove(it) }
         lastSeen.keys.filter { it.groupId == groupId }.forEach { lastSeen.remove(it) }
+        internetHeardMs.keys.filter { it.groupId == groupId }.forEach { internetHeardMs.remove(it) }
     }
 
     /** Periodic safety net alongside [clearForGroup]'s immediate per-group clear (decision 30) —
@@ -196,6 +205,7 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
     fun pruneOrphaned(activeGroupIds: Set<String>) {
         table.keys.filter { it.groupId !in activeGroupIds }.forEach { table.remove(it) }
         lastSeen.keys.filter { it.groupId !in activeGroupIds }.forEach { lastSeen.remove(it) }
+        internetHeardMs.keys.filter { it.groupId !in activeGroupIds }.forEach { internetHeardMs.remove(it) }
     }
 
     companion object {
@@ -208,6 +218,9 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
 
         /** How long a "last seen" position is kept: 6 hours (PLAN-v2.md §13.15; the author may shorten it). */
         const val LAST_SEEN_MAX_AGE_SECONDS = 6L * 3600
+        private const val LIVE_FRESH_SECONDS = 120L
+        private const val INTERNET_HEARD_KEEP_MS = 10 * 60 * 1000L
+        private const val FUTURE_SKEW_SECONDS = 120L
 
         // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — [hop]'s slack contribution is now
         // capped here, NOT decoupled from maxPositionRelayHops the way decision 33 (below) left it.

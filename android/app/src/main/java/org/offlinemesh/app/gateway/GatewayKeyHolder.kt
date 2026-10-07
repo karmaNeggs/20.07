@@ -30,6 +30,7 @@ class GatewayKeyHolder(
     /** Re-adopts a persisted key. An invalid or already-expired one is ignored and a fresh key kept. */
     fun restore(persistedSecret: ByteArray, persistedCreatedAtMs: Long) {
         val usable = persistedSecret.size == KEY_BYTES &&
+            persistedCreatedAtMs <= now() &&
             now() - persistedCreatedAtMs < lifetimeMs &&
             runCatching { Bip340.publicKey(persistedSecret) }.isSuccess
         if (usable) {

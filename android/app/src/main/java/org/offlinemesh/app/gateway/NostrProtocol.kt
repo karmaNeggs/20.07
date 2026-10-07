@@ -9,7 +9,8 @@ import java.security.SecureRandom
 internal fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
 internal fun String.hexToBytes(): ByteArray? {
-    if (length % 2 != 0) return null
+    // Canonical lowercase hex only: toInt(16) would accept signs, and uppercase is a second spelling of the same bytes.
+    if (length % 2 != 0 || !all { it in '0'..'9' || it in 'a'..'f' }) return null
     return try {
         ByteArray(length / 2) { substring(it * 2, it * 2 + 2).toInt(HEX_RADIX).toByte() }
     } catch (e: NumberFormatException) {

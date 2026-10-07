@@ -135,9 +135,10 @@ class InternetReachController(
         link?.close()
         link = null
         inbound.close()
-        uplinkedIds.clear()
-        metaSent.clear()
-        symbolsSent.clear()
+        // uplinkedIds and file progress are KEPT across stop/start: what already went out is on the relays, and a
+        // switch
+        // toggle or network flap must not re-publish the whole mailbox history (a re-wrap gets a fresh timestamp, so
+        // the gateway's dedup would not catch it).
     }
 
     /** Remember an item that arrived from the relay so it is never re-published back (echo control). */
@@ -214,20 +215,28 @@ class InternetReachController(
     private suspend fun produceFiles(l: UplinkLink, nowSec: Long) {
         for (g in source.groups()) {
             for (f in source.fileUplinks(g.id)) {
-                if (metaSent.add(f.id)) {
-                    l.offerLocal(UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_FILE_META,
-                        f.metaFrame, nowSec))
-                    return
-                }
-                val done = symbolsSent[f.id] ?: 0
-                if (done >= f.symbolsWanted) continue
-                val symbols = f.nextSymbols(minOf(config.symbolsPerTick, f.symbolsWanted - done))
-                symbolsSent[f.id] = done + symbols.size
-                for (s in symbols) l.offerLocal(UplinkWrapper.wrap(g.rootKey,
-                    MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS, s, nowSec))
-                return
+                if (produceFileStep(l, g, f, nowSec)) return
             }
         }
+    }
+
+    /** Returns true if it queued something for [f] (so the caller stops for this tick). */
+    private suspend fun produceFileStep(l: UplinkLink, g: UplinkGroup, f: FileUplink, nowSec: Long): Boolean {
+        if (f.id !in metaSent) {
+            val meta = UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_FILE_META, f.metaFrame, nowSec)
+            if (l.offerLocal(meta) is UplinkGateway.Decision.Accepted) metaSent.add(f.id)
+            return true
+        }
+        val done = symbolsSent[f.id] ?: 0
+        if (done >= f.symbolsWanted) return false
+        val symbols = f.nextSymbols(minOf(config.symbolsPerTick, f.symbolsWanted - done))
+        var accepted = 0
+        for (sym in symbols) {
+            val w = UplinkWrapper.wrap(g.rootKey, MeshFrameCodec.UPLINK_CLASS_FILE_SYMBOLS, sym, nowSec)
+            if (l.offerLocal(w) is UplinkGateway.Decision.Accepted) accepted++
+        }
+        symbolsSent[f.id] = done + accepted
+        return true
     }
 
     private suspend fun produceMailbox(l: UplinkLink, nowSec: Long) {
