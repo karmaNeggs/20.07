@@ -445,8 +445,8 @@ frames over Bluetooth and upload them; **not yet tried on phones**. Design and e
 
 ## Get the app
 
-**Prebuilt APK**: download the latest `.apk` from this repo's
-[**Releases**](https://github.com/karmaNeggs/20.07/releases/latest) page and install it —
+**Prebuilt APK**: [download 20.07 v0.10.1-dev (signed release)](https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk)
+(older builds are on the [Releases](https://github.com/karmaNeggs/20.07/releases) page) and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
 Releases page.) This is the signed **release** build (minified, no debug-only tooling). The newest build

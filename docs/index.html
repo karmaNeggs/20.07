@@ -3,42 +3,67 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>20.07 — offline mesh coordination</title>
-<meta name="description" content="20.07 is a free, open-source Android app that keeps your group connected when the network fails: Bluetooth mesh, live radar, SOS, photos, and an optional internet bridge. No accounts, no servers of ours, everything encrypted for your group.">
+<title>20.07: Offline Emergency Communication App for Android</title>
+<meta name="description" content="Free Android app for emergency communication with no signal or internet: Bluetooth mesh, live group radar, SOS and photos. For floods, disasters, rescue and crowds.">
+<meta name="keywords" content="offline communication app, emergency communication, disaster communication, flood emergency app, natural disaster app, search and rescue app, Bluetooth mesh network, no signal messaging, off-grid communication, SOS app, network congestion, stampede safety, festival no signal, open source Android">
+<meta name="robots" content="index,follow,max-image-preview:large">
 <meta name="theme-color" content="#000000">
-<meta property="og:title" content="20.07 — find your people when the network fails">
-<meta property="og:description" content="Bluetooth mesh with an optional internet bridge. Radar, SOS, photos. Encrypted for your group. No accounts.">
-<meta property="og:image" content="banner.png">
+<link rel="canonical" href="https://karmaneggs.github.io/20.07/">
 <link rel="icon" href="banner.png">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="20.07">
+<meta property="og:title" content="20.07: stay connected when the network fails">
+<meta property="og:description" content="Offline emergency communication for your group: Bluetooth mesh, live radar, SOS, photos, optional internet bridge. Free, open source, no accounts.">
+<meta property="og:url" content="https://karmaneggs.github.io/20.07/">
+<meta property="og:image" content="https://karmaneggs.github.io/20.07/banner.png">
+<meta property="og:image:alt" content="20.07 logo: a location pin with a signal trace">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="20.07: offline emergency communication for Android">
+<meta name="twitter:description" content="Find your group, call for help and share photos with no signal. Bluetooth mesh with an optional internet bridge.">
+<meta name="twitter:image" content="https://karmaneggs.github.io/20.07/banner.png">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"SoftwareApplication","name":"20.07","alternateName":"20.07 offline emergency communication","applicationCategory":"CommunicationApplication","operatingSystem":"Android 8.0 or later","description":"Free open-source Android app for emergency and offline communication: Bluetooth mesh, live group radar, SOS, photo and file sharing, and an optional internet bridge for when the network fails (floods, natural disasters, rescue operations, crowds, congestion).","url":"https://karmaneggs.github.io/20.07/","downloadUrl":"https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk","softwareVersion":"0.10.1-dev","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"image":"https://karmaneggs.github.io/20.07/banner.png","codeRepository":"https://github.com/karmaNeggs/20.07","featureList":["Works with no cell signal or internet","Bluetooth mesh relays between phones","Live radar to your group","SOS alert that goes first","Photo and file sharing","Optional internet bridge via public relays","End-to-end encrypted for your group","No accounts, no servers of ours"]}
+</script>
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
+{"@type":"Question","name":"How can I communicate during a flood or natural disaster when phone networks are down?","acceptedAnswer":{"@type":"Answer","text":"20.07 lets phones in your group talk to each other directly over Bluetooth, hopping from phone to phone, with no cell tower, SIM or internet. You can see where your group is on a live radar, send messages and SOS alerts, and share photos."}},
+{"@type":"Question","name":"Does 20.07 work without internet or mobile signal?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Bluetooth mesh needs no internet and no signal. An optional, off-by-default Internet reach switch lets any phone that has a connection carry your group's encrypted messages further, even to phones with Bluetooth off."}},
+{"@type":"Question","name":"What happens when the mobile network is congested at a festival, stadium or rally?","acceptedAnswer":{"@type":"Answer","text":"Because phones relay for each other over Bluetooth, your group stays connected even when too many people overload the cell tower. SOS alerts are prioritised and the app slows its own background traffic under load."}},
+{"@type":"Question","name":"Is 20.07 private and secure?","acceptedAnswer":{"@type":"Answer","text":"Everything is encrypted with a key only your group holds. There are no accounts and no servers of ours. Positions live in memory only. If you turn on Internet reach, public relays can see your phone's internet address, message sizes and timing, but not content."}},
+{"@type":"Question","name":"Is it free? How do I install it?","acceptedAnswer":{"@type":"Answer","text":"It is free and open source (MIT). It is not on the Play Store: download the signed APK from the 20.07 website or GitHub, allow installs from that source once, and share the file with friends offline."}},
+{"@type":"Question","name":"How many people can use it together?","acceptedAnswer":{"@type":"Answer","text":"A group is designed for a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour has been tested in simulation up to 10,000 users, not yet in the field."}}
+]}
+</script>
 <style>
-  :root{--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86;--green-d:#3fbf55;--red:#ff4d4d}
-  @media (prefers-color-scheme:light){:root{--bg:#f4faf5;--panel:#fff;--line:#d3e6d8;--ink:#0d1a10;--muted:#53705a;--green:#1f9d3a;--green-d:#157a2b}}
+  :root{--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86}
+  @media (prefers-color-scheme:light){:root{--bg:#f4faf5;--panel:#fff;--line:#d3e6d8;--ink:#0d1a10;--muted:#53705a;--green:#1f9d3a}}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  .wrap{max-width:960px;margin:0 auto;padding:0 20px}
-  header.hero{text-align:center;padding:48px 0 24px}
-  header.hero img{width:min(100%,300px);height:auto;border-radius:20px}
-  h1{font-size:clamp(28px,5vw,44px);line-height:1.15;margin:20px 0 8px}
+  .wrap{max-width:980px;margin:0 auto;padding:0 20px}
+  header.hero{text-align:center;padding:44px 0 24px}
+  header.hero img{width:min(100%,280px);height:auto;border-radius:20px}
+  h1{font-size:clamp(26px,5vw,42px);line-height:1.15;margin:20px 0 10px}
   h1 span{color:var(--green)}
-  .lead{max-width:640px;margin:0 auto;color:var(--muted);font-size:18px}
-  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:28px 0 8px}
+  .lead{max-width:720px;margin:0 auto;color:var(--muted);font-size:18px}
+  .cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap;margin:26px 0 8px}
   .btn{display:inline-block;padding:12px 22px;border-radius:999px;text-decoration:none;font-weight:600}
   .btn.primary{background:var(--green);color:#03150a}
   .btn.ghost{border:1px solid var(--line);color:var(--ink)}
-  .badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:18px}
+  .badges{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:16px}
   .badge{font-size:13px;padding:4px 12px;border:1px solid var(--line);border-radius:999px;color:var(--muted)}
   section{padding:36px 0;border-top:1px solid var(--line)}
-  h2{font-size:26px;margin:0 0 16px}
-  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px}
+  h2{font-size:26px;margin:0 0 8px}
+  .sub{color:var(--muted);margin:0 0 18px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px}
   .card h3{margin:0 0 6px;font-size:17px;color:var(--green)}
   .card p{margin:0;color:var(--muted);font-size:15px}
-  .steps{counter-reset:s;display:grid;gap:12px}
+  .steps{display:grid;gap:12px;counter-reset:s}
   .step{counter-increment:s;display:flex;gap:14px;align-items:flex-start}
   .step:before{content:counter(s);flex:none;width:32px;height:32px;border-radius:50%;background:var(--green);color:#03150a;font-weight:700;display:grid;place-items:center}
-  .note{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--green);border-radius:12px;padding:14px 18px;color:var(--muted)}
-  .warn{border-left-color:var(--red)}
-  ul{padding-left:20px} li{margin:6px 0}
+  details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:10px 0}
+  summary{cursor:pointer;font-weight:600} details p{color:var(--muted);margin:10px 0 0}
+  code{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px}
   footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
   a{color:var(--green)}
 </style>
@@ -46,11 +71,11 @@
 <body>
 <div class="wrap">
   <header class="hero">
-    <img src="banner.png" alt="20.07 logo: a location pin with a signal trace">
-    <h1>Find your people <span>when the network fails.</span></h1>
-    <p class="lead">20.07 keeps a group connected with no signal at all: phones relay for each other over Bluetooth, and an optional internet bridge carries your group further, even with Bluetooth off. Free, open source, no accounts.</p>
+    <img src="banner.png" alt="20.07 logo: a location pin with a signal trace" width="280" height="268">
+    <h1>Offline emergency communication <span>for when the network fails.</span></h1>
+    <p class="lead">Find your group, call for help and share photos with <strong>no cell signal and no internet</strong>. Phones relay for each other over Bluetooth, and an optional internet bridge carries your group further, even with Bluetooth off. Free, open source, no accounts.</p>
     <div class="cta">
-      <a class="btn primary" href="https://github.com/karmaNeggs/20.07/releases/latest">Download the APK</a>
+      <a class="btn primary" href="https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk">Download the APK (v0.10.1)</a>
       <a class="btn ghost" href="https://github.com/karmaNeggs/20.07">Source on GitHub</a>
       <a class="btn ghost" href="privacy.html">Privacy</a>
     </div>
@@ -60,46 +85,73 @@
     </div>
   </header>
 
-  <section>
-    <h2>What you get</h2>
+  <section id="why">
+    <h2>Built for when networks fail</h2>
+    <p class="sub">Cellular networks assume normal conditions. They break down in a recurring set of situations, whether the network is overloaded by too many people or there was never much of it. In each case the same needs return: find your group, call for help, get proof of what is happening out.</p>
     <div class="grid">
-      <div class="card"><h3>Live radar</h3><p>See which way, and how far, your group is. Works on Bluetooth alone, with a hot/cold fallback if you decline location.</p></div>
-      <div class="card"><h3>SOS that goes first</h3><p>A flagged SOS jumps the queue on every path: Bluetooth and internet. Quiet messages and a loud alert are separate on purpose.</p></div>
-      <div class="card"><h3>Last seen</h3><p>A mate who dropped out shows as "Priya, 14 min ago, 3.2 km NE" for up to six hours. Held in memory only.</p></div>
-      <div class="card"><h3>Photos and files</h3><p>Share incident photos and files up to 400 KB. They hop over Bluetooth and, if you allow it, over the internet.</p></div>
-      <div class="card"><h3>Internet reach <small>(optional)</small></h3><p>One switch. A phone with Wi-Fi or mobile data carries your group's encrypted traffic to mates out of Bluetooth range. Off by default.</p></div>
+      <div class="card"><h3>Floods and natural disasters</h3><p>Floods, earthquakes, cyclones, landslides and wildfires take towers and power down first. Keep your family or team in contact when the usual networks are gone.</p></div>
+      <div class="card"><h3>Emergency rescue and response</h3><p>Volunteers, search-and-rescue teams and neighbourhood responders can see each other on a live radar and raise an SOS that is relayed ahead of everything else.</p></div>
+      <div class="card"><h3>Network congestion</h3><p>Festivals, stadiums, rallies and pilgrimages overload a single cell tower. Phone-to-phone relaying keeps a group connected when the network is full.</p></div>
+      <div class="card"><h3>Stampedes and crowd crush</h3><p>In a dense crowd you lose people in seconds. Walk toward the dot instead of reading a map, and call for help that hops phone to phone.</p></div>
+      <div class="card"><h3>Blackouts and remote areas</h3><p>Power cuts, hiking, camping and expeditions with no towers nearby: offline communication that needs no SIM, no data plan and no infrastructure.</p></div>
+      <div class="card"><h3>Jammed or untrusted networks</h3><p>Where networks are throttled, jammed or not trusted, there is no account to block and no central server to switch off.</p></div>
+    </div>
+  </section>
+
+  <section id="features">
+    <h2>What you get</h2>
+    <p class="sub">Three core tools, plus an optional bridge when any phone has a connection.</p>
+    <div class="grid">
+      <div class="card"><h3>Live group radar</h3><p>A radar of your group around you: walk toward the dot. Works on Bluetooth alone, with a hot/cold fallback if you decline location.</p></div>
+      <div class="card"><h3>SOS that goes first</h3><p>An authenticated distress alert that hops from phone to phone, with distance shown in hops, and is sent ahead of all other traffic.</p></div>
+      <div class="card"><h3>Photos and files</h3><p>Encrypted incident photos and files up to 400 KB relay across the mesh, so proof does not live on just one phone.</p></div>
+      <div class="card"><h3>Last seen</h3><p>A mate who dropped out shows as "name, 14 min ago, 3.2 km NE" for up to six hours, held in memory only.</p></div>
+      <div class="card"><h3>Internet reach (optional)</h3><p>One off-by-default switch. A phone with Wi-Fi or mobile data carries your group's encrypted traffic to mates out of Bluetooth range, even with Bluetooth off.</p></div>
       <div class="card"><h3>Stranger carrying</h3><p>Phones outside your group, with the switch on, can carry your sealed frames onward. They see sizes and timing, never content.</p></div>
     </div>
   </section>
 
-  <section>
-    <h2>How it works</h2>
+  <section id="how">
+    <h2>How offline communication works here</h2>
     <div class="steps">
-      <div class="step"><div><strong>Make a group.</strong> One code or QR creates a random key. Share it in person; the app never brokers trust.</div></div>
-      <div class="step"><div><strong>Phones relay for each other.</strong> Bluetooth links form a mesh; positions, messages, SOS and photos hop between members.</div></div>
+      <div class="step"><div><strong>Make a group.</strong> One QR code or link creates a random key. Share it in person; the app never brokers trust.</div></div>
+      <div class="step"><div><strong>Phones relay for each other.</strong> Bluetooth links form a mesh. Positions, messages, SOS and photos hop between phones, with no tower in the loop.</div></div>
       <div class="step"><div><strong>Out of range? The bridge.</strong> With Internet reach on, any phone that has a connection sends and receives for the group through public relays, so two phones with Bluetooth off can still talk.</div></div>
     </div>
   </section>
 
-  <section>
-    <h2>Safety and privacy, plainly</h2>
-    <ul>
-      <li>Everything is sealed with your group's key before it leaves the phone. Relays and carriers can't read it.</li>
-      <li>Relays do see your phone's internet address, message sizes and timing, and a short rotating group code. Some relays keep what they receive: positions up to 6 hours, messages up to 7 days.</li>
-      <li>Built to avoid clogging servers in a crowd: SOS first, files last, slow-downs under congestion, per-hour limits. Tested in simulation up to 10,000 users.</li>
-      <li>No account, no phone number, no servers of ours; nothing is sent to us. A seized phone holds no location history.</li>
-    </ul>
-    <p class="note warn">Honest status: pre-1.0 (0.10.1-dev). The internet bridge works on two phones with Bluetooth off and in simulation; three-phone and large-crowd field tests are still to do. Don't rely on it as your only safety device. <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">Known limitations</a>.</p>
+  <section id="design">
+    <h2>Design choices</h2>
+    <div class="grid">
+      <div class="card"><h3>No accounts, ever</h3><p>One QR code creates a group. No owner is tied to it: removing one person does not expose or kill the group.</p></div>
+      <div class="card"><h3>Blind relay by design</h3><p>Every phone, even ones outside your group, can carry your traffic that is architecturally opaque to them, not just "encrypted so please don't look".</p></div>
+      <div class="card"><h3>The radio ID rotates</h3><p>Your Bluetooth advertising ID changes every 60 seconds, so passive scanning sees a changing, meaningless value.</p></div>
+      <div class="card"><h3>GPS never touches disk</h3><p>Positions live in memory only and are gone when the app is force-quit.</p></div>
+      <div class="card"><h3>Built for crowds</h3><p>SOS first, files last, slow-down under congestion and per-hour limits protect relays. Simulated up to 10,000 users.</p></div>
+      <div class="card"><h3>The app can disguise itself</h3><p>One switch shows the home-screen icon and notification as a plain utility app instead.</p></div>
+    </div>
   </section>
 
-  <section>
-    <h2>Install</h2>
-    <p>There is no Play Store build: download the signed APK from <a href="https://github.com/karmaNeggs/20.07/releases/latest">GitHub Releases</a>, open it, and allow installs from that source once. Share the same file with friends, offline, by any means. <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#get-the-app">Details and building from source</a>.</p>
+  <section id="faq">
+    <h2>Questions</h2>
+    <details><summary>How can I communicate during a flood or natural disaster when networks are down?</summary><p>20.07 lets phones in your group talk directly over Bluetooth, hopping from phone to phone with no cell tower, SIM or internet. You get a live radar of your group, messages, SOS alerts and photo sharing.</p></details>
+    <details><summary>Does it work without internet or mobile signal?</summary><p>Yes. The Bluetooth mesh needs neither. The optional Internet reach switch lets any phone that has a connection carry your group's encrypted messages further.</p></details>
+    <details><summary>What about network congestion at a festival, stadium or rally?</summary><p>Phones relay for each other, so your group stays connected when the tower is overloaded. SOS alerts are sent first, and the app slows its own background traffic under load.</p></details>
+    <details><summary>Is it private and secure?</summary><p>Everything is encrypted with a key only your group holds; there are no accounts and no servers of ours. With Internet reach on, public relays can see your phone's internet address, message sizes and timing, but not content. Read the <a href="privacy.html">privacy policy</a>.</p></details>
+    <details><summary>Is it free? How do I install it?</summary><p>Free and open source (MIT). Not on the Play Store: download the signed APK above, allow installs from that source once, and share the file with friends offline.</p></details>
+    <details><summary>How many people can use it together?</summary><p>A group suits a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour is tested in simulation, not yet in the field. See the <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">known limitations</a>.</p></details>
+  </section>
+
+  <section id="install">
+    <h2>Install and build</h2>
+    <p><a href="https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk">Download 20.07 v0.10.1 (signed APK)</a>, open it, and allow installs from that source once in Android settings. Needs Android 8.0 or later. Details: <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#get-the-app">README</a>.</p>
+    <p>Build it yourself: <code>git clone</code> the repo, then from <code>20.07/android/</code> run <code>./gradlew assembleDebug</code>. Needs JDK 17 and the Android SDK.</p>
   </section>
 
   <footer>
-    20.07 · MIT licensed · <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md">README</a> ·
-    <a href="privacy.html">Privacy</a> · <a href="https://github.com/karmaNeggs">karmaNeggs</a>
+    20.07 · MIT licensed · maintained by <a href="https://github.com/karmaNeggs">karmaNeggs</a> ·
+    <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md">README</a> · <a href="privacy.html">Privacy Policy</a> ·
+    <a href="https://github.com/karmaNeggs/20.07/issues">Issues and PRs welcome</a>
   </footer>
 </div>
 </body>
