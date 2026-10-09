@@ -118,6 +118,7 @@ class UplinkGateway(
     private var downCount = 0
 
     /** Records that a member's beacon with this 60 s tag was scanned nearby (a priority hint only). */
+    @Synchronized
     fun noteBeaconSeen(tag: ByteArray) {
         val h = hex(tag)
         seenTags.remove(h)
@@ -125,6 +126,7 @@ class UplinkGateway(
         if (seenTags.size > SEEN_TAGS_MAX) seenTags.remove(seenTags.keys.first())
     }
 
+    @Synchronized
     fun offer(frame: MeshFrameCodec.Frame.Uplink): Decision {
         val tagHex = hex(frame.relayTag)
         val key = dedupKey(frame)
@@ -142,6 +144,7 @@ class UplinkGateway(
     }
 
     /** Batches ready to publish now, at most [maxBatches], within this hour's remaining budget. */
+    @Synchronized
     fun drain(maxBatches: Int = Int.MAX_VALUE, includeBulk: Boolean = true): List<Batch> {
         expire()
         resetBudgetIfNeeded()
@@ -163,6 +166,7 @@ class UplinkGateway(
     }
 
     /** Puts a batch whose publish failed back, and refunds its budget. Never re-checks dedup or rate. */
+    @Synchronized
     fun requeue(batch: Batch) {
         // Refund only if the batch was charged in the CURRENT budget window; an older one already reset with it.
         if (batch.drainedAtMs >= budgetWindowStartMs) {
@@ -180,6 +184,7 @@ class UplinkGateway(
      * already seen (including this gateway's own published frames echoing back, and the same event
      * arriving from several relays), or oversize. Returned frames carry `UPLINK_FLAG_FROM_INTERNET`.
      */
+    @Synchronized
     fun onRelayBatch(content: ByteArray): List<ByteArray> {
         val t = now()
         if (t - downWindowStartMs >= MINUTE_MS) { downWindowStartMs = t; downCount = 0 }
@@ -206,6 +211,7 @@ class UplinkGateway(
      * A non-draining look at what is held, in drain priority order, as (key, encoded frame) pairs no larger than
      * [maxFrameBytes]: what a carrier hands to a Bluetooth neighbour so any phone with internet can upload it.
      */
+    @Synchronized
     fun heldFrames(maxFrames: Int, maxFrameBytes: Int): List<Pair<String, ByteArray>> {
         expire()
         val md = MessageDigest.getInstance("SHA-256")
@@ -217,9 +223,11 @@ class UplinkGateway(
     }
 
     /** True if any frame of class [cls] is waiting (used to let SOS alerts bypass the general publish backoff). */
+    @Synchronized
     fun hasPending(cls: Int): Boolean = queues.values.any { q -> q.any { it.cls == cls } }
 
     /** Frames currently held for upload (for tests and the UI notice). */
+    @Synchronized
     fun pendingCount(): Int = queues.values.sumOf { it.size }
 
     private fun admissionFailure(f: MeshFrameCodec.Frame.Uplink, tagHex: String, key: String): Reject? = when {

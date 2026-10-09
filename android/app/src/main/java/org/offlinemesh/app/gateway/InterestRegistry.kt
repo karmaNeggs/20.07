@@ -20,6 +20,7 @@ class InterestRegistry(
     private val entries = LinkedHashMap<String, Entry>()
     private val raw = HashMap<String, ByteArray>()
 
+    @Synchronized
     fun onHeard(frame: MeshFrameCodec.Frame.UplinkInterest) {
         val t = now()
         for (tag in frame.tags) {
@@ -35,12 +36,14 @@ class InterestRegistry(
     }
 
     /** Tags to subscribe to now. */
+    @Synchronized
     fun tags(): List<ByteArray> {
         expire()
         return entries.keys.mapNotNull { raw[it] }
     }
 
     /** Interest frames to pass on to a neighbour, with hop + 1. */
+    @Synchronized
     fun regossip(maxFrames: Int): List<ByteArray> {
         expire()
         val t = now()

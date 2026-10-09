@@ -97,7 +97,9 @@ class InternetReachController(
         val maxUplinkedIds: Int = MAX_UPLINKED_IDS,
     )
 
-    private var link: UplinkLink? = null
+    // Read from Bluetooth callback threads (held frames, frames handed to us) while the service loop
+    // starts and stops it.
+    @Volatile private var link: UplinkLink? = null
     private class Inbound(val cls: Int, val inner: ByteArray)
 
     private var inbound = Channel<Inbound>(Channel.UNLIMITED)

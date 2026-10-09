@@ -40,12 +40,16 @@ class UplinkBleBridge(
     override suspend fun framesToPush(peer: String, maxFrameBytes: Int): List<ByteArray> {
         if (!enabled() || !controller.running) return emptyList()
         val out = ArrayList<ByteArray>()
-        val sent = sentTo.getOrPut(peer) { LinkedHashSet() }
-        for ((key, encoded) in controller.heldFrames(HELD_PER_PUSH * SCAN_FACTOR, maxFrameBytes)) {
-            if (out.size >= HELD_PER_PUSH) break
-            if (sent.add(key)) out.add(encoded)
+        val held = controller.heldFrames(HELD_PER_PUSH * SCAN_FACTOR, maxFrameBytes)
+        // Called from Bluetooth callback threads: the per-neighbour memory is shared, so guard it.
+        synchronized(sentTo) {
+            val sent = sentTo.getOrPut(peer) { LinkedHashSet() }
+            for ((key, encoded) in held) {
+                if (out.size >= HELD_PER_PUSH) break
+                if (sent.add(key)) out.add(encoded)
+            }
+            while (sent.size > MAX_SENT_PER_PEER) sent.remove(sent.first())
         }
-        while (sent.size > MAX_SENT_PER_PEER) sent.remove(sent.first())
         controller.ownInterestTags().chunked(MeshFrameCodec.MAX_INTEREST_TAGS_PER_FRAME).take(OWN_INTEREST_FRAMES)
             .mapTo(out) { MeshFrameCodec.encodeUplinkInterest(0, it) }
         out.addAll(registry.regossip(REGOSSIP_FRAMES))
