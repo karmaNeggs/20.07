@@ -35,8 +35,7 @@
 ]}
 </script>
 <style>
-  :root{--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86}
-  @media (prefers-color-scheme:light){:root{--bg:#f4faf5;--panel:#fff;--line:#d3e6d8;--ink:#0d1a10;--muted:#53705a;--green:#1f9d3a}}
+  :root{color-scheme:dark;--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
   .wrap{max-width:980px;margin:0 auto;padding:0 20px}
@@ -66,6 +65,7 @@
   code{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px}
   footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
   a{color:var(--green)}
+  .diagram{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:16px;margin:8px 0 22px;background:#000}
 </style>
 </head>
 <body>
@@ -113,6 +113,7 @@
 
   <section id="how">
     <h2>How offline communication works here</h2>
+    <img class="diagram" src="mesh.svg" width="880" height="420" loading="lazy" alt="Diagram: phones in a group relay over Bluetooth; any phone with a connection bridges through public relays to a distant group that is out of Bluetooth range, even with Bluetooth off.">
     <div class="steps">
       <div class="step"><div><strong>Make a group.</strong> One QR code or link creates a random key. Share it in person; the app never brokers trust.</div></div>
       <div class="step"><div><strong>Phones relay for each other.</strong> Bluetooth links form a mesh. Positions, messages, SOS and photos hop between phones, with no tower in the loop.</div></div>

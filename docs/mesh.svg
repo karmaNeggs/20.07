@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="40 10 880 420" width="880" height="420" role="img" aria-labelledby="t d">
+  <title id="t">How 20.07 connects a group</title>
+  <desc id="d">Phones in a group relay over Bluetooth. One phone with a connection bridges through public relays to a distant group that is out of Bluetooth range.</desc>
+  <style>
+    .bg{fill:#000}
+    .g{stroke:#7dff86;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+    .dim{stroke:#7dff86;stroke-opacity:.32;fill:none;stroke-width:1.5}
+    .bt{stroke:#7dff86;stroke-opacity:.75;fill:none;stroke-width:2;stroke-dasharray:3 7;stroke-linecap:round;animation:flow 1.6s linear infinite}
+    .net{stroke:#7dff86;fill:none;stroke-width:2.5;stroke-linecap:round}
+    .t{font:600 24px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;fill:#eaf5ec;text-anchor:middle}
+    .s{font:400 18px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;fill:#8fa896;text-anchor:middle}
+    .fill{fill:#7dff86}
+    @keyframes flow{to{stroke-dashoffset:-20}}
+    @media (prefers-reduced-motion:reduce){.bt{animation:none}}
+  </style>
+  <defs>
+    <symbol id="phone" viewBox="-14 -24 28 48">
+      <rect x="-12" y="-22" width="24" height="44" rx="6" fill="#000" class="g"/>
+      <circle cx="0" cy="-4" r="4.5" class="g"/><circle cx="0" cy="-4" r="1.3" class="fill"/>
+      <path d="M0,0.5 L0,6" class="g" stroke-width="1.6"/>
+      <circle cx="0" cy="16" r="1.4" class="fill"/>
+    </symbol>
+    <g id="wifi" class="g"><path d="M-11,0 a15,15 0 0 1 22,0"/><path d="M-6,6 a8,8 0 0 1 12,0"/><circle cx="0" cy="12" r="1.8" class="fill" stroke="none"/></g>
+    <g id="relay" class="g"><rect x="-17" y="-10" width="34" height="20" rx="5" fill="#000"/><circle cx="-8" cy="0" r="1.8" class="fill" stroke="none"/><path d="M-1,0 L9,0"/></g>
+  </defs>
+  <rect class="bg" width="1000" height="440"/>
+
+  <!-- relays -->
+  <text class="t" x="500" y="36">public relays</text>
+  <text class="s" x="500" y="60">encrypted · optional</text>
+  <path class="dim" d="M452,100 L500,82 L548,100"/>
+  <use href="#relay" x="452" y="100"/><use href="#relay" x="500" y="82"/><use href="#relay" x="548" y="100"/>
+
+  <!-- uplink / downlink -->
+  <path id="up" class="net" d="M300,236 C300,170 400,130 452,112"/>
+  <path id="down" class="net" d="M548,112 C600,130 700,170 700,236"/>
+  <circle r="3.6" class="fill"><animateMotion dur="3.2s" repeatCount="indefinite"><mpath href="#up"/></animateMotion></circle>
+  <circle r="3.6" class="fill"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite"><mpath href="#down"/></animateMotion></circle>
+
+  <!-- left group -->
+  <path class="bt" d="M90,330 L160,262"/><path class="bt" d="M160,262 L240,300"/><path class="bt" d="M90,330 L240,300"/>
+  <path class="bt" d="M240,300 L300,262"/>
+  <use href="#phone" x="76" y="306" width="28" height="48"/>
+  <use href="#phone" x="146" y="238" width="28" height="48"/>
+  <use href="#phone" x="226" y="276" width="28" height="48"/>
+  <!-- bridge left -->
+  <use href="#phone" x="286" y="238" width="28" height="48"/>
+  <use href="#wifi" x="300" y="222"/>
+
+  <!-- right group -->
+  <path class="bt" d="M700,262 L740,300"/><path class="bt" d="M740,300 L830,330"/><path class="bt" d="M740,300 L830,250"/><path class="bt" d="M830,250 L830,330"/>
+  <use href="#phone" x="686" y="238" width="28" height="48"/>
+  <use href="#wifi" x="700" y="222"/>
+  <use href="#phone" x="726" y="276" width="28" height="48"/>
+  <use href="#phone" x="816" y="226" width="28" height="48"/>
+  <use href="#phone" x="816" y="306" width="28" height="48"/>
+  <!-- Bluetooth-off phone, internet only -->
+  <path class="net" d="M548,112 C640,100 760,100 880,170" stroke-opacity=".5" stroke-dasharray="2 8"/>
+  <use href="#phone" x="866" y="170" width="28" height="48"/>
+  <use href="#wifi" x="880" y="154"/>
+
+  <!-- captions -->
+  <text class="t" x="165" y="388">Bluetooth mesh</text>
+  <text class="s" x="165" y="414">no signal needed</text>
+  <text class="t" x="500" y="296">any phone with a connection</text>
+  <text class="s" x="500" y="322">becomes the bridge</text>
+  <text class="t" x="765" y="388">your group, out of range</text>
+  <text class="s" x="765" y="414">even with Bluetooth off</text>
+</svg>
