@@ -131,7 +131,7 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 **Test 2c — Files and SOS priority (15 min)**
 - [ ] On A (Bluetooth only) send a small photo to the group. B should receive it over Bluetooth and relay it; C (Wi-Fi/mobile data only) should get a thumbnail within seconds and the full photo within a minute or two. Repeat from C towards A.
 - [ ] Do it once on mobile data and once on Wi-Fi. Both should work.
-- [ ] While a photo is still sending, press SEND SOS on C. A must show the SOS in a few seconds, not after the photo.
+- [ ] While a photo is still sending, press the amber SOS button (under Send) on C. A must show the SOS in a few seconds, not after the photo.
 - [ ] A file over 400 KB must not be sent over the internet (it still moves over Bluetooth). Note what the sender sees.
 - [ ] PASS = photo arrives intact on the far phone, and SOS overtakes the photo.
 

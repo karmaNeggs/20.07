@@ -12,7 +12,7 @@
 - **Diagnostics:** status changes and a relay/inbound summary every 30 s in the exported debug log.
 
 **Changed**
-- Chat input is two rows: attach, a wide message box and send on top, a full-width SEND SOS button below.
+- Chat input: attach, a wide message box and Send, with a compact amber SOS button under Send, so the message box keeps its width.
 - New launcher icon (green location pin on black) and website banner.
 - Target and compile SDK 36 (Google Play requirement). The experimental bitchat bridge probe was removed; superseded planning notes archived. Git history packed (701 MB to 34 MB), repo split into `android/` and `ios/`.
 - `README`, privacy page, whitepaper, `PLAY_STORE_LISTING.md`, `TESTING.md` and the website describe the optional internet feature. Play Data Safety answers still describe the Bluetooth-only app and must be redone before any Play submission.

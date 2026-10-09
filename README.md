@@ -17,7 +17,7 @@ there was never much of one there to begin with.
 - **"Last seen" list:** a mate who went quiet shows as name, minutes ago, distance and direction, for up to 6 hours, in memory only.
 - **Stranger carrying:** phones outside your group, with the switch on, can carry your sealed frames over Bluetooth and upload them.
 - **Built for crowds:** two relays per event chosen by hash, jittered timing, backoff, slow-down under congestion, bounded queues; simulated at 10,000 users.
-- **Chat input redesigned** (wide message box, big SEND SOS button), new icon, target SDK 36.
+- **Chat input redesigned** (wide message box, compact amber SOS button under Send), new icon, target SDK 36.
 
 Full list: [`CHANGELOG.md`](CHANGELOG.md). Design: `PLAN-v2.md` Part 13. Test plan: `TESTING.md`.
 

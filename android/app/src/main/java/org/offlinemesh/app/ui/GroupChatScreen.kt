@@ -233,7 +233,7 @@ fun GroupChatScreen(
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(start = 16.dp, end = 16.dp, top = 10.dp),
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
@@ -250,45 +250,45 @@ fun GroupChatScreen(
                     placeholder = { Text("Type a message") }
                 )
 
-                // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B
-                // hop-gradient/preview, just relayed and catalog-filter-synced like everything else.
-                Box(
-                    Modifier.size(44.dp).clip(CircleShape)
-                        .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
-                        .clickable(enabled = messageText.isNotBlank()) {
-                            scope.launch {
-                                meshService?.sendSos(groupId, messageText)
-                                messageText = ""
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) { Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send", tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted) }
-            }
-
-            // The dedicated alert action (isAlert = true) — decision 35: only this button feeds
-            // the SOS hop-gradient, the Tier B broadcast preview, and the loud notification.
-            // Deliberately its own always-Danger-tinted control (not a mode toggle on the same
-            // Send button) so raising a real SOS is never a matter of remembering to flip a
-            // setting mid-crisis. Dimmed (not hidden) while there is no text to send.
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp)
-                    .height(48.dp)
-                    .clip(RoundedCornerShape(24.dp))
-                    .background(AppColors.Danger.copy(alpha = if (messageText.isNotBlank()) 1f else 0.45f))
-                    .clickable(enabled = messageText.isNotBlank()) {
-                        scope.launch {
-                            meshService?.sendSos(groupId, messageText, isAlert = true)
-                            messageText = ""
-                        }
-                    },
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                Icon(Icons.Filled.Warning, contentDescription = null, tint = Color.White)
-                Spacer(Modifier.width(8.dp))
-                Text("SEND SOS", color = Color.White, style = MaterialTheme.typography.titleSmall)
+                // Right-hand column: the quiet Send circle on top, a small SOS pill under it.
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B
+                    // hop-gradient/preview, just relayed and catalog-filter-synced like everything else.
+                    Box(
+                        Modifier.size(44.dp).clip(CircleShape)
+                            .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
+                            .clickable(enabled = messageText.isNotBlank()) {
+                                scope.launch {
+                                    meshService?.sendSos(groupId, messageText)
+                                    messageText = ""
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Send, contentDescription = "Send",
+                            tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    // The dedicated alert action (isAlert = true) — decision 35: only this button feeds the SOS
+                    // hop-gradient, the Tier B broadcast preview and the loud notification. Deliberately its own
+                    // control (not a mode toggle on Send) so raising a real SOS is never a matter of remembering
+                    // to flip a setting mid-crisis. Dimmed (not hidden) while there is no text to send.
+                    Box(
+                        Modifier.height(30.dp).width(52.dp).clip(RoundedCornerShape(15.dp))
+                            .background(AppColors.Warning.copy(alpha = if (messageText.isNotBlank()) 1f else 0.4f))
+                            .clickable(enabled = messageText.isNotBlank()) {
+                                scope.launch {
+                                    meshService?.sendSos(groupId, messageText, isAlert = true)
+                                    messageText = ""
+                                }
+                            },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("SOS", color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                    }
+                }
             }
 
             TextButton(
