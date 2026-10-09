@@ -116,4 +116,4 @@ its own regardless. Uninstalling the app deletes everything.
 **Data collection required for app functionality?** Yes for location (radar) and Bluetooth
 (the entire mesh) — both are core to what the app does, not optional analytics.
 
-**Privacy Policy URL**: `https://karmaneggs.github.io/20.07/privacy.html`
+**Privacy Policy URL**: `https://rescue2007.com/privacy.html`

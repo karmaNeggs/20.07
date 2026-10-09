@@ -705,7 +705,7 @@ what's stale.
   confirmed via `aapt dump badging` before committing, not assumed. This is the FIRST APK containing
   decisions 31-35's work — nothing before this point was installable with it, and because of decision
   35's `VERSION` bump, no PRIOR test APK can talk to it. **GitHub Pages is still stale** (still serves
-  v0.6.3-dev at `https://karmaneggs.github.io/20.07/`) — that refresh is a separate, not-yet-done
+  v0.6.3-dev at `https://rescue2007.com/`) — that refresh is a separate, not-yet-done
   step; the in-tree APK is what's ready right now.
 - **Committed, on `main`, through `1e63778`** (the v0.7.3-dev version bump + debug APK; decisions
   31-35's own code+docs landed first as `5737c81`; decision 30's own checkpoint landed earlier as
@@ -3043,7 +3043,7 @@ CR-33's hardware round.
 
 ### Still needed — code/repo work (executable without a live Play Console session)
 - [x] **Privacy Policy page** — `docs/privacy.html`, live on GitHub Pages at
-      `https://karmaneggs.github.io/20.07/privacy.html`, linked from the main landing page footer.
+      `https://rescue2007.com/privacy.html`, linked from the main landing page footer.
       Written from README's Security Model/Permissions sections.
 - [x] **Play Store listing copy** — `PLAY_STORE_LISTING.md` (repo root, staging doc, not published
       itself). Short description (2 options, 75/73 chars, verified under the 80 limit) and full
