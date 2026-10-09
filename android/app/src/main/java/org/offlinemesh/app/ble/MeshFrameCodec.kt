@@ -122,6 +122,7 @@ object MeshFrameCodec {
      *  as the esi/k ceiling for [FountainCode]/[FountainDecoder] instead — same role, now sized
      *  against both memory AND decode time. */
     const val MAX_EVIDENCE_CHUNKS = 1024
+    private const val EVIDENCE_CHUNK_BYTES = 400
 
     /** Absolute ceiling on an SOS message's UTF-8 byte length. [writeStr16]/[readStr16] can
      *  represent up to 65535 bytes, but nothing upstream ever intends a message that large — this
@@ -1146,7 +1147,9 @@ object MeshFrameCodec {
                     val thumbnail = buf.readStr16Bytes()
                     if (thumbnail.size > MAX_THUMBNAIL_BYTES) return null
                     val contentLength = buf.int
-                    if (contentLength < 0) return null
+                    // A hostile header must not claim more than the fountain code can hold
+                    // (the decoder sizes an allocation by it).
+                    if (contentLength < 0 || contentLength > MAX_EVIDENCE_CHUNKS * EVIDENCE_CHUNK_BYTES) return null
                     Frame.EvidMeta(
                         id = id, handle = handle, senderId = senderId, timestamp = timestamp,
                         sha256 = bytesToHex(sha), totalChunks = totalChunks, mimeType = mimeType,
@@ -1180,7 +1183,8 @@ object MeshFrameCodec {
                     // Envelope only, since decision 38 (docs/DECISIONS.md) — see Frame.Nickname's
                     // own doc for why a receiver that can't resolve `handle` never stores this at all.
                     val handle = buf.readBlob() ?: return null
-                    val senderId = buf.readStr(); val username = buf.readStr()
+                    // The MAC covers only the first MAX_USERNAME_CHARS, so any longer tail is unauthenticated: drop it.
+                    val senderId = buf.readStr(); val username = buf.readStr().take(MAX_USERNAME_CHARS)
                     val updatedAt = buf.long; val mac = buf.readBlob()
                     val signature = buf.readBlob()
                     Frame.Nickname(handle, senderId, username, updatedAt, mac, signature)

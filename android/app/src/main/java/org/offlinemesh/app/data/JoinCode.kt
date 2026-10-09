@@ -64,7 +64,7 @@ object JoinCode {
 
     fun encode(parsed: Parsed): String {
         val idBytes = parsed.groupId.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-        val nameBytes = parsed.name.toByteArray(Charsets.UTF_8).copyOf(minOf(parsed.name.toByteArray().size, 255))
+        val nameBytes = utf8Prefix(parsed.name, 255)
         val buf = ByteBuffer.allocate(1 + GROUP_ID_LEN + KEY_LEN + EXPIRES_AT_LEN + 1 + nameBytes.size)
         buf.put(VERSION)
         buf.put(idBytes)
@@ -117,8 +117,22 @@ object JoinCode {
     /** Pulls the code back out whether the user pasted a raw code or a full mesh2007://join?c=... link. */
     fun extractCode(input: String): String {
         val trimmed = input.trim()
-        val marker = "c="
-        val idx = trimmed.indexOf(marker)
-        return if (idx >= 0) trimmed.substring(idx + marker.length) else trimmed
+        // The code is the value of a real `c=` parameter, ending at the next `&` or `#`: a tracking suffix
+        // or an earlier parameter that merely contains "c=" must not break joining.
+        val m = Regex("(?:^|[?&#])c=([^&#\\s]+)").find(trimmed)
+        return m?.groupValues?.get(1) ?: trimmed.substringAfter("c=", trimmed)
+    }
+
+    /** The longest prefix of [name] that fits in [maxBytes] UTF-8 bytes without cutting a character in half. */
+    private fun utf8Prefix(name: String, maxBytes: Int): ByteArray {
+        var bytes = 0
+        val out = StringBuilder()
+        for (cp in name.codePoints().toArray()) {
+            val piece = String(Character.toChars(cp))
+            val n = piece.toByteArray(Charsets.UTF_8).size
+            if (bytes + n > maxBytes) break
+            out.append(piece); bytes += n
+        }
+        return out.toString().toByteArray(Charsets.UTF_8)
     }
 }

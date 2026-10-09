@@ -36,7 +36,8 @@ class PublishBackoff(
 
     fun succeeded() { fails = 0; until = 0 }
 
-    fun blocked(now: Long): Boolean = now < until
+    // A clock stepped backwards must not turn a seconds-long wait into one as long as the step.
+    fun blocked(now: Long): Boolean = now < until && until - now <= maxMs * 2
 
     private companion object {
         const val BASE_MS = 1000L

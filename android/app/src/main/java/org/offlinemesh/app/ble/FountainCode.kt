@@ -210,7 +210,8 @@ class FountainDecoder(val k: Int, val symbolSize: Int, private val originalLengt
             val row = rows[i] ?: return null // defensive; unreachable when isComplete
             System.arraycopy(row.data, 0, out, i * symbolSize, symbolSize)
         }
-        return out.copyOf(originalLength)
+        // Clamp: a hostile header's length must not size an allocation (the decoded buffer is k * symbolSize at most).
+        return out.copyOf(originalLength.coerceIn(0, out.size))
     }
 
     private fun coeffsFor(esi: Int): BitSet =

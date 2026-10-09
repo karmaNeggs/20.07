@@ -4460,3 +4460,19 @@ goes to only 2 chosen by tag hash, so load per relay falls as the relay list gro
 relay, is the cheapest lever); (c) per-address awareness for shared carrier addresses; (d) a field test at 20 then 100 phones to
 replace the assumed relay capacities. None of the capacity numbers are measured on real relays.
 
+
+## 80. Breaker round: what was hardened and what is deliberately open (2026-10-09)
+
+Three independent blind reviewers attacked the app: wire and trust boundaries, orphaned flows and lifecycle, time/volume/concurrency. Their
+tests were kept (`breakera/`, `breakerb/`, `breakerc/`, `qc/`). Hardened in 0.10.1-dev: see the changelog entry.
+**Open, needing a wire-format change (so a `VERSION` bump that would cut older builds off), deferred:** the SOS and courier envelope id is not
+bound to the sealed body (an old captured SOS can be re-emitted under a fresh id); the evidence header ttl and handle are outside the MAC;
+evidence symbols are unauthenticated (a hostile neighbour can pre-empt genuine ones, a denial of service, caught by the final hash check);
+the presence public key is not covered by the MAC (the signature-before-pin check removes the pin-poisoning attack but the field is still
+unauthenticated); SOS and courier derive their nonce the same way (collision needs a chosen id); the blind relay's dedup key ignores the
+envelope, so a first bad copy can win. Also open and cheaper: a hostile member could lock another's nickname with a far-future timestamp;
+first-seen sender ids are not rotating; the older Bluetooth classes (hop tracker, dedup cache, connection tracker, trickle timer, opaque
+relay) stall for the length of a backwards clock step and have no size caps on a few maps; power saver does not slow Internet reach;
+a group that expired stays visible up to 30 minutes until the next sweep; manual group delete leaves evidence files until the next sweep;
+the Play-variant decoy notification labels. Unverified on device: foreground-service start from a background restart at targetSdk 36.
+

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>20.07: Offline Emergency Communication App for Android</title>
 <meta name="description" content="Free Android app for emergency communication with no signal or internet: Bluetooth mesh, live group radar, SOS and photos. For floods, disasters, rescue and crowds.">
-<meta name="keywords" content="offline communication app, emergency communication, disaster communication, flood emergency app, natural disaster app, search and rescue app, Bluetooth mesh network, no signal messaging, off-grid communication, SOS app, network congestion, stampede safety, festival no signal, open source Android">
+<meta name="keywords" content="offline communication app, emergency communication, disaster communication, flood emergency app, natural disaster app, search and rescue app, Bluetooth mesh network, no signal messaging, off-grid communication, SOS app, network congestion, stampede safety, festival no signal, open source Android, bitchat alternative, Bluetooth mesh chat alternative, group radar, find friends without signal">
 <meta name="robots" content="index,follow,max-image-preview:large">
 <meta name="theme-color" content="#000000">
 <link rel="canonical" href="https://karmaneggs.github.io/20.07/">
@@ -25,14 +25,7 @@
 {"@context":"https://schema.org","@type":"SoftwareApplication","name":"20.07","alternateName":"20.07 offline emergency communication","applicationCategory":"CommunicationApplication","operatingSystem":"Android 8.0 or later","description":"Free open-source Android app for emergency and offline communication: Bluetooth mesh, live group radar, SOS, photo and file sharing, and an optional internet bridge for when the network fails (floods, natural disasters, rescue operations, crowds, congestion).","url":"https://karmaneggs.github.io/20.07/","downloadUrl":"https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk","softwareVersion":"0.10.1-dev","license":"https://opensource.org/licenses/MIT","isAccessibleForFree":true,"offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"image":"https://karmaneggs.github.io/20.07/banner.png","codeRepository":"https://github.com/karmaNeggs/20.07","featureList":["Works with no cell signal or internet","Bluetooth mesh relays between phones","Live radar to your group","SOS alert that goes first","Photo and file sharing","Optional internet bridge via public relays","End-to-end encrypted for your group","No accounts, no servers of ours"]}
 </script>
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[
-{"@type":"Question","name":"How can I communicate during a flood or natural disaster when phone networks are down?","acceptedAnswer":{"@type":"Answer","text":"20.07 lets phones in your group talk to each other directly over Bluetooth, hopping from phone to phone, with no cell tower, SIM or internet. You can see where your group is on a live radar, send messages and SOS alerts, and share photos."}},
-{"@type":"Question","name":"Does 20.07 work without internet or mobile signal?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Bluetooth mesh needs no internet and no signal. An optional, off-by-default Internet reach switch lets any phone that has a connection carry your group's encrypted messages further, even to phones with Bluetooth off."}},
-{"@type":"Question","name":"What happens when the mobile network is congested at a festival, stadium or rally?","acceptedAnswer":{"@type":"Answer","text":"Because phones relay for each other over Bluetooth, your group stays connected even when too many people overload the cell tower. SOS alerts are prioritised and the app slows its own background traffic under load."}},
-{"@type":"Question","name":"Is 20.07 private and secure?","acceptedAnswer":{"@type":"Answer","text":"Everything is encrypted with a key only your group holds. There are no accounts and no servers of ours. Positions live in memory only. If you turn on Internet reach, public relays can see your phone's internet address, message sizes and timing, but not content."}},
-{"@type":"Question","name":"Is it free? How do I install it?","acceptedAnswer":{"@type":"Answer","text":"It is free and open source (MIT). It is not on the Play Store: download the signed APK from the 20.07 website or GitHub, allow installs from that source once, and share the file with friends offline."}},
-{"@type":"Question","name":"How many people can use it together?","acceptedAnswer":{"@type":"Answer","text":"A group is designed for a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour has been tested in simulation up to 10,000 users, not yet in the field."}}
-]}
+{"@context":"https://schema.org","@type":"FAQPage","mainEntity":[{"@type":"Question","name":"How can I communicate during a flood or natural disaster when phone networks are down?","acceptedAnswer":{"@type":"Answer","text":"20.07 lets phones in your group talk to each other directly over Bluetooth, hopping from phone to phone, with no cell tower, SIM or internet. You can see where your group is on a live radar, send messages and SOS alerts, and share photos."}},{"@type":"Question","name":"Does 20.07 work without internet or mobile signal?","acceptedAnswer":{"@type":"Answer","text":"Yes. The Bluetooth mesh needs no internet and no signal. An optional, off-by-default Internet reach switch lets any phone that has a connection carry your group's encrypted messages further, even to phones with Bluetooth off."}},{"@type":"Question","name":"What happens when the mobile network is congested at a festival, stadium or rally?","acceptedAnswer":{"@type":"Answer","text":"Because phones relay for each other over Bluetooth, your group stays connected even when too many people overload the cell tower. SOS alerts are prioritised and the app slows its own background traffic under load."}},{"@type":"Question","name":"Is 20.07 private and secure?","acceptedAnswer":{"@type":"Answer","text":"Everything is encrypted with a key only your group holds. There are no accounts and no servers of ours. Positions live in memory only. If you turn on Internet reach, public relays can see your phone's internet address, message sizes and timing, but not content."}},{"@type":"Question","name":"Is it free? How do I install it?","acceptedAnswer":{"@type":"Answer","text":"It is free and open source (MIT). It is not on the Play Store: download the signed APK from the 20.07 website or GitHub, allow installs from that source once, and share the file with friends offline."}},{"@type":"Question","name":"How many people can use it together?","acceptedAnswer":{"@type":"Answer","text":"A group is designed for a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour has been tested in simulation up to 10,000 users, not yet in the field."}},{"@type":"Question","name":"How is 20.07 different from bitchat?","acceptedAnswer":{"@type":"Answer","text":"Both are open-source Bluetooth mesh apps with no accounts. 20.07 adapts routing ideas from bitchat's public design (hop limits, de-duplication, jitter, store-and-forward couriers) but applies them to keeping a private group together and safe: a live radar to find your people, SOS sent first, photos and files, a last-seen list, group-key encryption with rotating radio IDs, and an optional internet bridge. It is independent and not affiliated with bitchat."}},{"@type":"Question","name":"Is 20.07 compatible with bitchat?","acceptedAnswer":{"@type":"Answer","text":"No. The apps use different wire formats and service IDs and cannot talk to each other."}}]}
 </script>
 <style>
   :root{color-scheme:dark;--bg:#000;--panel:#0b0f0c;--line:#16231a;--ink:#eaf5ec;--muted:#8fa896;--green:#7dff86}
@@ -63,6 +56,9 @@
   details{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 16px;margin:10px 0}
   summary{cursor:pointer;font-weight:600} details p{color:var(--muted);margin:10px 0 0}
   code{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:14px}
+  .split{display:grid;grid-template-columns:minmax(0,420px) 1fr;gap:28px;align-items:center}
+  .sq{margin:0;max-width:420px}
+  @media (max-width:720px){.split{grid-template-columns:1fr}.sq{margin:0 auto}}
   footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
   a{color:var(--green)}
   .diagram{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:16px;margin:8px 0 22px;background:#000}
@@ -121,6 +117,23 @@
     </div>
   </section>
 
+  <section id="radar">
+    <h2>The radar: walk toward the dot</h2>
+    <p class="sub">No map to read and no signal to find. Your compass and GPS place everyone in your group around you.</p>
+    <div class="split">
+      <img class="diagram sq" src="radar.svg" width="440" height="440" loading="lazy" alt="The 20.07 radar: you at the centre, group members as dots showing direction and distance, a fainter dot for an older position, and north marked at the top.">
+      <div>
+        <ul>
+          <li><strong>Direction and distance.</strong> Each dot sits where that person is, relative to the way you are facing. Rings show how far.</li>
+          <li><strong>Age you can see.</strong> A dot fades as its position gets old, so an old fix never looks like a live one.</li>
+          <li><strong>Last seen.</strong> People who dropped out move to a list: name, minutes ago, distance and direction.</li>
+          <li><strong>Always oriented.</strong> A north marker on the edge keeps you oriented as you turn.</li>
+          <li><strong>Private.</strong> Positions are encrypted for your group and live in memory only.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
   <section id="design">
     <h2>Design choices</h2>
     <div class="grid">
@@ -133,6 +146,11 @@
     </div>
   </section>
 
+  <section id="inspired">
+    <h2>Inspired by bitchat, built for a different job</h2>
+    <p class="sub">20.07 adapts routing ideas from the public design of <a href="https://github.com/permissionlesstech/bitchat">bitchat</a>, an open-source Bluetooth mesh chat app: forward-first flooding with a hop limit, de-duplication, relay jitter and store-and-forward couriers. We applied them to a different use case, keeping a group together and safe when networks fail, and changed them to fit: our own wire format, our own rotating radio IDs, our own group-key encryption, and a live radar. It is independent and not affiliated with or endorsed by bitchat or its authors.</p>
+  </section>
+
   <section id="faq">
     <h2>Questions</h2>
     <details><summary>How can I communicate during a flood or natural disaster when networks are down?</summary><p>20.07 lets phones in your group talk directly over Bluetooth, hopping from phone to phone with no cell tower, SIM or internet. You get a live radar of your group, messages, SOS alerts and photo sharing.</p></details>
@@ -141,6 +159,8 @@
     <details><summary>Is it private and secure?</summary><p>Everything is encrypted with a key only your group holds; there are no accounts and no servers of ours. With Internet reach on, public relays can see your phone's internet address, message sizes and timing, but not content. Read the <a href="privacy.html">privacy policy</a>.</p></details>
     <details><summary>Is it free? How do I install it?</summary><p>Free and open source (MIT). Not on the Play Store: download the signed APK above, allow installs from that source once, and share the file with friends offline.</p></details>
     <details><summary>How many people can use it together?</summary><p>A group suits a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour is tested in simulation, not yet in the field. See the <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">known limitations</a>.</p></details>
+      <details><summary>How is 20.07 different from bitchat?</summary><p><strong>The same ideas:</strong> a Bluetooth mesh where every phone relays, no accounts or phone numbers, open source, and routing ideas such as hop limits, de-duplication, jitter and store-and-forward couriers, plus padding message sizes. <strong>What differs:</strong> bitchat is a chat app; 20.07 is for keeping a private group together and safe. It adds a live radar to find your people, an SOS that is sent ahead of everything else, photos and files, a "last seen" list, and an optional internet bridge (through public relays) so phones with Bluetooth off or out of range can still be reached. Groups are private: a random shared key from a QR code, with rotating radio IDs instead of public identities.</p></details>
+    <details><summary>Is 20.07 compatible with bitchat?</summary><p>No. The two apps use different wire formats and service IDs, so they cannot talk to each other. 20.07 borrows design ideas, not the protocol, and is not affiliated with bitchat.</p></details>
   </section>
 
   <section id="install">

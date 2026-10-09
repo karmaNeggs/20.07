@@ -88,7 +88,10 @@ class MainActivity : ComponentActivity() {
             }
         }.toTypedArray()
 
-    private fun hasAllPermissions(): Boolean = requiredPermissions.all {
+    // Notifications are requested but never block the app: Internet reach and SOS must work without them.
+    private fun hasAllPermissions(): Boolean = requiredPermissions.filter {
+        it != android.Manifest.permission.POST_NOTIFICATIONS
+    }.all {
         ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
 

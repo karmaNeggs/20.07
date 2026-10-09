@@ -69,11 +69,16 @@ class RelayResponderSenderIdentityTest {
     // ---------- signatureCheckPasses ----------
 
     @Test
-    fun `no signature at all is tolerated regardless of a pinned key`() {
+    fun `an unsigned frame is rejected when the sender has a pinned key, and tolerated when none is pinned`() {
         val pinned = SenderIdentity.generateKeyPair()
-        assertTrue(
+        assertFalse(
             RelayResponder.signatureCheckPasses(
                 pinnedPublicKey = pinned.publicKey, signature = null, signedData = "data".toByteArray()
+            )
+        )
+        assertTrue(
+            RelayResponder.signatureCheckPasses(
+                pinnedPublicKey = null, signature = null, signedData = "data".toByteArray()
             )
         )
     }

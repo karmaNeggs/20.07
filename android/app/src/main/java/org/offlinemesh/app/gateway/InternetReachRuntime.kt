@@ -40,6 +40,10 @@ class InternetReachRuntime(
     val status: StateFlow<Status> = _status
     private var job: Job? = null
     private val registry = InterestRegistry()
+
+    // One gateway for the life of the service: frames held while the switch was off, offline or between links survive a
+    // stop/start instead of vanishing with the link while the controller still believes they were sent.
+    private val gateway = UplinkGateway(config = LOCAL_CONFIG)
     private var lastLoggedStatus: Status? = null
     private var lastSummaryAt = 0L
     private val inboundByClass = IntArray(INBOUND_CLASSES)
@@ -48,7 +52,7 @@ class InternetReachRuntime(
         source = ResponderUplinkSource(repo, responder),
         newLink = { inject ->
             NostrGatewayLink(
-                UplinkGateway(config = LOCAL_CONFIG), InternetReachSettings.DEFAULT_RELAYS,
+                gateway, InternetReachSettings.DEFAULT_RELAYS,
                 OkHttpRelayConnector(), keys, inject = inject,
             )
         },
@@ -64,7 +68,6 @@ class InternetReachRuntime(
     fun start() {
         if (job != null) return
         responder.uplinkHook = bridge
-        network.start()
         job = scope.launch {
             while (isActive) {
                 tickOnce()
@@ -84,6 +87,8 @@ class InternetReachRuntime(
 
     private suspend fun tickOnce() {
         val on = settings.enabled.value
+        // Watch connectivity only while the feature is on (nothing runs with the switch off).
+        if (on) network.start() else network.stop()
         val online = network.online.value
         // The app's own "Offline" mode silences every emitter, so it silences this one too.
         val allowed = meshActive.value

@@ -420,6 +420,8 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // absolute cap, the same one MeshFrameCodec.decode enforces on evidence-meta's totalChunks,
         // is the only bound on this path.
         if (esi !in 0 until MeshFrameCodec.MAX_EVIDENCE_CHUNKS) return false
+        // A symbol of the wrong size would be stored and then break every later decoder rebuild for this item.
+        if (data.size != CHUNK_SIZE) return false
         val seenId = "$evidenceId:$esi"
         if (seenDao.find(seenId) != null) return false
         seenDao.insert(SeenMessageEntity(seenId, System.currentTimeMillis()))

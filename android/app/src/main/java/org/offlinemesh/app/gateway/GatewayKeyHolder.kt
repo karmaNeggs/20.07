@@ -20,7 +20,8 @@ class GatewayKeyHolder(
 
     /** The key to sign with now, replacing it first if it has expired. */
     fun current(): ByteArray {
-        if (now() - createdAtMs >= lifetimeMs) {
+        val age = now() - createdAtMs
+        if (age < 0 || age >= lifetimeMs) {
             secret = newSecret()
             createdAtMs = now()
         }

@@ -158,7 +158,9 @@ class UplinkGateway(
                     { it.value.minOf { h -> h.createdAtSec } },
                 ),
             )
-        for ((key, queue) in order.take(maxBatches)) {
+        // Count only queues that produced a batch: ones whose first frame cannot fit the budget must not use up slots.
+        for ((key, queue) in order) {
+            if (batches.size >= maxBatches) break
             takeBatch(queue)?.let { batches.add(it) }
             if (queue.isEmpty()) queues.remove(key)
         }
@@ -187,7 +189,7 @@ class UplinkGateway(
     @Synchronized
     fun onRelayBatch(content: ByteArray): List<ByteArray> {
         val t = now()
-        if (t - downWindowStartMs >= MINUTE_MS) { downWindowStartMs = t; downCount = 0 }
+        if (t < downWindowStartMs || t - downWindowStartMs >= MINUTE_MS) { downWindowStartMs = t; downCount = 0 }
         val room = (config.maxDownlinkFramesPerMinute - downCount).coerceAtLeast(0)
         val frames = UplinkBatch.decode(content).take(minOf(config.maxDownlinkFramesPerEvent, room))
         downCount += frames.size
@@ -296,7 +298,8 @@ class UplinkGateway(
     }
 
     private fun resetBudgetIfNeeded() {
-        if (now() - budgetWindowStartMs >= HOUR_MS) {
+        val sinceReset = now() - budgetWindowStartMs
+        if (sinceReset < 0 || sinceReset >= HOUR_MS) {
             budgetWindowStartMs = now()
             budgetUsedBytes = 0
             bulkUsedBytes = 0
@@ -308,7 +311,9 @@ class UplinkGateway(
         if (rate.size > RATE_ENTRIES_MAX) rate.entries.removeAll { t - it.value.startMs > MINUTE_MS }
         if (rate.size > RATE_ENTRIES_MAX * RATE_HARD_CAP_FACTOR) rate.clear()
         val w = rate.getOrPut(tagHex) { RateWindow(t, 0) }
-        if (t - w.startMs >= MINUTE_MS) { w.startMs = t; w.count = 0 }
+        val elapsed = t - w.startMs
+        // A clock stepped backwards must not freeze the window (negative elapsed): treat it as a new one.
+        if (elapsed < 0 || elapsed >= MINUTE_MS) { w.startMs = t; w.count = 0 }
         w.count++
         return w.count > config.framesPerTagPerMinute
     }

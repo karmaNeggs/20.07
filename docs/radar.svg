@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 440 440" width="440" height="440" role="img" aria-labelledby="t d">
+  <title id="t">The 20.07 radar</title>
+  <desc id="d">A radar centred on you. Dots show where your group members are: direction and distance. A fainter dot is an older position. North is marked at the top edge.</desc>
+  <style>
+    .bg{fill:#000}
+    .ring{fill:none;stroke:#7dff86;stroke-opacity:.28;stroke-width:1.6}
+    .axis{stroke:#7dff86;stroke-opacity:.14;stroke-width:1.2}
+    .me{fill:#eaf5ec}
+    .cone{fill:#7dff86;fill-opacity:.12}
+    .dot{fill:#7dff86}
+    .old{fill:#7dff86;fill-opacity:.35}
+    .halo{fill:none;stroke:#7dff86;stroke-opacity:.35;stroke-width:1.6}
+    .n{fill:#7dff86}
+    .lbl{font:600 18px ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:#eaf5ec}
+    .sub{font:400 15px ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;fill:#8fa896}
+    .pulse{animation:pulse 2.4s ease-out infinite;transform-origin:318px 118px}
+    @keyframes pulse{0%{opacity:.7;transform:scale(.6)}100%{opacity:0;transform:scale(2)}}
+    @media (prefers-reduced-motion:reduce){.pulse{animation:none;opacity:0}}
+  </style>
+  <rect class="bg" width="440" height="440"/>
+  <!-- north marker, like the app: the arrow sits on the outer edge pointing outward -->
+  <path class="n" d="M220,16 L229,34 L211,34 Z"/>
+  <text class="sub" x="220" y="12" text-anchor="middle" style="font-size:13px">N</text>
+  <!-- rings and axes -->
+  <circle class="ring" cx="220" cy="230" r="70"/><circle class="ring" cx="220" cy="230" r="130"/><circle class="ring" cx="220" cy="230" r="190"/>
+  <path class="axis" d="M220,40 L220,420"/><path class="axis" d="M30,230 L410,230"/>
+  <!-- heading cone: the way you are facing -->
+  <path class="cone" d="M220,230 L168,92 A150,150 0 0 1 272,92 Z"/>
+  <!-- mates -->
+  <circle class="pulse dot" cx="318" cy="118" r="9" fill-opacity=".5"/>
+  <circle class="dot" cx="318" cy="118" r="9"/>
+  <text class="lbl" x="334" y="112">Priya</text><text class="sub" x="334" y="132">120 m</text>
+  <circle class="dot" cx="140" cy="186" r="8"/>
+  <text class="lbl" x="56" y="176">Sam</text><text class="sub" x="56" y="196">45 m</text>
+  <circle class="old" cx="300" cy="352" r="8"/><circle class="halo" cx="300" cy="352" r="15"/>
+  <text class="lbl" x="278" y="350" text-anchor="end" style="fill-opacity:.7">Dev</text><text class="sub" x="278" y="370" text-anchor="end">last seen 4 min ago</text>
+  <!-- you -->
+  <circle class="me" cx="220" cy="230" r="7"/>
+  <text class="sub" x="220" y="262" text-anchor="middle">you</text>
+</svg>

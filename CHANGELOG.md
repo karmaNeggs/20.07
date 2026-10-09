@@ -17,8 +17,10 @@
 - Target and compile SDK 36 (Google Play requirement). The experimental bitchat bridge probe was removed; superseded planning notes archived. Git history packed (701 MB to 34 MB), repo split into `android/` and `ios/`.
 - `README`, privacy page, whitepaper, `PLAY_STORE_LISTING.md`, `TESTING.md` and the website describe the optional internet feature. Play Data Safety answers still describe the Bluetooth-only app and must be redone before any Play submission.
 
+**Hardened by an independent breaker review** (three blind reviewers: wire and trust, lifecycle and orphaned flows, time/volume/concurrency; 100+ new tests): pinned senders must sign their frames; a relay can no longer swap a sender's key on a presence frame; nickname tails, oversize evidence lengths, wrong-size symbols and deeply nested relay JSON are rejected; join links tolerate trailing parameters and multi-byte names; frames held offline survive switch toggles; messages sent to a group that just ended, or before the service is ready, show a notice instead of crashing or silently vanishing, and Offline mode says the message is saved; notification permission no longer blocks the app; connectivity is watched only while Internet reach is on; carrier state is thread-safe; timers survive a clock stepped backwards; queues, registries and trackers are bounded. Open items: decision 80.
+
 **Verification**
-- 691 unit tests (1 opt-in live-relay test skipped), including an independent blind-review suite (49 tests), a relay-pool fuzz and two logical scale simulations; detekt and lint clean; signed release builds.
+- 743 unit tests (1 opt-in live-relay test skipped), including independent blind-review suites from four reviewers, a relay-pool fuzz and two logical scale simulations; detekt and lint clean; signed release builds.
 - Two real phones with Bluetooth off: 5 of 5 messages delivered in both directions in 1.3-13.4 s, positions too; files over Bluetooth in range. **Not yet tested on three phones, with stranger carrying, or in a long run.**
 - Test day checklist: `TESTING.md`.
 

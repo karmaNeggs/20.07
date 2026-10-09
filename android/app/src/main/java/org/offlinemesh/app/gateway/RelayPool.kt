@@ -85,6 +85,7 @@ class RelayPool(
     }
     private var desired: List<NostrFilter> = emptyList()
     private val lock = Any()
+    @Volatile private var closed = false
 
     /** Replaces the subscription on every relay. An empty list closes it. */
     fun setSubscription(filters: List<NostrFilter>) = locked { _ ->
@@ -93,10 +94,11 @@ class RelayPool(
 
     /** Sends [event] to every usable relay. [onPublishSettled] reports how many accepted it. */
     fun publish(event: NostrEvent) = locked { out ->
+        if (closed) return@locked
         // Already in flight: settle both when the first settles.
         settles[event.id]?.let { it.duplicates++; return@locked }
         val t = now()
-        val notBanned = relays.values.filter { it.bannedUntil <= t }
+        val notBanned = relays.values.filter { !isBanned(it, t) }
         // Prefer relays that are connected, then send to only the same two per tag (spreads load, see RelayChoice).
         val candidates = notBanned.filter { it.open }.ifEmpty { notBanned }
         val chosen = RelayChoice.pick(event.tagValue("t") ?: event.id, candidates.map { it.url },
@@ -120,11 +122,13 @@ class RelayPool(
 
     /** Drives connecting, subscribing, paced publishing and ack timeouts. Call about once a second. */
     fun tick() = locked { out ->
+        if (closed) return@locked
         val t = now()
         for (r in relays.values) {
             expireAcks(r, t, out)
             expireQueue(r, t, out)
-            if (r.connection == null && t >= r.nextConnectAt && t >= r.bannedUntil) connect(r)
+            val reconnectDue = t >= r.nextConnectAt || r.nextConnectAt - t > config.reconnectMaxMs
+            if (r.connection == null && reconnectDue && !isBanned(r, t)) connect(r)
             service(r, t, out)
         }
     }
@@ -133,16 +137,16 @@ class RelayPool(
     fun congested(): Boolean = synchronized(lock) {
         if (relays.isEmpty()) return@synchronized false
         val t = now()
-        relays.values.count { it.bannedUntil > t || it.failures >= CONGESTED_FAILURES } * 2 >= relays.size
+        relays.values.count { isBanned(it, t) || it.failures >= CONGESTED_FAILURES } * 2 >= relays.size
     }
 
-    fun hasConnectedRelay(): Boolean = synchronized(lock) { relays.values.any { it.open && it.bannedUntil <= now() } }
+    fun hasConnectedRelay(): Boolean = synchronized(lock) { relays.values.any { it.open && !isBanned(it, now()) } }
 
     fun status(): List<Status> = synchronized(lock) {
         val t = now()
         relays.values.map { r ->
             val state = when {
-                r.bannedUntil > t -> State.BANNED
+                isBanned(r, t) -> State.BANNED
                 r.open -> State.CONNECTED
                 r.connection != null -> State.CONNECTING
                 else -> State.BACKOFF
@@ -152,6 +156,7 @@ class RelayPool(
     }
 
     fun close() = locked { out ->
+        closed = true
         for (r in relays.values) {
             r.generation++
             r.connection?.close()
@@ -160,6 +165,9 @@ class RelayPool(
             failEverything(r, out)
         }
     }
+
+    /** Banned only while the ban is ahead and within a ban's maximum length (a clock step back must not extend it). */
+    private fun isBanned(r: Relay, t: Long): Boolean = r.bannedUntil > t && r.bannedUntil - t <= config.banBackoffMs
 
     private fun connect(r: Relay) {
         val generation = ++r.generation
@@ -253,7 +261,7 @@ class RelayPool(
     }
 
     private fun expireAcks(r: Relay, t: Long, out: MutableList<() -> Unit>) {
-        val expired = r.awaiting.filterValues { t - it > config.ackTimeoutMs }.keys.toList()
+        val expired = r.awaiting.filterValues { val d = t - it; d < 0 || d > config.ackTimeoutMs }.keys.toList()
         for (id in expired) {
             r.awaiting.remove(id)
             r.failures++
@@ -262,7 +270,7 @@ class RelayPool(
     }
 
     private fun expireQueue(r: Relay, t: Long, out: MutableList<() -> Unit>) {
-        while (r.queue.isNotEmpty() && t - r.queue.first().at > config.queueTtlMs) {
+        while (r.queue.isNotEmpty() && (t - r.queue.first().at).let { it < 0 || it > config.queueTtlMs }) {
             resolve(r.queue.removeFirst().event.id, accepted = false, out)
         }
     }

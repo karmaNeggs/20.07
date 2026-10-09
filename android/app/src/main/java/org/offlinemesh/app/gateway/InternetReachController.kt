@@ -109,8 +109,8 @@ class InternetReachController(
     private var lastMailboxAt = 0L
     private var nextKnownAt = 0L
     private var lastFileAt = 0L
-    private val metaSent = HashSet<String>()
-    private val symbolsSent = HashMap<String, Int>()
+    private val metaSent = LinkedHashSet<String>()
+    private val symbolsSent = LinkedHashMap<String, Int>()
     private var lastInterestAt = 0L
     private val uplinkedIds = object : LinkedHashMap<String, Boolean>(INITIAL_CAPACITY, LOAD_FACTOR, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Boolean>) = size > config.maxUplinkedIds
@@ -131,6 +131,7 @@ class InternetReachController(
 
     fun summary(): String = link?.summary() ?: "stopped"
 
+    @Synchronized
     fun start() {
         if (link != null) return
         inbound = Channel(Channel.UNLIMITED)
@@ -150,6 +151,7 @@ class InternetReachController(
         lastMailboxAt = 0; lastInterestAt = 0; lastFileAt = 0; slowFactor = 1
     }
 
+    @Synchronized
     fun stop() {
         link?.close()
         link = null
@@ -166,7 +168,7 @@ class InternetReachController(
     suspend fun step() {
         val l = link ?: return
         val t = now()
-        if (t - lastInterestAt >= config.interestIntervalMs) {
+        if (due(t, lastInterestAt, config.interestIntervalMs)) {
             lastInterestAt = t
             l.setInterestTags(ownInterestTags() + extraInterest())
         }
@@ -180,21 +182,27 @@ class InternetReachController(
         // Bluetooth neighbour that has some (stranger carrying); only files wait for a real connection.
         val connected = l.hasConnectedRelay()
         run {
-            if (t - lastFileAt >= config.fileIntervalMs) {
+            if (due(t, lastFileAt, config.fileIntervalMs)) {
                 lastFileAt = t
                 if (bulk && !congested && connected) produceFiles(l, t / MS_PER_SEC)
             }
-            if (t >= nextLiveAt) {
+            if (t >= nextLiveAt || nextLiveAt - t > config.liveIntervalMs * config.maxSlowdown * 2) {
                 nextLiveAt = t + jittered(config.liveIntervalMs * slowFactor)
                 produceLive(l, t / MS_PER_SEC)
             }
-            if (t - lastMailboxAt >= config.mailboxIntervalMs) { lastMailboxAt = t; produceMailbox(l, t / MS_PER_SEC) }
-            if (t >= nextKnownAt) {
+            if (due(t, lastMailboxAt, config.mailboxIntervalMs)) {
+                lastMailboxAt = t
+                produceMailbox(l, t / MS_PER_SEC)
+            }
+            if (t >= nextKnownAt || nextKnownAt - t > config.lastKnownIntervalMs * config.maxSlowdown * 2) {
                 nextKnownAt = t + jittered(config.lastKnownIntervalMs * slowFactor)
                 produceLastKnown(l, t / MS_PER_SEC)
             }
         }
+        // stop() may have run while this step was suspended: do not touch a link that has been closed.
+        if (link !== l) return
         l.tick()
+        trimFileState()
         drainInbound()
     }
 
@@ -209,6 +217,14 @@ class InternetReachController(
             lastSlowChangeAt = t
         }
     }
+
+    private fun trimFileState() {
+        while (metaSent.size > MAX_FILE_STATE) metaSent.remove(metaSent.first())
+        while (symbolsSent.size > MAX_FILE_STATE) symbolsSent.remove(symbolsSent.keys.first())
+    }
+
+    /** True when [interval] has passed since [last], or the clock has been stepped back before it. */
+    private fun due(t: Long, last: Long, interval: Long) = t < last || t - last >= interval
 
     /** +/- jitter so phones that started together do not publish in lockstep (flash-crowd synchronisation). */
     private fun jittered(ms: Long): Long {
@@ -294,7 +310,8 @@ class InternetReachController(
         // together and saturate the relays again (a sawtooth).
         private const val SLOW_DOWN_MS = 60_000L
         const val INTEREST_INTERVAL_MS = 30_000L
-        const val MAX_UPLINKED_IDS = 2048
+        const val MAX_UPLINKED_IDS = 8192
+        private const val MAX_FILE_STATE = 512
         private const val MS_PER_SEC = 1000L
         private const val INITIAL_CAPACITY = 256
         private const val LOAD_FACTOR = 0.75f

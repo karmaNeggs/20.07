@@ -106,6 +106,8 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         sealed: ByteArray? = null,
         handle: ByteArray? = null,
     ) {
+        // A far-future timestamp would never age out and would block every genuine later fix from that sender.
+        if (timestampSec > now() / 1000 + FUTURE_SKEW_SECONDS) return
         val key = Key(groupId, senderId)
         val existing = table[key]
         // Latest-wins, and at equal timestamps prefer the SHORTER path: the same fix can race over
@@ -155,6 +157,9 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         if (record.timestampSec > now() / 1000 + FUTURE_SKEW_SECONDS) return
         val existing = lastSeen[key]
         if (existing == null || existing.timestampSec <= record.timestampSec) lastSeen[key] = record
+        if (lastSeen.size > LAST_SEEN_PRUNE_AT) {
+            lastSeen.entries.removeAll { now() / 1000 - it.value.timestampSec > LAST_SEEN_MAX_AGE_SECONDS }
+        }
     }
 
     /** Members of [groupId] whose newest known position is older than the live window (so they are not on the live
@@ -219,8 +224,9 @@ class PositionTracker(private val now: () -> Long = System::currentTimeMillis) {
         /** How long a "last seen" position is kept: 6 hours (PLAN-v2.md §13.15; the author may shorten it). */
         const val LAST_SEEN_MAX_AGE_SECONDS = 6L * 3600
         private const val LIVE_FRESH_SECONDS = 120L
+        private const val LAST_SEEN_PRUNE_AT = 1024
         private const val INTERNET_HEARD_KEEP_MS = 10 * 60 * 1000L
-        private const val FUTURE_SKEW_SECONDS = 120L
+        private const val FUTURE_SKEW_SECONDS = 600L
 
         // CR-12 (PLAN-v2.md Part 10, 2026-08-09 review pass) — [hop]'s slack contribution is now
         // capped here, NOT decoupled from maxPositionRelayHops the way decision 33 (below) left it.

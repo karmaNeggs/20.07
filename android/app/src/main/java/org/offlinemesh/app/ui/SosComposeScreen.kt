@@ -31,6 +31,7 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var initialized by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     // Pre-select every group once they've loaded, exactly once — not on every recomposition,
     // so unchecking one doesn't get silently reset if the group list flow re-emits.
@@ -103,10 +104,12 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
                 shape = RoundedCornerShape(16.dp),
                 onClick = {
                     scope.launch {
+                        var allSent = true
                         for (groupId in selected) {
-                            meshService?.sendSos(groupId, message.ifBlank { "SOS" }, isAlert = true)
+                            val ok = safeSend(context, meshService, groupId, message.ifBlank { "SOS" }, isAlert = true)
+                            if (!ok) allSent = false
                         }
-                        onSent()
+                        if (allSent) onSent()
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(56.dp)

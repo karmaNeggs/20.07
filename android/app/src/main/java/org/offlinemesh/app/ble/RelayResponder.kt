@@ -1231,11 +1231,22 @@ class RelayResponder(
      *  See [pinOrCheckSenderKey]'s doc for why a CHANGED public key is a hard reject here
      *  specifically (this is the only frame type that carries one to pin), unlike an absent one
      *  elsewhere. [groupId] is the real group [handlePresence] resolved (decision 38). */
+    @Suppress("ReturnCount") // three distinct rejection points, each logged
     private suspend fun presencePassesSenderIdentityChecks(
         frame: MeshFrameCodec.Frame.Presence,
         groupId: String,
         macInput: ByteArray,
     ): Boolean {
+        // The presented key is not covered by the group MAC, so a relay could swap it. Prove the signature
+        // under the PRESENTED key before it can be pinned, and never pin a key that arrived unsigned.
+        val presented = frame.senderPublicKey
+        if (presented != null) {
+            val sig = frame.signature
+            if (sig == null || !SenderIdentity.verify(presented, sig, macInput)) {
+                DiagnosticsLog.event("reject", "presence key not proven by its signature")
+                return false
+            }
+        }
         val pin = pinOrCheckSenderKey(groupId, frame.senderId, frame.senderPublicKey)
         if (pin == SenderKeyPinResult.CHANGED) {
             // Re-pinned, not dropped — see pinOrCheckSenderKey's doc. Logged loudly because the
@@ -1733,7 +1744,9 @@ class RelayResponder(
             signature: ByteArray?,
             signedData: ByteArray,
         ): Boolean {
-            if (signature == null || pinnedPublicKey == null) return true
+            if (pinnedPublicKey == null) return true
+            // A pinned sender's frames must be signed: accepting an unsigned one let any group member impersonate them.
+            if (signature == null) return false
             return SenderIdentity.verify(pinnedPublicKey, signature, signedData)
         }
 

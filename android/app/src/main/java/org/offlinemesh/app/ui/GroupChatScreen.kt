@@ -259,8 +259,8 @@ fun GroupChatScreen(
                             .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
                             .clickable(enabled = messageText.isNotBlank()) {
                                 scope.launch {
-                                    meshService?.sendSos(groupId, messageText)
-                                    messageText = ""
+                                    val ok = safeSend(context, meshService, groupId, messageText, isAlert = false)
+                                    if (ok) messageText = ""
                                 }
                             },
                         contentAlignment = Alignment.Center
@@ -280,8 +280,8 @@ fun GroupChatScreen(
                             .background(AppColors.Warning.copy(alpha = if (messageText.isNotBlank()) 1f else 0.4f))
                             .clickable(enabled = messageText.isNotBlank()) {
                                 scope.launch {
-                                    meshService?.sendSos(groupId, messageText, isAlert = true)
-                                    messageText = ""
+                                    val ok = safeSend(context, meshService, groupId, messageText, isAlert = true)
+                                    if (ok) messageText = ""
                                 }
                             },
                         contentAlignment = Alignment.Center

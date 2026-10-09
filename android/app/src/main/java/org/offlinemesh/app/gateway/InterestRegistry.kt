@@ -27,7 +27,11 @@ class InterestRegistry(
             val key = tag.toHex()
             val e = entries[key]
             if (e == null) {
-                if (entries.size >= maxTags) continue
+                if (entries.size >= maxTags) {
+                    // Make room by dropping the oldest, so a neighbour cannot keep legitimate tags out with junk.
+                    val oldest = entries.keys.first()
+                    entries.remove(oldest); raw.remove(oldest)
+                }
                 entries[key] = Entry(frame.hop, t); raw[key] = tag
             } else if (frame.hop <= e.hop) {
                 e.hop = frame.hop; e.heardAt = t
@@ -56,7 +60,7 @@ class InterestRegistry(
 
     private fun expire() {
         val t = now()
-        val gone = entries.filterValues { t - it.heardAt > ttlMs }.keys
+        val gone = entries.filterValues { val d = t - it.heardAt; d < 0 || d > ttlMs }.keys
         for (k in gone) { entries.remove(k); raw.remove(k) }
     }
 

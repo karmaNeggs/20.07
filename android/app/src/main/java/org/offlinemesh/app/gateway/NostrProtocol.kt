@@ -64,6 +64,7 @@ sealed class RelayMessage {
 object Nostr {
     /** Relay messages larger than this are dropped unparsed (a relay streaming junk cannot hurt us). */
     const val MAX_MESSAGE_CHARS = 200_000
+    private const val MAX_JSON_DEPTH = 32
     private const val AUX_BYTES = 32
     private const val CONTROL_CHAR_LIMIT = 0x20
     private val random = SecureRandom()
@@ -115,7 +116,7 @@ object Nostr {
     // an untrusted relay is expected input that simply yields null, not an error to propagate.
     @Suppress("MagicNumber", "SwallowedException")
     fun parseRelayMessage(text: String): RelayMessage? {
-        if (text.length > MAX_MESSAGE_CHARS) return null
+        if (text.length > MAX_MESSAGE_CHARS || nestingDepth(text) > MAX_JSON_DEPTH) return null
         return try {
             val arr = JSONArray(text)
             when (arr.optString(0)) {
@@ -143,6 +144,16 @@ object Nostr {
             tags, o.getString("content"), o.getString("sig"),
         )
         return RelayMessage.Event(arr.getString(1), event)
+    }
+
+    /** Deepest bracket nesting; 90,000 nested brackets from a hostile relay would overflow the parser's stack. */
+    private fun nestingDepth(text: String): Int {
+        var depth = 0
+        var max = 0
+        for (c in text) {
+            if (c == '[' || c == '{') { depth++; if (depth > max) max = depth } else if (c == ']' || c == '}') depth--
+        }
+        return max
     }
 
     private fun filterJson(f: NostrFilter): String {
