@@ -81,14 +81,14 @@ full manual pass against `test_rubric.md` on a real release build before trustin
 distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
 deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
 
-## Test day — Internet reach (v0.10.0-dev, targetSdk 36)
+## Test day — Internet reach (v0.10.1-dev and later, targetSdk 36)
 
 First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
 until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
 
 **Before you start**
 - [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
-- [ ] Install `20.07-v0.10.0-dev-debug.apk` on every phone. Grant every permission it asks for.
+- [ ] Install `the current debug APK (for example 20.07-v0.10.2-dev-debug.apk)` on every phone. Grant every permission it asks for.
 - [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
 - [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
 - [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).

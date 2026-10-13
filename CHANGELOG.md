@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.10.2-dev] — SOS button moved, clearer diagnostics log
+
+**Changed**
+- Chat screen: the SOS button is a 44 dp circle on the bottom row, left of "Delete group", away from Send. Send stays above-right of the message box.
+- Diagnostics log: lines say "message" or "SOS alert" instead of "sos" for everything; "BLOCKED: no open links" became "not sent over Bluetooth: no open links (internet is separate)"; the internet path logs "queued for relays" and "published ... accepted by N relay(s)".
+
+**Verification**
+- Three-phone round on 2026-10-13 (Bluetooth-only phone, internet-only phone with Bluetooth off, and a phone with both): messages, SOS alerts, positions and files crossed both ways in about 3-7 s; Offline tile paused and resumed in about 2 s; "Last seen" displayed. Not yet reported: stranger carrying, battery and a long run.
+
 ## [0.10.1-dev] — Internet reach, files, priority, last seen, stranger carrying
 
 **New: Internet reach** (optional, off by default, one switch on the home screen with a plain-words consent). A phone with any connection sends and receives its group's end-to-end-encrypted frames through public Nostr relays (no server of ours, no account), with Bluetooth on or off. Both mates need it on. Design: `PLAN-v2.md` Part 13.

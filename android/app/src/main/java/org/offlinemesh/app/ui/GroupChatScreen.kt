@@ -228,8 +228,7 @@ fun GroupChatScreen(
                 )
             }
 
-            // Two rows so the message box keeps the full width: attach + text + send on top, and a large
-            // dedicated SOS button below (it used to share one row with the others and squeezed the box).
+            // Attach + text + send on top; SOS and Delete group on the row below (SOS used to sit under Send).
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -250,55 +249,58 @@ fun GroupChatScreen(
                     placeholder = { Text("Type a message") }
                 )
 
-                // Right-hand column: the quiet Send circle on top, a small SOS pill under it.
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B
-                    // hop-gradient/preview, just relayed and catalog-filter-synced like everything else.
-                    Box(
-                        Modifier.size(44.dp).clip(CircleShape)
-                            .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
-                            .clickable(enabled = messageText.isNotBlank()) {
-                                scope.launch {
-                                    val ok = safeSend(context, meshService, groupId, messageText, isAlert = false)
-                                    if (ok) messageText = ""
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.Send, contentDescription = "Send",
-                            tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    // The dedicated alert action (isAlert = true) — decision 35: only this button feeds the SOS
-                    // hop-gradient, the Tier B broadcast preview and the loud notification. Deliberately its own
-                    // control (not a mode toggle on Send) so raising a real SOS is never a matter of remembering
-                    // to flip a setting mid-crisis. Dimmed (not hidden) while there is no text to send.
-                    Box(
-                        Modifier.height(30.dp).width(52.dp).clip(RoundedCornerShape(15.dp))
-                            .background(AppColors.Warning.copy(alpha = if (messageText.isNotBlank()) 1f else 0.4f))
-                            .clickable(enabled = messageText.isNotBlank()) {
-                                scope.launch {
-                                    val ok = safeSend(context, meshService, groupId, messageText, isAlert = true)
-                                    if (ok) messageText = ""
-                                }
-                            },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("SOS", color = Color.Black, style = MaterialTheme.typography.labelLarge)
-                    }
+                // Quiet by default (isAlert = false) — decision 35: no loud notification, no Tier B
+                // hop-gradient/preview, just relayed and catalog-filter-synced like everything else.
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape)
+                        .background(if (messageText.isNotBlank()) groupColor else AppColors.Surface)
+                        .clickable(enabled = messageText.isNotBlank()) {
+                            scope.launch {
+                                val ok = safeSend(context, meshService, groupId, messageText, isAlert = false)
+                                if (ok) messageText = ""
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Send, contentDescription = "Send",
+                        tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted
+                    )
                 }
             }
 
-            TextButton(
-                onClick = { showDeleteDialog = true },
-                colors = ButtonDefaults.textButtonColors(contentColor = AppColors.Danger),
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+            // SOS sits on the bottom row, left of Delete group and well away from Send, so a stray tap on
+            // Send can never raise an alert. The dedicated alert action (isAlert = true) — decision 35: only
+            // this button feeds the SOS hop-gradient, the Tier B broadcast preview and the loud notification.
+            // Deliberately its own control (not a mode toggle on Send) so raising a real SOS is never a matter
+            // of remembering to flip a setting mid-crisis. Dimmed (not hidden) while there is no text to send.
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(Modifier.width(6.dp))
-                Text("Delete group")
+                Box(
+                    Modifier.size(44.dp).clip(CircleShape)
+                        .background(AppColors.Warning.copy(alpha = if (messageText.isNotBlank()) 1f else 0.4f))
+                        .clickable(enabled = messageText.isNotBlank()) {
+                            scope.launch {
+                                val ok = safeSend(context, meshService, groupId, messageText, isAlert = true)
+                                if (ok) messageText = ""
+                            }
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("SOS", color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                }
+                TextButton(
+                    onClick = { showDeleteDialog = true },
+                    colors = ButtonDefaults.textButtonColors(contentColor = AppColors.Danger),
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text("Delete group")
+                }
             }
             Spacer(Modifier.height(8.dp))
         }

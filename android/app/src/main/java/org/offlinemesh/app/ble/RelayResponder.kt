@@ -768,7 +768,8 @@ class RelayResponder(
             // content id, not the kind of identifier that class doc's exclusions are about.
             DiagnosticsLog.event(
                 "recv",
-                "NEW sos id=${frame.id.take(SENDER_ID_LOG_CHARS)} from " +
+                "NEW ${if (body.isAlert) "SOS alert" else "message"} " +
+                    "id=${frame.id.take(SENDER_ID_LOG_CHARS)} from " +
                     "${body.senderId.take(SENDER_ID_LOG_CHARS)} hop=$hopsFromOrigin"
             )
         }
@@ -934,15 +935,21 @@ class RelayResponder(
         // constructs with both set) — hence handle's own unguarded `!!` a few lines below.
         val sealed = sos.sealed ?: return
         val shortId = sos.id.take(SENDER_ID_LOG_CHARS)
+        val kind = if (sos.isAlert) "SOS alert" else "message"
         val openLinkCount = connectionRegistry.openLinkCount()
         val forwardedTtl = ForwardingPolicy.forwardedTtl(sos.ttl, openLinkCount)
         if (forwardedTtl <= 0) {
-            DiagnosticsLog.event("send", "sos id=$shortId hop=$hopsFromOrigin BLOCKED: ttl exhausted")
+            DiagnosticsLog.event(
+                "send", "$kind id=$shortId hop=$hopsFromOrigin not sent over Bluetooth: ttl exhausted"
+            )
             return
         }
         val candidates = connectionRegistry.others(excludeKey).keys.toList()
         if (candidates.isEmpty()) {
-            DiagnosticsLog.event("send", "sos id=$shortId hop=$hopsFromOrigin BLOCKED: no open links")
+            DiagnosticsLog.event(
+                "send",
+                "$kind id=$shortId hop=$hopsFromOrigin not sent over Bluetooth: no open links (internet is separate)"
+            )
             return
         }
         val targets = ForwardingPolicy.linksToForwardOn(
@@ -959,7 +966,7 @@ class RelayResponder(
         for (peerKey in targets) if (liveTargets[peerKey]?.send(outgoing) == true) sentCount++
         DiagnosticsLog.event(
             "send",
-            "sos id=$shortId hop=$hopsFromOrigin sent to $sentCount/${targets.size} target(s), " +
+            "$kind id=$shortId hop=$hopsFromOrigin sent over Bluetooth to $sentCount/${targets.size} target(s), " +
                 "jitter=${jitterMs}ms"
         )
     }

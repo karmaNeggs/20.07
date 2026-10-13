@@ -1,5 +1,6 @@
 package org.offlinemesh.app.gateway
 
+import org.offlinemesh.app.diagnostics.DiagnosticsLog
 import org.offlinemesh.app.ble.MeshFrameCodec
 import org.offlinemesh.app.ble.UplinkGateway
 import java.util.Base64
@@ -133,6 +134,13 @@ class NostrGatewayLink(
 
     private fun onSettled(eventId: String, accepted: Int) {
         val batch = synchronized(lock) { inFlight.remove(eventId) } ?: return
+        // Only messages and alerts are logged (positions are frequent and would flood the log).
+        val label = when (batch.cls) {
+            MeshFrameCodec.UPLINK_CLASS_ALERT -> "SOS alert"
+            MeshFrameCodec.UPLINK_CLASS_TEXT -> "message"
+            else -> null
+        }
+        if (label != null) DiagnosticsLog.event("internet-reach", "$label published, accepted by $accepted relay(s)")
         if (accepted == 0) {
             gateway.requeue(batch)
             backoff.failed(now())

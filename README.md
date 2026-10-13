@@ -10,7 +10,13 @@ network that can't help them do it — whether that network is overloaded by too
 there was never much of one there to begin with.
 
 
-## What's new in 0.10.1-dev
+## What's new in 0.10.2-dev
+
+- **SOS button moved:** it now sits on the bottom row, left of "Delete group", away from Send, so a stray tap on Send cannot raise an alert.
+- **Clearer diagnostics log:** messages and SOS alerts are labelled as such; "not sent over Bluetooth" no longer reads as a failure when the internet path carried the item; internet queueing and relay acceptance are logged.
+- **Tested on three phones (2026-10-13):** a Bluetooth-only phone and an internet-only phone (Bluetooth off) exchanged messages, SOS alerts, positions and files through a phone with both; delivery took about 3-7 s. The Offline tile paused and resumed cleanly, and "Last seen" showed mates who went quiet.
+
+## What was new in 0.10.1-dev
 
 - **Internet reach** (optional, off by default): a phone with Wi-Fi or mobile data sends and receives its group's encrypted frames through public Nostr relays, with Bluetooth on or off. Messages, SOS alerts, live and last-known positions, nicknames and files (up to 400 KB).
 - **SOS first, files last:** a strict priority order on the internet path, with separate hourly budgets.
@@ -417,7 +423,7 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 36.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.10.1-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.10.2-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
@@ -436,21 +442,22 @@ internet bridges nearby Bluetooth-only phones to internet-only ones. Relays see 
 codes, your IP address and timing; **both mates need the switch on**. Design: `PLAN-v2.md` Part 13 and
 `docs/DECISIONS.md` decisions 66-72.
 
-**Status honestly (0.10.1-dev):** tried on two real phones with Bluetooth off (messages and positions arrived both ways in 1-13 s), and
-tested in simulation (1000 users, outages, shared carrier addresses, alert storms) and against real public relays. **The 3-phone
-bridge test and a long field run are still to do.** Files travel too (any connection, up to 400 KB, paced, lowest priority),
-SOS alerts have top priority, and a mate who went quiet shows under "Last seen" for up to 6 hours. The stranger-carrying
-"mule" mode is built (0.10.0-dev): phones that are not in your group, with Internet reach on, carry your encrypted
-frames over Bluetooth and upload them; **not yet tried on phones**. Design and evidence: `PLAN-v2.md` Part 13.
+**Status (0.10.2-dev):** a three-phone round on 2026-10-13 passed for the bridge case (Bluetooth-only phone, internet-only phone with
+Bluetooth off, and a phone with both between them): messages, SOS alerts, positions and files crossed in about 3-7 s, "Last seen" showed
+mates who went quiet, and the Offline tile paused and resumed the internet side within seconds. Earlier tests: two phones with Bluetooth off,
+simulation (1000 users, outages, shared carrier addresses, alert storms) and public relays. **Stranger-carrying "mule" mode, battery use
+and a long field run are still to report.** Files travel too (any connection, up to 400 KB, paced, lowest priority), SOS alerts have top
+priority, and a mate who went quiet shows under "Last seen" for up to 6 hours, with distance and compass direction measured from your
+current position to where that mate was last heard. Design and evidence: `PLAN-v2.md` Part 13.
 
 ## Get the app
 
-**Prebuilt APK**: [download 20.07 v0.10.1-dev (signed release)](https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.1-dev-release.apk)
+**Prebuilt APK**: [download 20.07 v0.10.2-dev (signed release)](https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.2-dev-release.apk)
 (older builds are on the [Releases](https://github.com/karmaNeggs/20.07/releases) page) and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
 Releases page.) This is the signed **release** build (minified, no debug-only tooling). The newest build
-(0.10.1-dev) adds Internet reach, which has been tried on two phones so far; see "Internet reach" and Known
+(0.10.2-dev) carries Internet reach, now tried on three phones; see "Internet reach" and Known
 Limitations above for what is still thin about its testing history.
 
 **Build from source**:
