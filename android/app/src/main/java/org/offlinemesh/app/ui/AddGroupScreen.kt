@@ -249,7 +249,10 @@ private fun ModeToggle(mode: Mode, onChange: (Mode) -> Unit) {
                     .padding(vertical = 10.dp),
                 contentAlignment = Alignment.Center
             ) {
-                Text(label, color = if (selected) Color.White else AppColors.OnSurfaceMuted, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    label, color = if (selected) AppColors.OnAccent else AppColors.OnSurfaceMuted,
+                    style = MaterialTheme.typography.labelLarge
+                )
             }
         }
     }
@@ -281,7 +284,7 @@ private fun LifetimePicker(selectedIndex: Int, onChange: (Int) -> Unit) {
             ) {
                 Text(
                     option.shortLabel,
-                    color = if (selected) Color.White else AppColors.OnSurfaceMuted,
+                    color = if (selected) AppColors.OnAccent else AppColors.OnSurfaceMuted,
                     style = MaterialTheme.typography.labelMedium
                 )
             }

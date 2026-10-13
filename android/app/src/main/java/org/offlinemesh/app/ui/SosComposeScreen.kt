@@ -1,5 +1,6 @@
 package org.offlinemesh.app.ui
 
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -100,7 +101,7 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
             Spacer(Modifier.height(20.dp))
             Button(
                 enabled = selected.isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger),
+                colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger, contentColor = Color.White),
                 shape = RoundedCornerShape(16.dp),
                 onClick = {
                     scope.launch {

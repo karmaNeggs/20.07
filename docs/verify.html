@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20.07 — Verify your install</title>
+<meta name="description" content="How to check that a 20.07 APK is the one the project published: file checksum and signing-certificate fingerprint.">
+<link rel="canonical" href="https://rescue2007.com/verify.html">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0d10;
+    --surface: #14181c;
+    --surface-2: #1c2126;
+    --border: #262b31;
+    --text: #edeff1;
+    --text-muted: #8b95a1;
+    --accent: #818cf8;
+    --accent-contrast: #0a0d10;
+    --danger: #ef4444;
+    --safe: #34d399;
+    --code-bg: #1c2126;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.6;
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+  main { max-width: 720px; margin: 0 auto; padding: 48px 24px 64px; }
+  a { color: var(--accent); }
+  h1 { font-size: 1.9rem; font-weight: 800; letter-spacing: -0.02em; margin: 0 0 4px; }
+  .updated { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 28px; }
+  h2 { font-size: 1.15rem; font-weight: 700; margin: 34px 0 10px; letter-spacing: -0.01em; }
+  p, li { margin: 0 0 12px; }
+  ul { padding-left: 22px; }
+  code {
+    background: var(--code-bg);
+    color: var(--safe);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 0.88em;
+  }
+  .summary-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--safe);
+    border-radius: 8px;
+    padding: 16px 18px;
+    margin: 0 0 28px;
+    font-size: 0.95rem;
+  }
+  .summary-box strong { color: var(--text); }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0 20px; font-size: 0.92rem; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--text-muted); font-weight: 600; }
+  footer {
+    margin-top: 48px;
+    padding-top: 18px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+    text-align: center;
+  }
+  footer a { color: var(--text-muted); }
+</style>
+</head>
+<body>
+<main>
+
+  <h1>Verify your install</h1>
+  <p class="updated">20.07 — v0.10.2-dev</p>
+
+  <div class="summary-box">
+    20.07 is installed from a file, not from an app store, so nobody else checks it for you. Two checks tell you the file is the one published here: its checksum, and the fingerprint of the key it is signed with.
+  </div>
+
+  <h2>1. The signing fingerprint (works on the installed app)</h2>
+  <p>Every release of 20.07 is signed with the same key. Open the app, scroll to the bottom of the home screen and tap the line that starts with <code>Version</code>. Tap it again to copy the full value. It must match:</p>
+  <p><code>7C:F7:10:1A:A7:5F:E8:BB:57:BE:38:E7:72:65:10:A0:6A:07:5B:14:F1:12:6F:F8:6A:C2:2B:2D:3F:8A:76:64</code></p>
+  <p>Debug builds (the ones with "Export diagnostics") use a different key and show a different value; that is expected.</p>
+
+  <h2>2. The file checksum (before you install)</h2>
+  <table>
+    <tr><th>File</th><th>SHA-256</th></tr>
+    <tr><td><code>20.07-v0.10.2-dev-release.apk</code></td><td><code>b65e2f0ec9f20c389f03d161d3936b39fdc7c64b40865c1441bf18a6b946772e</code></td></tr>
+  </table>
+  <p>The same value is in <a href="https://github.com/karmaNeggs/20.07/raw/main/releases/SHA256SUMS">SHA256SUMS</a> next to the APK, and in the notes of each GitHub release.</p>
+  <p>On Linux or macOS: <code>shasum -a 256 20.07-v0.10.2-dev-release.apk</code><br>
+  On Windows (PowerShell): <code>Get-FileHash 20.07-v0.10.2-dev-release.apk -Algorithm SHA256</code></p>
+
+  <h2>3. Check the signature on a computer (optional)</h2>
+  <p>With the Android SDK build tools: <code>apksigner verify --print-certs 20.07-v0.10.2-dev-release.apk</code>. The line "certificate SHA-256 digest" is the fingerprint above, written without colons and in lower case.</p>
+
+  <h2>If the values differ</h2>
+  <p>Do not install the file (or uninstall the app if it is already installed), and download it again from <a href="https://github.com/karmaNeggs/20.07/releases">the GitHub releases page</a>. Report a mismatch through the repository's issues.</p>
+
+  <footer><a href="index.html">20.07</a> · <a href="privacy.html">Privacy Policy</a> · <a href="https://github.com/karmaNeggs/20.07">Source</a></footer>
+</main>
+</body>
+</html>

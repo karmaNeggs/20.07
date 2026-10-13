@@ -155,21 +155,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    // Screenshots and screen recording are allowed while the app is on screen. FLAG_SECURE is set only while the
+    // activity is paused, which is when Android takes the recent-apps thumbnail, so that thumbnail stays blank
+    // (security-audit finding: it would otherwise show the chat feed even under the decoy launcher identity).
+    override fun onPause() {
+        window.setFlags(
+            android.view.WindowManager.LayoutParams.FLAG_SECURE,
+            android.view.WindowManager.LayoutParams.FLAG_SECURE
+        )
+        super.onPause()
+    }
+
     @Suppress("LongMethod") // one-time launch setup (permission launcher, service bind, compose
     // tree) — this project's own detekt config treats comment-dense, explanatory code as a
     // deliberate choice rather than something to break apart just to satisfy a line count.
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Security-audit finding: without this, Android's recent-apps switcher shows a live
-        // screenshot of this Activity's real UI (chat feed, radar, SOS) regardless of which
-        // launcher identity (real "20.07" or decoy "Notes") is currently enabled — someone
-        // flipping through recent apps on a searched/seized phone would see straight through the
-        // disguise. FLAG_SECURE blanks that thumbnail (shows a plain placeholder instead) and also
-        // blocks screenshots/screen recording of the app generally, a reasonable default either way.
-        window.setFlags(
-            android.view.WindowManager.LayoutParams.FLAG_SECURE,
-            android.view.WindowManager.LayoutParams.FLAG_SECURE
-        )
         // The manifest's system Activity theme only covers window background before Compose's
         // first frame — status/navigation bar color is a separate system-drawn layer that theme
         // doesn't fully pin down on every OEM skin, especially on large screens with a taller/
@@ -272,6 +273,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         resumeTick++ // catches permissions granted via system Settings while we were backgrounded
     }
 

@@ -13,6 +13,8 @@ there was never much of one there to begin with.
 ## What's new in 0.10.2-dev
 
 - **SOS button moved:** it now sits on the bottom row, left of "Delete group", away from Send, so a stray tap on Send cannot raise an alert.
+- **SOS must be held** for 1.5 s to send (works with an empty box); screenshots are allowed while the app is open; a colour-contrast pass over buttons, light mode, text fields and dialogs.
+- **Verify your install:** the app shows its signing fingerprint at the bottom of the home screen; `releases/SHA256SUMS` and https://rescue2007.com/verify.html carry the expected values.
 - **Clearer diagnostics log:** messages and SOS alerts are labelled as such; "not sent over Bluetooth" no longer reads as a failure when the internet path carried the item; internet queueing and relay acceptance are logged.
 - **Tested on three phones (2026-10-13):** a Bluetooth-only phone and an internet-only phone (Bluetooth off) exchanged messages, SOS alerts, positions and files through a phone with both; delivery took about 3-7 s. The Offline tile paused and resumed cleanly, and "Last seen" showed mates who went quiet.
 
@@ -272,7 +274,7 @@ where it matters:
   works" above), enforced by every member's own app, not a social convention — so the blast radius
   of a static key is bounded to however long that particular group actually lived, not forever.
 - **The decoy/disguised launcher icon is a UI-level disguise only, not a hidden-app one.** It
-  changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, see below),
+  changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, which is switched on only while the app is in the background so the app-switcher thumbnail is blank; screenshots work while the app is open),
   not the installed package name, requested permissions, or its presence in Android
   Settings → Apps — anyone who knows to check there will find it regardless of which launcher
   identity is active. A "Disguise app icon" toggle on the Home screen flips it (`AppIdentity.kt`),

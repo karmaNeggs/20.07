@@ -264,7 +264,7 @@ fun GroupChatScreen(
                 ) {
                     Icon(
                         Icons.AutoMirrored.Filled.Send, contentDescription = "Send",
-                        tint = if (messageText.isNotBlank()) Color.White else AppColors.OnSurfaceMuted
+                        tint = if (messageText.isNotBlank()) AppColors.OnGroupColor else AppColors.OnSurfaceMuted
                     )
                 }
             }
@@ -273,24 +273,17 @@ fun GroupChatScreen(
             // Send can never raise an alert. The dedicated alert action (isAlert = true) — decision 35: only
             // this button feeds the SOS hop-gradient, the Tier B broadcast preview and the loud notification.
             // Deliberately its own control (not a mode toggle on Send) so raising a real SOS is never a matter
-            // of remembering to flip a setting mid-crisis. Dimmed (not hidden) while there is no text to send.
+            // of remembering to flip a setting mid-crisis. Must be held (see SosHoldButton); an empty box sends "SOS".
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
-                    Modifier.size(44.dp).clip(CircleShape)
-                        .background(AppColors.Warning.copy(alpha = if (messageText.isNotBlank()) 1f else 0.4f))
-                        .clickable(enabled = messageText.isNotBlank()) {
-                            scope.launch {
-                                val ok = safeSend(context, meshService, groupId, messageText, isAlert = true)
-                                if (ok) messageText = ""
-                            }
-                        },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text("SOS", color = Color.Black, style = MaterialTheme.typography.labelLarge)
+                SosHoldButton {
+                    scope.launch {
+                        val ok = safeSend(context, meshService, groupId, messageText.ifBlank { "SOS" }, isAlert = true)
+                        if (ok) messageText = ""
+                    }
                 }
                 TextButton(
                     onClick = { showDeleteDialog = true },
@@ -494,7 +487,7 @@ private fun FeedRowHeader(timeText: String, sender: String, isMe: Boolean, isAle
             "$sender>",
             fontFamily = FontFamily.Monospace,
             style = MaterialTheme.typography.labelSmall,
-            color = if (isMe) AppColors.OnSurfaceMuted else groupColor,
+            color = if (isMe) AppColors.OnSurfaceMuted else AppColors.groupTextColor(groupColor),
             fontWeight = FontWeight.SemiBold
         )
         // Decision 35 (docs/DECISIONS.md): the one visual marker distinguishing a flagged

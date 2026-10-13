@@ -63,12 +63,42 @@ object AppColors {
     // was "more green, more luminous" specifically on the radar, where this is the only color in
     // play; a single shared constant means the same boost also lifts every other presence/"safe"
     // use of it (toggle tiles, connection dots) rather than forking a radar-only shade.
-    @Suppress("MagicNumber") // color literal — see the class doc's note on why only lines changed
-    // this pass trip this rule; every other color constant in this object is the same shape.
-    val Safe = Color(0xFF6EE7B7)       // presence / connected / "you're in range" — nothing else
-    val Danger = Color(0xFFEF4444)     // SOS only — nothing else ever uses this color
-    val Warning = Color(0xFFF59E0B)    // low-confidence / degraded-signal warnings
-    val Accent = Color(0xFF818CF8)     // generic interactive accent — default buttons, links
+    // Light mode (2026-10-14 colour scan): the dark-mode shades measured 1.4-2.8:1 against the light
+    // background (below the 3:1 floor for icons and text), so light mode uses deeper shades of the same hues.
+    val Safe: Color get() = if (isDark) SafeDark else SafeLight           // presence / connected / in range
+    val Danger: Color get() = if (isDark) DangerDark else DangerLight     // SOS only — nothing else
+    val Warning: Color get() = if (isDark) WarningDark else WarningLight  // low-confidence / degraded warnings
+    val Accent: Color get() = if (isDark) AccentDark else AccentLight     // generic interactive accent
+
+    /** Text and icons placed ON an [Accent] fill (buttons, selected segments): white on the pale dark-mode
+     *  indigo measured 3.0:1, so dark mode uses near-black (6.5:1); light mode's deeper indigo takes white. */
+    val OnAccent: Color get() = if (isDark) DarkBackground else Color.White
+
+    /** Border of text fields and outlined buttons; the old value (the surface tone) was nearly invisible (1.2:1). */
+    val Outline: Color get() = if (isDark) DarkOutline else LightOutline
+
+    @Suppress("MagicNumber") private val DarkOutline = Color(0xFF4A545E)
+    @Suppress("MagicNumber") private val LightOutline = Color(0xFF8A94A0)
+    @Suppress("MagicNumber") private val SafeDark = Color(0xFF6EE7B7)
+    @Suppress("MagicNumber") private val SafeLight = Color(0xFF047857)
+    @Suppress("MagicNumber") private val DangerDark = Color(0xFFEF4444)
+    @Suppress("MagicNumber") private val DangerLight = Color(0xFFDC2626)
+    @Suppress("MagicNumber") private val WarningDark = Color(0xFFF59E0B)
+    @Suppress("MagicNumber") private val WarningLight = Color(0xFFB45309)
+    @Suppress("MagicNumber") private val AccentDark = Color(0xFF818CF8)
+    @Suppress("MagicNumber") private val AccentLight = Color(0xFF4F46E5)
+
+    /** Amber fill of the SOS button: fixed in both modes, black text on it measures 9:1. */
+    @Suppress("MagicNumber") val SosButton = Color(0xFFF59E0B)
+
+    /** Text and icons placed on a group-colour fill: every palette colour is pale, so near-black (7:1 or better). */
+    val OnGroupColor: Color get() = DarkBackground
+
+    /** A group colour used as TEXT: unchanged in dark mode, darkened in light mode where the pale palette vanishes. */
+    fun groupTextColor(c: Color): Color =
+        if (isDark) c else androidx.compose.ui.graphics.lerp(c, Color.Black, GROUP_TEXT_DARKEN)
+
+    private const val GROUP_TEXT_DARKEN = 0.45f
 
     // Stable per-group palette — excludes red/green/the accent indigo so a group's color can
     // never be mistaken for Danger, Safe, or "just a generic button."
@@ -112,39 +142,35 @@ object AppColors {
 fun AppTheme(content: @Composable () -> Unit) {
     val context = LocalContext.current
     LaunchedEffect(Unit) { AppColors.loadPersisted(context) }
-    val scheme = if (AppColors.isDarkMode) {
-        darkColorScheme(
-            primary = AppColors.Accent,
-            onPrimary = Color.White,
-            error = AppColors.Danger,
-            onError = Color.White,
-            background = AppColors.Background,
-            onBackground = AppColors.OnSurface,
-            surface = AppColors.Surface,
-            onSurface = AppColors.OnSurface,
-            surfaceVariant = AppColors.SurfaceVariant,
-            onSurfaceVariant = AppColors.OnSurfaceMuted,
-            secondary = AppColors.Accent,
-            onSecondary = Color.White,
-            outline = AppColors.SurfaceVariant,
-        )
-    } else {
-        lightColorScheme(
-            primary = AppColors.Accent,
-            onPrimary = Color.White,
-            error = AppColors.Danger,
-            onError = Color.White,
-            background = AppColors.Background,
-            onBackground = AppColors.OnSurface,
-            surface = AppColors.Surface,
-            onSurface = AppColors.OnSurface,
-            surfaceVariant = AppColors.SurfaceVariant,
-            onSurfaceVariant = AppColors.OnSurfaceMuted,
-            secondary = AppColors.Accent,
-            onSecondary = Color.White,
-            outline = AppColors.SurfaceVariant,
-        )
-    }
+    // One shared set of overrides on top of Material's dark or light base, so both modes always get the same
+    // roles filled in (an unset role falls back to Material's lavender defaults, which showed up in dialogs).
+    val base = if (AppColors.isDarkMode) darkColorScheme() else lightColorScheme()
+    val scheme = base.copy(
+        primary = AppColors.Accent,
+        onPrimary = AppColors.OnAccent,
+        error = AppColors.Danger,
+        onError = Color.White,
+        background = AppColors.Background,
+        onBackground = AppColors.OnSurface,
+        surface = AppColors.Surface,
+        onSurface = AppColors.OnSurface,
+        surfaceVariant = AppColors.SurfaceVariant,
+        onSurfaceVariant = AppColors.OnSurfaceMuted,
+        secondary = AppColors.Accent,
+        onSecondary = AppColors.OnAccent,
+        outline = AppColors.Outline,
+        outlineVariant = AppColors.SurfaceVariant,
+        primaryContainer = AppColors.SurfaceVariant,
+        onPrimaryContainer = AppColors.OnSurface,
+        secondaryContainer = AppColors.SurfaceVariant,
+        onSecondaryContainer = AppColors.OnSurface,
+        surfaceTint = Color.Transparent,
+        surfaceContainerLowest = AppColors.Background,
+        surfaceContainerLow = AppColors.Surface,
+        surfaceContainer = AppColors.Surface,
+        surfaceContainerHigh = AppColors.SurfaceVariant,
+        surfaceContainerHighest = AppColors.SurfaceVariant,
+    )
     MaterialTheme(colorScheme = scheme, content = content)
 }
 

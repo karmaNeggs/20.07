@@ -144,7 +144,7 @@ fun HomeScreen(
             FloatingActionButton(
                 onClick = onAddGroup,
                 containerColor = AppColors.Accent,
-                contentColor = Color.White
+                contentColor = AppColors.OnAccent
             ) { Icon(Icons.Filled.Add, contentDescription = "Add group") }
         }
     ) { padding ->
@@ -220,6 +220,7 @@ fun HomeScreen(
                         Spacer(Modifier.height(10.dp))
                     }
                 }
+                item { AboutRow() }
                 item { Spacer(Modifier.height(12.dp)) }
             }
         }

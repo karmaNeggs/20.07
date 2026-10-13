@@ -6,6 +6,11 @@
 - Chat screen: the SOS button is a 44 dp circle on the bottom row, left of "Delete group", away from Send. Send stays above-right of the message box.
 - Diagnostics log: lines say "message" or "SOS alert" instead of "sos" for everything; "BLOCKED: no open links" became "not sent over Bluetooth: no open links (internet is separate)"; the internet path logs "queued for relays" and "published ... accepted by N relay(s)".
 
+- **SOS button must be held** (1.5 s, filling ring) to send; a tap only shows a hint. It works with an empty message box (sends "SOS"). Screen-reader users get a "Send SOS" action.
+- **Screenshots and screen recording are allowed** while the app is open. The recent-apps thumbnail is still blank (the secure flag is set only while the app is in the background).
+- **Colour pass:** text on indigo buttons, the add button and group-colour fills is now near-black (white measured 1.7-3.0:1); light mode uses deeper shades of green, amber, red and indigo (the dark-mode shades measured 1.4-2.8:1 on the light background); text-field borders are visible (1.2:1 before); dialogs and other Material surfaces take the app's colours instead of Material's lavender defaults; sender names in group colours are darkened in light mode.
+- **Verifiable installs:** the home screen ends with a line showing the version and the signing fingerprint (tap for the full value, tap again to copy); `releases/SHA256SUMS` lists the APK checksum; the site has a "Verify your install" page (`docs/verify.html`).
+
 **Verification**
 - Three-phone round on 2026-10-13 (Bluetooth-only phone, internet-only phone with Bluetooth off, and a phone with both): messages, SOS alerts, positions and files crossed both ways in about 3-7 s; Offline tile paused and resumed in about 2 s; "Last seen" displayed. Not yet reported: stranger carrying, battery and a long run.
 
