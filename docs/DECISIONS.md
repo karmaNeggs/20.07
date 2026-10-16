@@ -4476,3 +4476,8 @@ relay) stall for the length of a backwards clock step and have no size caps on a
 a group that expired stays visible up to 30 minutes until the next sweep; manual group delete leaves evidence files until the next sweep;
 the Play-variant decoy notification labels. Unverified on device: foreground-service start from a background restart at targetSdk 36.
 
+
+
+## 81. Disguise feature removed (2026-10-16)
+
+The "Disguise app icon" toggle, the four decoy launcher `<activity-alias>` identities, `AppIdentity.kt`, the randomized notification icon/label library and the `DISGUISE_SUPPORTED` build field were removed in 0.10.2-dev. The app no longer changes how it presents itself: launcher label and icon are "20.07", the foreground notification reads "20.07 / Mesh running" with a plain status icon. `MainActivity` now carries the launcher and `mesh2007://join` intent filters directly, so a phone that updates with the disguise on gets the normal icon back (the old aliases' saved enabled/disabled states disappear with them). The `FLAG_SECURE`-while-paused behaviour (blank recents thumbnail) stays. The `playstoreRelease` build type remains but now differs from `release` only by name. Decisions 62 and the README's earlier Security model text describe the removed feature.

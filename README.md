@@ -14,6 +14,7 @@ there was never much of one there to begin with.
 
 - **SOS button moved:** it now sits on the bottom row, left of "Delete group", away from Send, so a stray tap on Send cannot raise an alert.
 - **SOS must be held** for 1.5 s to send (works with an empty box); screenshots are allowed while the app is open; a colour-contrast pass over buttons, light mode, text fields and dialogs.
+- **Disguise removed:** the "Disguise app icon" toggle, the decoy launcher identities and the randomized notification icon are gone; the app always shows as "20.07".
 - **Verify your install:** the app shows its signing fingerprint at the bottom of the home screen; `releases/SHA256SUMS` and https://rescue2007.com/verify.html carry the expected values.
 - **Clearer diagnostics log:** messages and SOS alerts are labelled as such; "not sent over Bluetooth" no longer reads as a failure when the internet path carried the item; internet queueing and relay acceptance are logged.
 - **Tested on three phones (2026-10-13):** a Bluetooth-only phone and an internet-only phone (Bluetooth off) exchanged messages, SOS alerts, positions and files through a phone with both; delivery took about 3-7 s. The Offline tile paused and resumed cleanly, and "Last seen" showed mates who went quiet.
@@ -91,7 +92,7 @@ records the specific designs this project tried and walked back after live-devic
 - **Home** — a combined radar showing every group member across all your groups at once, each
   group in its own color, dots pulsing faster the closer they are, fading as a position ages past
   ~30 seconds so a stale fix doesn't look as live as a fresh one. Below it, a row of four square
-  toggles (SOS, Power saver, Disguise, Offline), then your group list (tap to open), and a `+` to
+  toggles (SOS, Power saver, Internet reach, Offline), then your group list (tap to open), and a `+` to
   add a group. A light/dark theme toggle sits top-right (defaults to dark; the choice persists
   per install).
 - **Add group** — join with a code/link someone shared, or create a new group (just a name —
@@ -194,8 +195,8 @@ propagate independently through whoever's nearby, group member or not.
   screen off; declining it leaves everything else working exactly as before, just with staler
   positions in that specific situation.
 - **Notifications** — required to run BLE scanning reliably in the background via a foreground
-  service (shows a minimal, low-priority "Syncing" notification, deliberately disguised so a
-  glance at your lock screen doesn't reveal a mesh app is running), plus a separate, high-priority
+  service (shows a minimal, low-priority "20.07 / Mesh running" notification, which Android requires
+  for any foreground service), plus a separate, high-priority
   channel for SOS alerts (sound/vibration — the one thing in this app that should interrupt you).
 - **Camera — opt-in only, never requested at launch.** Incident photos are still chosen via
   Android's built-in Photo Picker (read-only reference to one file, no gallery-wide storage
@@ -273,18 +274,11 @@ where it matters:
   built-in expiry (2-3 days is the typical/intended use, 6 months is the hard ceiling — see "How it
   works" above), enforced by every member's own app, not a social convention — so the blast radius
   of a static key is bounded to however long that particular group actually lived, not forever.
-- **The decoy/disguised launcher icon is a UI-level disguise only, not a hidden-app one.** It
-  changes what shows on the home screen and app switcher (paired with `FLAG_SECURE`, which is switched on only while the app is in the background so the app-switcher thumbnail is blank; screenshots work while the app is open),
-  not the installed package name, requested permissions, or its presence in Android
-  Settings → Apps — anyone who knows to check there will find it regardless of which launcher
-  identity is active. A "Disguise app icon" toggle on the Home screen flips it (`AppIdentity.kt`),
-  picking one of a small library of plausible identities (Notes, Files, Weather, Calculator) at
-  random *every time it's turned on* — a single fixed "shows as Notes" identity would itself be a
-  greppable signature, same reasoning as the notification icon below. The notification icon shown
-  while the mesh service runs is independently randomized per install (not per toggle, since it's
-  passive background state rather than a deliberate user action each time) from its own small
-  library of plain, generic-looking icons, so it isn't the same across every phone running this
-  app either.
+- **The app does not hide itself.** It shows as "20.07" on the home screen and in Settings →
+  Apps, and its foreground-service notification names it. The recent-apps thumbnail is blank
+  (`FLAG_SECURE` is switched on only while the app is in the background; screenshots work while
+  the app is open). An earlier build had a "Disguise app icon" toggle and a randomized
+  notification icon; both were removed in 0.10.2-dev.
 - **Clipboard copies of a join code/link are marked sensitive (`EXTRA_IS_SENSITIVE`, Android 13+)**
   so the OS should skip clipboard history and cross-device sync for them — but that flag is
   advisory, ignored entirely on older Android, and not guaranteed to be honored by every keyboard

@@ -29,14 +29,6 @@ android {
         targetSdk = 36
         versionCode = 49
         versionName = "0.10.2-dev"
-        // True for every build type except playstoreRelease below, which overrides it to false.
-        // Gates the Home screen's "Disguise" tile (HomeScreen.kt's QuickToggleTiles) — Google
-        // Play's Deceptive Behavior / impersonation policy specifically targets apps that change
-        // their identity to hide their true nature, which the decoy-launcher-icon feature is close
-        // to a textbook case of. Sideloaded/GitHub-release builds keep it; a Play Store submission
-        // doesn't carry it at all (see playstoreRelease's own manifest override, which removes the
-        // decoy activity-alias entries outright, not just this field gating the UI to reach them).
-        buildConfigField("boolean", "DISGUISE_SUPPORTED", "true")
     }
 
     signingConfigs {
@@ -67,13 +59,6 @@ android {
         // (assemblePlaystoreRelease etc.) alongside the existing ones, which stay unchanged.
         create("playstoreRelease") {
             initWith(getByName("release"))
-            // Own manifest source set (src/playstoreRelease/AndroidManifest.xml) removes the decoy
-            // activity-alias entries via tools:node="remove" — not just hiding the UI toggle, since
-            // a reviewer (automated or manual) inspecting the manifest/resources directly would
-            // still see the decoy library even if it were unreachable from the UI. Once the
-            // manifest no longer references them, isShrinkResources (inherited from release above)
-            // drops the now-unused decoy icon/string resources from the built APK/AAB on its own.
-            buildConfigField("boolean", "DISGUISE_SUPPORTED", "false")
             // initWith(release) above already copies signingConfig, but set explicitly rather than
             // relying on that being obvious to a future reader — this build's whole point is a real
             // signed artifact for Play Console, so its signing shouldn't be implicit.

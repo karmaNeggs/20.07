@@ -157,7 +157,7 @@ class MainActivity : ComponentActivity() {
 
     // Screenshots and screen recording are allowed while the app is on screen. FLAG_SECURE is set only while the
     // activity is paused, which is when Android takes the recent-apps thumbnail, so that thumbnail stays blank
-    // (security-audit finding: it would otherwise show the chat feed even under the decoy launcher identity).
+    // (security-audit finding: it would otherwise show the chat feed in the recents list).
     override fun onPause() {
         window.setFlags(
             android.view.WindowManager.LayoutParams.FLAG_SECURE,

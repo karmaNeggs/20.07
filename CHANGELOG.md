@@ -11,7 +11,10 @@
 - **Colour pass:** text on indigo buttons, the add button and group-colour fills is now near-black (white measured 1.7-3.0:1); light mode uses deeper shades of green, amber, red and indigo (the dark-mode shades measured 1.4-2.8:1 on the light background); text-field borders are visible (1.2:1 before); dialogs and other Material surfaces take the app's colours instead of Material's lavender defaults; sender names in group colours are darkened in light mode.
 - **Verifiable installs:** the home screen ends with a line showing the version and the signing fingerprint (tap for the full value, tap again to copy); `releases/SHA256SUMS` lists the APK checksum; the site has a "Verify your install" page (`docs/verify.html`).
 
+- **Removed: Disguise app icon.** The Home toggle, the four decoy launcher identities (Notes, Files, Weather, Calculator), `AppIdentity.kt`, the randomized notification icon and label, and their icons and strings are gone. The launcher entry is now `MainActivity` itself (a phone that had the disguise on gets the "20.07" icon back after updating). The foreground notification reads "20.07 / Mesh running". The `playstoreRelease` manifest override and `DISGUISE_SUPPORTED` build field were removed with it.
+
 **Verification**
+- Two-phone retest of 0.10.2-dev on 2026-10-16: everything worked.
 - Three-phone round on 2026-10-13 (Bluetooth-only phone, internet-only phone with Bluetooth off, and a phone with both): messages, SOS alerts, positions and files crossed both ways in about 3-7 s; Offline tile paused and resumed in about 2 s; "Last seen" displayed. Not yet reported: stranger carrying, battery and a long run.
 
 ## [0.10.1-dev] — Internet reach, files, priority, last seen, stranger carrying

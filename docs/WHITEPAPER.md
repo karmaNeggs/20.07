@@ -132,16 +132,6 @@ nothing rather than show something false — is applied consistently (radar dots
 labels, staleness fade) rather than left to whichever screen happened to be written first, since
 this logic used to be copy-pasted into three places before being pulled into one function.
 
-### A decoy identity library, not a decoy
-
-The disguised-launcher feature doesn't ship one fixed alternate identity ("this app pretends to be
-called Notes"); it randomly picks one from a small library, per install for the always-on
-background notification and freshly on every toggle for the launcher icon. A single fixed decoy
-is itself a stable, greppable signature — "this mesh app always shows up disguised as Notes" is
-just as identifying as not disguising it at all, once one installation is known. Spreading the
-disguise across several plausible identities means there's no single fingerprint to search for
-across different phones running the same app.
-
 ### RFC 6206 Trickle, adapted for a supplementary radio channel
 
 The optional BT5 Coded-PHY long-range beacon channel uses a simplified Trickle timer

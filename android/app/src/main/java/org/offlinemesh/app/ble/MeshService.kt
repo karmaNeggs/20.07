@@ -174,8 +174,8 @@ class MeshService : Service() {
         persistMeshActive(active)
     }
 
-    /** [setMeshActive]'s persisted counterpart (CR-17, `PLAN-v2.md` Part 10) — same prefs file
-     *  [pickOncePerInstall] already uses for other per-install state. */
+    /** [setMeshActive]'s persisted counterpart (CR-17, `PLAN-v2.md` Part 10), stored in the
+     *  per-install `mesh_device` prefs file. */
     private fun persistMeshActive(active: Boolean) {
         getSharedPreferences("mesh_device", Context.MODE_PRIVATE).edit().putBoolean("mesh_active", active).apply()
     }
@@ -476,11 +476,10 @@ class MeshService : Service() {
                 NotificationChannel(channelId, "Sync", NotificationManager.IMPORTANCE_MIN)
             )
         }
-        val (title, text) = decoyLabel()
         val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle(title)
-            .setContentText(text)
-            .setSmallIcon(decoyIconRes())
+            .setContentTitle("20.07")
+            .setContentText("Mesh running")
+            .setSmallIcon(R.drawable.ic_stat_mesh)
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .build()
         // Explicit serviceType (Q+) rather than relying on the manifest's foregroundServiceType
@@ -497,52 +496,6 @@ class MeshService : Service() {
             )
         } else {
             startForeground(1, notification)
-        }
-    }
-
-    // A small library of plain, generic-utility-looking status icons — one is picked at random the
-    // first time this device ever shows the decoy notification, then reused every time after
-    // (stored alongside GroupRepository's own per-install deviceId, same prefs file). Deliberately
-    // NOT re-randomized on every service start: an icon that keeps changing on the SAME phone is
-    // itself a tell ("why does this one app's notification icon keep moving"). The actual
-    // anti-fingerprinting value is that DIFFERENT phones running this app show DIFFERENT icons —
-    // there's no single, greppable "the mesh app always shows icon X" signature to look for.
-    private val decoyIcons = intArrayOf(
-        R.drawable.ic_decoy_dot, R.drawable.ic_decoy_bars, R.drawable.ic_decoy_grid,
-        R.drawable.ic_decoy_check, R.drawable.ic_decoy_arrow_up, R.drawable.ic_decoy_lines,
-        R.drawable.ic_decoy_ring, R.drawable.ic_decoy_triangle,
-    )
-
-    // Same reasoning as decoyIcons, applied to the title/text pair too — a fixed "Notes"/"Syncing"
-    // string was itself a stable, greppable signature independent of which icon showed next to it
-    // (anyone building a list of "known mesh-app notification text" only needed one entry). Picked
-    // independently of the icon (not paired 1:1) for more combinations across installs.
-    private val decoyLabels = arrayOf(
-        "Notes" to "Syncing",
-        "Files" to "Backing up",
-        "Cloud" to "Syncing",
-        "System" to "Optimizing",
-        "Backup" to "In progress",
-        "Storage" to "Indexing",
-        "Updates" to "Checking",
-        "Photos" to "Backing up",
-    )
-
-    private fun decoyIconRes(): Int =
-        decoyIcons[pickOncePerInstall("decoy_icon_index", decoyIcons.size)]
-
-    private fun decoyLabel(): Pair<String, String> =
-        decoyLabels[pickOncePerInstall("decoy_label_index", decoyLabels.size)]
-
-    /** Shared by [decoyIconRes] and [decoyLabel]: picks a random index in `0 until size` the first
-     *  time this device ever needs one for [key], then reuses that same index forever after —
-     *  see [decoyIcons]'s doc for why staying stable per-install (not re-randomizing on every
-     *  service start) is what actually matters for the anti-fingerprinting goal. */
-    private fun pickOncePerInstall(key: String, size: Int): Int {
-        val prefs = getSharedPreferences("mesh_device", Context.MODE_PRIVATE)
-        val stored = prefs.getInt(key, -1)
-        return if (stored in 0 until size) stored else {
-            (0 until size).random().also { prefs.edit().putInt(key, it).apply() }
         }
     }
 

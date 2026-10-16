@@ -38,8 +38,7 @@ an untrusted BLE peer (this app talks to devices it has no reason to trust by de
 worse from malformed input on that path is a real security bug, not just a stability one).
 
 **Already known, please check first**: [README's Known Limitations](README.md#known-limitations-honest-ones)
-documents several real, currently-unresolved gaps honestly (no forward secrecy, the disguise
-feature's actual scope, a few narrow connection-lifecycle edge cases, and more) — these don't need
+documents several real, currently-unresolved gaps honestly (no forward secrecy, a few narrow connection-lifecycle edge cases, and more) — these don't need
 a fresh report unless you've found a way to actually exploit one in practice, which *would* be
 useful to know.
 
