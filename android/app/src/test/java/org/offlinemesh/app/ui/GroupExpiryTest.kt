@@ -29,7 +29,9 @@ class GroupExpiryTest {
 
     @Test
     fun `lifetime options are ordered ascending and the default index points at 48 hours`() {
-        val millis = GROUP_LIFETIME_OPTIONS.map { it.millis }
+        val millis = GROUP_LIFETIME_OPTIONS.mapNotNull { it.millis }
+        assertEquals(1, GROUP_LIFETIME_OPTIONS.count { it.millis == null })
+        assertEquals(null, GROUP_LIFETIME_OPTIONS.last().millis)
         assertEquals(millis.sorted(), millis)
         assertEquals(48L * 60 * 60 * 1000, GROUP_LIFETIME_OPTIONS[DEFAULT_GROUP_LIFETIME_INDEX].millis)
     }

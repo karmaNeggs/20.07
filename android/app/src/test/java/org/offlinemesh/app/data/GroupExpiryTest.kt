@@ -30,7 +30,7 @@ class GroupExpiryTest {
     @Before
     fun setUp() {
         runBlocking {
-            for (id in listOf("g-live", "g-expired", "g-boundary")) dao.delete(id)
+            for (id in listOf("g-live", "g-expired", "g-boundary", "g-permanent")) dao.delete(id)
         }
     }
 
@@ -82,6 +82,17 @@ class GroupExpiryTest {
         val now = System.currentTimeMillis()
         dao.insert(group("g-live", now + JoinCode.DEFAULT_LIFETIME_MILLIS))
         assertTrue(dao.expiredGroupIds(now).isEmpty())
+    }
+
+    @Test
+    fun `permanent groups survive expiry sweeps but remain manually deletable`() = runTest {
+        dao.insert(group("g-permanent", JoinCode.NO_EXPIRY))
+        assertTrue(dao.getActiveGroups().any { it.id == "g-permanent" })
+        assertTrue(dao.expiredGroupIds(Long.MAX_VALUE).none { it == "g-permanent" })
+        GroupRepository(context).expireGroups()
+        assertTrue(dao.allGroupIds().contains("g-permanent"))
+        dao.delete("g-permanent")
+        assertTrue(dao.getActiveGroups().none { it.id == "g-permanent" })
     }
 
     @Test

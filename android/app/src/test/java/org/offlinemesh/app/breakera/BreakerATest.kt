@@ -68,7 +68,7 @@ class BreakerATest {
         )
     }
 
-    /** SOS id lives in the clear envelope but is not bound to the sealed body: replay under a fresh id. */
+    /** SOS/courier envelope ids now match the sealed nonce; see MeshFrameCodecTest replay cases. */
     /** MAC covers only the first 20 chars of a nickname, but receivers keep the whole decoded string. */
     @Test fun breakera_nicknameTailBeyond20CharsUnauthenticated() {
         val base = "A".repeat(20)

@@ -35,6 +35,9 @@ object ForwardingPolicy {
     private const val LOW_DEGREE_FLOOR = 2
     private const val HIGH_DEGREE_TTL_CLAMP_FLOOR = 6
     private const val TTL_CLAMP_CEILING = 5
+    /** Ceiling on a wire-carried ttl. ttl sits outside every MAC (it changes per hop), so a hostile
+     *  neighbour can set it to 255; no honest sender starts above RelayEngine.DEFAULT_TTL. */
+    const val MAX_WIRE_TTL = 8
     private const val JITTER_WIDE_FLOOR = 5
     private const val JITTER_TIGHT_MIN_MS = 10L
     private const val JITTER_TIGHT_MAX_MS = 30L
@@ -48,7 +51,7 @@ object ForwardingPolicy {
      *  dense region needs, and letting a packet ride unclamped there is pure redundant airtime).
      *  Callers must still separately check the result is `> 0` before forwarding. */
     fun forwardedTtl(incomingTtl: Int, openLinkCount: Int): Int {
-        val decremented = incomingTtl - 1
+        val decremented = incomingTtl.coerceIn(0, MAX_WIRE_TTL) - 1
         val clamped = decremented.coerceAtMost(TTL_CLAMP_CEILING)
         return if (openLinkCount >= HIGH_DEGREE_TTL_CLAMP_FLOOR) clamped else decremented
     }

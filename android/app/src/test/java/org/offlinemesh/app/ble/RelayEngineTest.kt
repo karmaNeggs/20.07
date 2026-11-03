@@ -224,6 +224,36 @@ class RelayEngineTest {
         assertEquals(null, relay.decryptedThumbnail(evidence))
     }
 
+    @Test
+    fun `ingestSos clamps a hostile oversized ttl to the protocol ceiling`() = runTest {
+        relay.ingestSos(sosFixture("sos-ttl").copy(ttl = 255))
+        val stored = relay.relayableSos().single { it.id == "sos-ttl" }
+        assertEquals(ForwardingPolicy.MAX_WIRE_TTL - 1, stored.ttl)
+    }
+
+    @Test
+    fun `ingestEvidenceMeta clamps a hostile oversized ttl to the protocol ceiling`() = runTest {
+        relay.ingestEvidenceMeta(evidenceFixture("evid-ttl").copy(ttl = 255))
+        val stored = AppDatabase.get(context).evidenceDao().get("evid-ttl")
+        assertEquals(ForwardingPolicy.MAX_WIRE_TTL - 1, stored?.ttl)
+    }
+
+    @Test
+    fun `discarding a poisoned symbol set lets the genuine symbol for that esi be accepted again`() = runTest {
+        val db = AppDatabase.get(context)
+        relay.ingestEvidenceMeta(evidenceFixture("evid-poison"))
+        assertTrue(relay.ingestSymbol("evid-poison", 0, symbolBytes(66))) // hostile copy wins the slot
+        assertFalse(
+            "genuine copy is blocked while the bad one is held",
+            relay.ingestSymbol("evid-poison", 0, symbolBytes(1)),
+        )
+        // What maybeCompleteFromSymbol does after a hash mismatch:
+        db.evidenceSymbolDao().deleteForEvidence("evid-poison")
+        db.seenMessageDao().deleteWithPrefix("evid-poison:")
+        assertTrue(relay.ingestSymbol("evid-poison", 0, symbolBytes(1)))
+        assertArrayEquals(symbolBytes(1), db.evidenceSymbolDao().getSymbol("evid-poison", 0)?.data)
+    }
+
     // ---------- ingestSymbol / symbolDeficit / symbolsToSend / decodeRank (P5 item 2 slice 2, ----------
     // ---------- docs/DECISIONS.md decision 47) ----------
     // Kept deliberately BELOW full rank/completion: reaching FountainDecoder.isComplete inside

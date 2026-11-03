@@ -264,7 +264,7 @@ private fun GroupRow(group: GroupEntity, hop: Int, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall
             )
             Text(
-                "expires in ${formatTimeRemaining(remainingMs)}",
+                if (group.expiresAt == 0L) "No expiry" else "expires in ${formatTimeRemaining(remainingMs)}",
                 color = if (expiringSoon) AppColors.Warning else AppColors.OnSurfaceMuted,
                 style = MaterialTheme.typography.labelSmall
             )

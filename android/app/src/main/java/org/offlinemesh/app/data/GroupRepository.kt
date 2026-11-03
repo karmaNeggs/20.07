@@ -40,12 +40,13 @@ class GroupRepository(context: Context) {
         }
     }
 
-    /** Creates a brand-new group with a random id+key, expiring at [lifetimeMillis] from now
+    /** Creates a brand-new group with a random id+key. Null [lifetimeMillis] means no expiry;
+     *  finite values expire at [lifetimeMillis] from now
      *  (coerced to [JoinCode.MAX_LIFETIME_MILLIS] — see that constant's doc). Returns the
      *  shareable code for it. */
     suspend fun createGroup(
         name: String,
-        lifetimeMillis: Long = JoinCode.DEFAULT_LIFETIME_MILLIS,
+        lifetimeMillis: Long? = JoinCode.DEFAULT_LIFETIME_MILLIS,
     ): Pair<GroupEntity, String> {
         val parsed = JoinCode.generate(name, lifetimeMillis)
         keyStore.putKey(parsed.groupId, parsed.key)
@@ -237,7 +238,7 @@ class GroupRepository(context: Context) {
     }
 
     /** Dismantles every group whose baked-in expiry has passed — the actual enforcement behind
-     *  the "groups are ephemeral" promise (see [JoinCode]'s class doc). Called periodically from
+     *  timed-group lifetime. Explicit permanent groups are excluded by the DAO. Called periodically from
      *  [org.offlinemesh.app.ble.MeshService.startPruning] and once on service startup, so a phone
      *  that was off past a group's expiry cleans it up on next launch rather than waiting for the
      *  next scheduled sweep. Reuses [dismantleGroup] for the actual deletion — evidence/chunks/

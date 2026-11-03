@@ -108,6 +108,15 @@ class UplinkGatewayTest {
         assertEquals(UplinkGateway.Decision.Rejected(UplinkGateway.Reject.DUPLICATE), g.offer(uplink()))
     }
 
+    @Test fun `a copy with changed flags cannot suppress the original envelope`() {
+        val g = gateway()
+        val inner = byteArrayOf(1, 2, 3)
+        val altered = MeshFrameCodec.encodeUplink(tag(1), MeshFrameCodec.UPLINK_CLASS_TEXT, 1, nowSec, inner)
+        val original = MeshFrameCodec.encodeUplink(tag(1), MeshFrameCodec.UPLINK_CLASS_TEXT, 0, nowSec, inner)
+        assertEquals(1, g.onRelayBatch(UplinkBatch.encode(listOf(altered))).size)
+        assertEquals(1, g.onRelayBatch(UplinkBatch.encode(listOf(original))).size)
+    }
+
     @Test fun `per-tag rate cap stops a flood on one tag but not other tags`() {
         val g = gateway(UplinkGateway.Config(framesPerTagPerMinute = 5))
         var rejected = 0

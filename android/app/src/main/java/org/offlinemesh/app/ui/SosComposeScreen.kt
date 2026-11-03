@@ -98,7 +98,12 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
                     }
                 }
             }
-            Spacer(Modifier.height(20.dp))
+            Text(
+                "Receipt is not confirmed. If available, call local emergency services too.",
+                style = MaterialTheme.typography.bodySmall,
+                color = AppColors.OnSurfaceMuted,
+            )
+            Spacer(Modifier.height(12.dp))
             Button(
                 enabled = selected.isNotEmpty(),
                 colors = ButtonDefaults.buttonColors(containerColor = AppColors.Danger, contentColor = Color.White),
@@ -107,10 +112,20 @@ fun SosComposeScreen(repo: GroupRepository, meshService: MeshService?, onSent: (
                     scope.launch {
                         var allSent = true
                         for (groupId in selected) {
-                            val ok = safeSend(context, meshService, groupId, message.ifBlank { "SOS" }, isAlert = true)
+                            val ok = safeSend(
+                                context, meshService, groupId, message.ifBlank { "SOS" },
+                                isAlert = true, showAlertStatus = false,
+                            )
                             if (!ok) allSent = false
                         }
-                        if (allSent) onSent()
+                        if (allSent) {
+                            android.widget.Toast.makeText(
+                                context,
+                                "SOS saved to send; another person's receipt is unconfirmed",
+                                android.widget.Toast.LENGTH_LONG,
+                            ).show()
+                            onSent()
+                        }
                     }
                 },
                 modifier = Modifier.fillMaxWidth().height(56.dp)

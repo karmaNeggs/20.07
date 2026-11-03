@@ -12,12 +12,11 @@ import java.util.Base64
  * (that ambiguity — auto-capitalized/whitespace-mangled passphrases silently deriving different
  * keys on two phones — was a real bug in the previous passphrase-derived design).
  *
- * **Groups are ephemeral by design** — 20.07 groups exist for the duration of a task (typically
- * days) and are meant to be deleted when it's done, not to persist indefinitely. [expiresAtEpochSec]
- * is an ABSOLUTE timestamp baked into the code at creation time, not a duration, specifically so
- * that everyone who joins agrees on the same end moment without any coordination — whoever joins,
- * whenever they join, reads the same fixed expiry off the same code. See
- * [org.offlinemesh.app.data.GroupRepository.expireGroups] for enforcement.
+ * Groups default to a timed lifetime. An explicit null lifetime creates a permanent group:
+ * v4 codes carry [NO_EXPIRY], while finite v3 codes retain their absolute expiry timestamp.
+ * Every member reads the same lifetime from the code; joining never extends it.
+ * Permanent groups remain until manually deleted; content retention and relay limits are unchanged.
+ * Older apps reject v4 codes. See [org.offlinemesh.app.data.GroupRepository.expireGroups].
  */
 object JoinCode {
     // v2: added expiresAtEpochSec. Deliberately not wire-compatible with v1 — see decode()'s
@@ -33,16 +32,16 @@ object JoinCode {
     // deadline that would otherwise force an emergency fix. Same "not wire-compatible, and that's
     // fine at this project's stage" precedent v2 already set.
     private const val VERSION: Byte = 3
+    // v4 is reserved for permanent groups; older apps reject it rather than misreading expiry.
+    private const val PERMANENT_VERSION: Byte = 4
+    const val NO_EXPIRY = 0L
     private const val GROUP_ID_LEN = 8
     private const val KEY_LEN = 32
     private const val EXPIRES_AT_LEN = 8
     private const val MILLIS_PER_SECOND = 1000L
 
-    /** Absolute ceiling on how far in the future a code's expiry may sit — enforced in [decode],
-     *  not just suggested by the UI's lifetime picker. Without this, a malformed or deliberately
-     *  crafted code could set an expiry decades out, defeating the entire point of a group being
-     *  bounded. 20.07 groups are meant to run days, not months; six months is a generous outer
-     *  bound for an unusual longer-running case, not a typical choice. */
+    /** Finite lifetimes are bounded independently of the picker. Permanent groups require the
+     *  explicit v4 no-expiry representation, rather than an arbitrary distant timestamp. */
     const val MAX_LIFETIME_MILLIS = 180L * 24 * 60 * 60 * 1000 // ~6 months
 
     /** Used when a caller doesn't specify a lifetime (matches the UI picker's own default). */
@@ -50,15 +49,17 @@ object JoinCode {
 
     data class Parsed(val groupId: String, val key: ByteArray, val name: String, val expiresAtEpochSec: Long)
 
-    /** [lifetimeMillis] is silently coerced into `0..MAX_LIFETIME_MILLIS` — a caller asking for
+    /** Null [lifetimeMillis] explicitly means no expiry. Finite values are coerced into
+     *  `0..MAX_LIFETIME_MILLIS` — a caller asking for
      *  longer gets the max instead of generating a code that would then fail its own [decode]
      *  validation the moment anyone (including the creator, on a later reconstruction via
      *  [org.offlinemesh.app.data.GroupRepository.getShareCode]) tried to read it back. */
-    fun generate(name: String, lifetimeMillis: Long = DEFAULT_LIFETIME_MILLIS): Parsed {
+    fun generate(name: String, lifetimeMillis: Long? = DEFAULT_LIFETIME_MILLIS): Parsed {
         val idBytes = ByteArray(GROUP_ID_LEN).also { SecureRandom().nextBytes(it) }
         val key = ByteArray(KEY_LEN).also { SecureRandom().nextBytes(it) }
-        val boundedLifetime = lifetimeMillis.coerceIn(0, MAX_LIFETIME_MILLIS)
-        val expiresAtEpochSec = (System.currentTimeMillis() + boundedLifetime) / MILLIS_PER_SECOND
+        val expiresAtEpochSec = lifetimeMillis?.let {
+            (System.currentTimeMillis() + it.coerceIn(0, MAX_LIFETIME_MILLIS)) / MILLIS_PER_SECOND
+        } ?: NO_EXPIRY
         return Parsed(idBytes.joinToString("") { "%02x".format(it) }, key, name, expiresAtEpochSec)
     }
 
@@ -66,7 +67,7 @@ object JoinCode {
         val idBytes = parsed.groupId.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         val nameBytes = utf8Prefix(parsed.name, 255)
         val buf = ByteBuffer.allocate(1 + GROUP_ID_LEN + KEY_LEN + EXPIRES_AT_LEN + 1 + nameBytes.size)
-        buf.put(VERSION)
+        buf.put(if (parsed.expiresAtEpochSec == NO_EXPIRY) PERMANENT_VERSION else VERSION)
         buf.put(idBytes)
         buf.put(parsed.key)
         // 8-byte epoch-seconds (v3, CR-25) — see VERSION's own doc for why this replaced the
@@ -89,7 +90,7 @@ object JoinCode {
         val bytes = Base64.getUrlDecoder().decode(code.trim())
         val buf = ByteBuffer.wrap(bytes)
         val version = buf.get()
-        if (version != VERSION) {
+        if (version != VERSION && version != PERMANENT_VERSION) {
             null
         } else {
             val idBytes = ByteArray(GROUP_ID_LEN).also { buf.get(it) }
@@ -99,7 +100,12 @@ object JoinCode {
             val nameBytes = ByteArray(nameLen).also { buf.get(it) }
             val nowSec = System.currentTimeMillis() / MILLIS_PER_SECOND
             val maxLifetimeSec = MAX_LIFETIME_MILLIS / MILLIS_PER_SECOND
-            if (expiresAtEpochSec <= nowSec || expiresAtEpochSec > nowSec + maxLifetimeSec) {
+            val validExpiry = if (version == PERMANENT_VERSION) {
+                expiresAtEpochSec == NO_EXPIRY
+            } else {
+                expiresAtEpochSec > nowSec && expiresAtEpochSec <= nowSec + maxLifetimeSec
+            }
+            if (!validExpiry || buf.hasRemaining()) {
                 null
             } else {
                 Parsed(

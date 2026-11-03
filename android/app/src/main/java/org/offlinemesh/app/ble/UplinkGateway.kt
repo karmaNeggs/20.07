@@ -349,7 +349,7 @@ class UplinkGateway(
 
     private fun dedupKey(f: MeshFrameCodec.Frame.Uplink): String {
         val md = MessageDigest.getInstance("SHA-256")
-        md.update(f.relayTag); md.update(f.cls.toByte())
+        md.update(f.relayTag); md.update(f.cls.toByte()); md.update(f.flags.toByte())
         md.update(ByteBuffer.allocate(Long.SIZE_BYTES).putLong(f.createdAtSec).array())
         md.update(f.inner)
         return hex(md.digest().copyOf(DEDUP_KEY_BYTES))

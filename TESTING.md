@@ -27,7 +27,7 @@ later extended for the epoch-aware cooldown-skip behind the passerby-relay fix) 
 tracked hop reading used to be able to freeze indefinitely in a redundant mesh — see decision 60 —
 now rebuilt so each reporting source ages out independently, tested with a fake clock the same way).
 
-634 tests (1 opt-in live-relay test skipped), all passing, including a 1000-user logical scale and chaos simulation of the internet path. This is what should catch a broken build *before* you spend twenty minutes
+The 0.10.3-dev release round (2026-11-03) ran 755 passing tests (1 skipped) and clean detekt; the previous round reported 743. Re-run this suite after any code changes; it includes a 1000-user logical scale and chaos simulation of the internet path. This is what should catch a broken build *before* you spend twenty minutes
 manually testing it — a crypto or wire-format regression shows up here in seconds, not after a
 confusing live session.
 
@@ -75,20 +75,15 @@ higher-value, lower-risk investment so far.
 
 `./gradlew assembleRelease` runs with R8 minification + resource shrinking on for release builds
 (see Known Limitations in `README.md` for the security-crypto/Tink `-dontwarn` rules this needed).
-**This build has been compile-verified, not runtime-verified** — I don't have a device or emulator
-to install it on. Do a
-full manual pass against `test_rubric.md` on a real release build before trusting it for real
-distribution; R8 stripping ~90% of the debug size is a large enough surface of change that it
-deserves its own dedicated device pass, not an assumption that "it compiled" means "it works."
+The author confirmed on 2026-10-27 that the shipped signed 0.10.2-dev release APK was physically tested on 4-5 phones. This corrects the earlier compile-only status. For future code changes, run the test rubric on the new release build as well; R8 minification makes a debug-only phone pass insufficient.
 
 ## Test day — Internet reach (v0.10.1-dev and later, targetSdk 36)
 
-First real-phone round for the v3 feature and for targetSdk 36. Everything below passed only in simulation
-until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
+This is the repeatable v3/targetSdk 36 phone checklist. The 2026-10-13 bridge round and later 0.10.2-dev phone testing are recorded in the project log; use it again after transport changes. Allow about 90 minutes. Record each result as PASS / FAIL / NOTES.
 
 **Before you start**
 - [ ] 3 phones minimum, 4 for Win 1 (all Android 12+). Uninstall any earlier 20.07 first (debug and release builds are signed differently).
-- [ ] Install `the current debug APK (for example 20.07-v0.10.2-dev-debug.apk)` on every phone. Grant every permission it asks for.
+- [ ] Install the build under test (debug for diagnostics, then the signed release APK for release verification) on every phone. Grant every permission it asks for.
 - [ ] Create one group on phone A, join the same group on all the others by code or QR. Give each phone a nickname.
 - [ ] On every phone: Settings > Battery > allow the app to run unrestricted, so Android does not sleep it.
 - [ ] Note each phone's model and Android version. Wi-Fi networks need real internet (not a captive portal).
@@ -131,7 +126,7 @@ until you run it. Allow about 90 minutes. Record each result as PASS / FAIL / NO
 **Test 2c — Files and SOS priority (15 min)**
 - [ ] On A (Bluetooth only) send a small photo to the group. B should receive it over Bluetooth and relay it; C (Wi-Fi/mobile data only) should get a thumbnail within seconds and the full photo within a minute or two. Repeat from C towards A.
 - [ ] Do it once on mobile data and once on Wi-Fi. Both should work.
-- [ ] While a photo is still sending, press the amber SOS button (under Send) on C. A must show the SOS in a few seconds, not after the photo.
+- [ ] While a photo is still sending, hold the amber SOS button on the row beside Delete group on C. A must show the SOS in a few seconds, before the photo.
 - [ ] A file over 400 KB must not be sent over the internet (it still moves over Bluetooth). Note what the sender sees.
 - [ ] PASS = photo arrives intact on the far phone, and SOS overtakes the photo.
 

@@ -697,6 +697,7 @@ class RelayResponder(
      *  `handle` to a real (groupId, key) pair first; a resolution failure is now what routes to the
      *  blind-relay path, instead of a direct `getGroupKey` miss. */
     private suspend fun handleSos(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
+        if (!MeshFrameCodec.sosIdMatchesSealed(frame.id, frame.sealed)) return
         val resolved = repo.resolveGroupKeyByHandle(frame.handle)
         if (resolved == null) {
             takeOpaqueSosCustody(frame, peerAddress)
@@ -715,7 +716,10 @@ class RelayResponder(
                 DiagnosticsLog.event("reject", "sos failed to open for a held group")
                 return
             }
-        ingestOpenedSos(groupId, frame, body, peerAddress)
+        val expectedHandle = MeshFrameCodec.groupHandle(rootKey, body.timestamp / MILLIS_PER_SECOND)
+        if (CryptoUtils.constantTimeEquals(expectedHandle, frame.handle)) {
+            ingestOpenedSos(groupId, frame, body, peerAddress)
+        }
     }
 
     /** The member path for an SOS we could actually open. Split from [handleSos] to keep both
@@ -816,15 +820,12 @@ class RelayResponder(
      *  group-key-derived signal of its own to size this from. Decision 38: [frame.handle] is
      *  forwarded verbatim, never recomputed — a blind relay has no key to recompute it with. */
     private fun takeOpaqueSosCustody(frame: MeshFrameCodec.Frame.SosSealed, peerAddress: String) {
-        val accepted = opaqueSos.offer(
+        opaqueSos.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(frame.sealed),
             hop = frame.hop,
             maxHops = RelayEngine.DEFAULT_TTL,
             viaPeer = peerAddress,
         ) { MeshFrameCodec.reframeSosForRelay(frame.handle, frame.id, frame.ttl, frame.hop + 1, frame.sealed) }
-        if (accepted) {
-            DiagnosticsLog.event("relay", "carrying opaque sos hop=${frame.hop} (not a member)")
-        }
     }
 
     // ---------- couriers (P4 slice 3, docs/DECISIONS.md decision 43) ----------
@@ -844,6 +845,7 @@ class RelayResponder(
     // partitions, so "might wait for the next connection" costs little against that baseline.
 
     private suspend fun handleCourier(frame: MeshFrameCodec.Frame.Courier, peerAddress: String) {
+        if (!MeshFrameCodec.courierIdMatchesSealed(frame.id, frame.sealed)) return
         val resolved = repo.resolveGroupKeyByCourierTag(frame.tag)
         if (resolved == null) {
             takeCourierCustody(frame)
@@ -858,7 +860,10 @@ class RelayResponder(
             DiagnosticsLog.event("reject", "courier envelope failed to open for a held group")
             return
         }
-        ingestOpenedCourier(groupId, frame, body, peerAddress)
+        val expectedTag = MeshFrameCodec.courierTag(rootKey, body.createdAt / MILLIS_PER_SECOND)
+        if (CryptoUtils.constantTimeEquals(expectedTag, frame.tag) && body.createdAt == frame.createdAt) {
+            ingestOpenedCourier(groupId, frame, body, peerAddress)
+        }
     }
 
     /** The member path for a courier envelope we could actually open. Split from [handleCourier] to
@@ -1038,6 +1043,8 @@ class RelayResponder(
         groupId: String,
         rootKey: ByteArray,
     ): Boolean {
+        val expectedHandle = MeshFrameCodec.groupHandle(rootKey, frame.timestamp / MILLIS_PER_SECOND)
+        val handleOk = CryptoUtils.constantTimeEquals(expectedHandle, frame.handle)
         val macInput = MeshFrameCodec.evidMacInput(
             frame.id, groupId, frame.senderId, frame.timestamp, frame.sha256, frame.totalChunks,
             frame.mimeType, frame.thumbnail, frame.contentLength,
@@ -1045,7 +1052,7 @@ class RelayResponder(
         // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — frame.timestamp
         // is already cleartext in the envelope, so the exact epoch is known directly.
         val contentKey = CryptoUtils.contentEpochKey(rootKey, frame.timestamp / MILLIS_PER_SECOND)
-        if (!CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
+        if (!handleOk || !CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), frame.mac)) {
             Log.w("RelayResponder", "evidence header failed auth for a group we hold — dropping")
             DiagnosticsLog.event("reject", "evidence header failed auth for a held group")
             return false
@@ -1072,15 +1079,12 @@ class RelayResponder(
     private fun takeOpaqueCustody(frame: MeshFrameCodec.Frame.PositionSealed, peerAddress: String) {
         // Dedup on the ciphertext itself: encodePosition gives every frame a unique nonce, so
         // identical sealed bytes mean the identical original frame coming back around a triangle.
-        val accepted = opaquePositions.offer(
+        opaquePositions.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(frame.sealed),
             hop = frame.hop,
             maxHops = maxPositionRelayHops,
             viaPeer = peerAddress,
         ) { MeshFrameCodec.reframePositionForRelay(frame.handle, frame.hop + 1, frame.sealed) }
-        if (accepted) {
-            DiagnosticsLog.event("relay", "carrying opaque position hop=${frame.hop} (not a member)")
-        }
     }
 
     /** Presence for a group we hold no key for. Same custody pattern as [takeOpaqueCustody], and the
@@ -1090,7 +1094,7 @@ class RelayResponder(
         // (handle, senderId, timestamp) identifies one presence heartbeat exactly — the sender
         // stamps a fresh timestamp per connection, and the mac is a pure function of these three
         // (decision 38: handle replaces the old cleartext groupId here, same dedup role).
-        val accepted = opaquePresence.offer(
+        opaquePresence.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(
                 frame.handle, frame.senderId.toByteArray(), frame.timestamp.toString().toByteArray()
             ),
@@ -1098,9 +1102,6 @@ class RelayResponder(
             maxHops = maxPositionRelayHops,
             viaPeer = peerAddress,
         ) { MeshFrameCodec.reframePresenceForRelay(frame, frame.hop + 1) }
-        if (accepted) {
-            DiagnosticsLog.event("relay", "carrying opaque presence hop=${frame.hop} (not a member)")
-        }
     }
 
     /** Decision 38 (docs/DECISIONS.md): [frame] no longer names its group directly — resolves
@@ -1343,7 +1344,7 @@ class RelayResponder(
      *  instead by `OpaqueFrameRelay`'s own entry-count/age limits, acceptable given nicknames' low
      *  volume/urgency relative to SOS/position. */
     private fun takeOpaqueNicknameCustody(frame: MeshFrameCodec.Frame.Nickname, peerAddress: String) {
-        val accepted = opaqueNickname.offer(
+        opaqueNickname.offer(
             dedupKey = OpaqueFrameRelay.dedupKey(
                 frame.handle, frame.senderId.toByteArray(), frame.updatedAt.toString().toByteArray()
             ),
@@ -1351,9 +1352,6 @@ class RelayResponder(
             maxHops = RelayEngine.DEFAULT_TTL,
             viaPeer = peerAddress,
         ) { MeshFrameCodec.reframeNicknameForRelay(frame) }
-        if (accepted) {
-            DiagnosticsLog.event("relay", "carrying opaque nickname (not a member)")
-        }
     }
 
     private suspend fun handleCatalogFilter(

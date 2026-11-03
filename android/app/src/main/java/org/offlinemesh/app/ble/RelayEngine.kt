@@ -366,7 +366,8 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
         // hop always +1, unconditionally — ttl may drop by more than 1 under a future degree-aware
         // relay clamp (PLAN-v2.md P1), but hop must stay an honest, uniform distance counter
         // regardless of what ttl does. See SosEntity.hop's doc / docs/DECISIONS.md decision 16.
-        val rowId = sosDao.insert(sos.copy(senderIsMe = false, ttl = sos.ttl - 1, hop = sos.hop + 1))
+        val ttl = sos.ttl.coerceIn(0, ForwardingPolicy.MAX_WIRE_TTL) - 1
+        val rowId = sosDao.insert(sos.copy(senderIsMe = false, ttl = ttl, hop = sos.hop + 1))
         val isNew = rowId != -1L
         if (isNew) epoch.incrementAndGet()
         return isNew
@@ -375,8 +376,9 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
     suspend fun ingestEvidenceMeta(meta: EvidenceEntity): Boolean {
         if (seenDao.find(meta.id) != null) return false
         seenDao.insert(SeenMessageEntity(meta.id, System.currentTimeMillis()))
+        val ttl = meta.ttl.coerceIn(0, ForwardingPolicy.MAX_WIRE_TTL) - 1
         val rowId = evidenceDao.insert(
-            meta.copy(senderIsMe = false, ttl = meta.ttl - 1, complete = false, originalLocalPath = null)
+            meta.copy(senderIsMe = false, ttl = ttl, complete = false, originalLocalPath = null)
         )
         val isNew = rowId != -1L
         if (isNew) epoch.incrementAndGet()
@@ -463,7 +465,12 @@ class RelayEngine(private val context: Context, private val repo: GroupRepositor
                 "evidence hash mismatch, discarding reassembly: " +
                     evidenceId.take(RelayResponder.SENDER_ID_LOG_CHARS)
             )
+            // Symbols are unauthenticated on the wire, so one hostile copy can sit in the stored set
+            // and make every later rebuild fail. Drop the set and its seen markers: the genuine
+            // symbols are accepted again on the next request instead of the item staying stuck.
             liveDecoders.remove(evidenceId)
+            symbolDao.deleteForEvidence(evidenceId)
+            seenDao.deleteWithPrefix("$evidenceId:")
             return@withLock
         }
         // Decision 39 (docs/DECISIONS.md): single derivation, not a candidate list — meta.timestamp

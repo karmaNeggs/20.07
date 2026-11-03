@@ -9,6 +9,12 @@ class ForwardingPolicyTest {
     // ---------- forwardedTtl ----------
 
     @Test
+    fun `forwardedTtl treats a hostile oversized incoming ttl as the protocol ceiling`() {
+        assertEquals(7, ForwardingPolicy.forwardedTtl(incomingTtl = 255, openLinkCount = 2))
+        assertEquals(-1, ForwardingPolicy.forwardedTtl(incomingTtl = -50, openLinkCount = 2))
+    }
+
+    @Test
     fun `below the clamp floor TTL just decrements by 1`() {
         assertEquals(7, ForwardingPolicy.forwardedTtl(incomingTtl = 8, openLinkCount = 2))
         assertEquals(3, ForwardingPolicy.forwardedTtl(incomingTtl = 4, openLinkCount = 5))

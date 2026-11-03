@@ -47,6 +47,36 @@ class InternetReachControllerTest {
 
     private fun step(c: InternetReachController, ms: Long = 1000) = runBlocking { nowMs += ms; c.step() }
 
+    @Test fun `inbound flood is bounded and an SOS alert is drained first`() {
+        val link = FakeLink()
+        val received = ArrayList<Int>()
+        lateinit var inject: (ByteArray) -> Unit
+        val c = InternetReachController(
+            FakeSource(groupKey),
+            { callback -> inject = callback; link },
+            { cls, _ -> received.add(cls) },
+            { nowMs },
+            InternetReachController.Config(jitterFraction = 0.0),
+        )
+        c.start()
+        val live = MeshFrameCodec.encodeUplink(
+            byteArrayOf(1), MeshFrameCodec.UPLINK_CLASS_LIVE, 0, nowMs / 1000, byteArrayOf(1)
+        )
+        val text = MeshFrameCodec.encodeUplink(
+            byteArrayOf(1), MeshFrameCodec.UPLINK_CLASS_TEXT, 0, nowMs / 1000, byteArrayOf(2)
+        )
+        val alert = MeshFrameCodec.encodeUplink(
+            byteArrayOf(1), MeshFrameCodec.UPLINK_CLASS_ALERT, 0, nowMs / 1000, byteArrayOf(3)
+        )
+        repeat(InternetReachController.MAX_INBOUND + 50) { inject(live) }
+        inject(text)
+        inject(alert)
+        step(c)
+        assertEquals(MeshFrameCodec.UPLINK_CLASS_ALERT, received[0])
+        assertEquals(MeshFrameCodec.UPLINK_CLASS_TEXT, received[1])
+        assertTrue(received.size <= InternetReachController.MAX_INBOUND + 2)
+    }
+
     @Test fun `nothing happens before start and after stop`() {
         val link = FakeLink(); val src = FakeSource(groupKey); src.live.add(ByteArray(10))
         val c = fakeController(src, link)

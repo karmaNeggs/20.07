@@ -102,7 +102,10 @@ class InternetReachController(
     @Volatile private var link: UplinkLink? = null
     private class Inbound(val cls: Int, val inner: ByteArray)
 
-    private var inbound = Channel<Inbound>(Channel.UNLIMITED)
+    // Bound untrusted relay input. Reserve space for alerts and messages during a live/bulk burst.
+    private var inbound = Channel<Inbound>(MAX_INBOUND)
+    private var inboundMessages = Channel<Inbound>(MAX_INBOUND_MESSAGES)
+    private var inboundAlerts = Channel<Inbound>(MAX_INBOUND_ALERTS)
     private var nextLiveAt = 0L
     private var slowFactor = 1
     private var lastSlowChangeAt = 0L
@@ -134,11 +137,20 @@ class InternetReachController(
     @Synchronized
     fun start() {
         if (link != null) return
-        inbound = Channel(Channel.UNLIMITED)
-        val channel = inbound
+        inbound = Channel(MAX_INBOUND)
+        inboundMessages = Channel(MAX_INBOUND_MESSAGES)
+        inboundAlerts = Channel(MAX_INBOUND_ALERTS)
+        val normalChannel = inbound
+        val messageChannel = inboundMessages
+        val alertChannel = inboundAlerts
         link = newLink { encodedUplink ->
             (MeshFrameCodec.decode(encodedUplink) as? MeshFrameCodec.Frame.Uplink)?.let {
-                channel.trySend(Inbound(it.cls, it.inner))
+                val target = when (it.cls) {
+                    MeshFrameCodec.UPLINK_CLASS_ALERT -> alertChannel
+                    MeshFrameCodec.UPLINK_CLASS_TEXT -> messageChannel
+                    else -> normalChannel
+                }
+                target.trySend(Inbound(it.cls, it.inner))
             }
         }
         // First periodic publish at a random moment within one interval (when jitter is on), so a crowd that
@@ -156,6 +168,8 @@ class InternetReachController(
         link?.close()
         link = null
         inbound.close()
+        inboundMessages.close()
+        inboundAlerts.close()
         // uplinkedIds and file progress are KEPT across stop/start: what already went out is on the relays, and a
         // switch
         // toggle or network flap must not re-publish the whole mailbox history (a re-wrap gets a fresh timestamp, so
@@ -290,8 +304,11 @@ class InternetReachController(
     }
 
     private suspend fun drainInbound() {
-        while (true) {
-            val item = inbound.tryReceive().getOrNull() ?: return
+        // Check priority lanes on every iteration so live/bulk traffic cannot hold alerts or text behind it.
+        repeat(MAX_DRAIN_PER_STEP) {
+            val item = inboundAlerts.tryReceive().getOrNull()
+                ?: inboundMessages.tryReceive().getOrNull()
+                ?: inbound.tryReceive().getOrNull() ?: return
             onInbound(item.cls, item.inner)
         }
     }
@@ -310,6 +327,10 @@ class InternetReachController(
         // together and saturate the relays again (a sawtooth).
         private const val SLOW_DOWN_MS = 60_000L
         const val INTEREST_INTERVAL_MS = 30_000L
+        const val MAX_INBOUND = 256
+        const val MAX_DRAIN_PER_STEP = 128
+        const val MAX_INBOUND_MESSAGES = 128
+        const val MAX_INBOUND_ALERTS = 64
         const val MAX_UPLINKED_IDS = 8192
         private const val MAX_FILE_STATE = 512
         private const val MS_PER_SEC = 1000L

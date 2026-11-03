@@ -22,22 +22,21 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
-import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 private const val HOLD_MS = 1500
-private val BUTTON_SIZE = 44.dp
+private val BUTTON_SIZE = 48.dp
 
 /**
  * The chat screen's SOS button. A tap only shows a hint; the alert is sent after the button has been held for
  * [HOLD_MS], with a filling ring, so a tap in a pocket or a stray press next to Send cannot raise an alert.
  * Works with an empty message box ([onSend] is then called with a blank string and the caller supplies "SOS").
- * TalkBack users get a "Send SOS" action instead of the hold.
+ * TalkBack users get a labelled click action instead of the hold.
  */
 @Composable
 internal fun SosHoldButton(onSend: () -> Unit) {
@@ -52,7 +51,7 @@ internal fun SosHoldButton(onSend: () -> Unit) {
             .background(AppColors.SosButton)
             .semantics {
                 contentDescription = "SOS, hold to send"
-                customActions = listOf(CustomAccessibilityAction("Send SOS") { onSend(); true })
+                onClick(label = "Send SOS") { onSend(); true }
             }
             .pointerInput(Unit) {
                 detectTapGestures(

@@ -295,6 +295,12 @@ fun GroupChatScreen(
                     Text("Delete group")
                 }
             }
+            Text(
+                "SOS receipt is not confirmed. If available, call local emergency services too.",
+                style = MaterialTheme.typography.labelSmall,
+                color = AppColors.OnSurfaceMuted,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
             Spacer(Modifier.height(8.dp))
         }
     }

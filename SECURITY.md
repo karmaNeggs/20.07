@@ -42,8 +42,7 @@ documents several real, currently-unresolved gaps honestly (no forward secrecy, 
 a fresh report unless you've found a way to actually exploit one in practice, which *would* be
 useful to know.
 
-**Out of scope**: the release build being unsigned (documented, intentional at this stage),
-anything requiring physical access to an unlocked, unencrypted phone (device-level security is
+**Out of scope**: anything requiring physical access to an unlocked, unencrypted phone (device-level security is
 Android's job, not this app's), and social-engineering the group's invite code/QR out of a member
 (key exchange is deliberately out-of-band and trust-based — see Security model).
 

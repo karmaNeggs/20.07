@@ -22,6 +22,29 @@ class JoinCodeTest {
     }
 
     @Test
+    fun `permanent code shares and rejoins without an expiry and uses its own version`() {
+        val original = JoinCode.generate("Emergency team", lifetimeMillis = null)
+        val code = JoinCode.encode(original)
+        val decoded = checkNotNull(JoinCode.decode(JoinCode.extractCode(JoinCode.shareLink(code))))
+        assertEquals(JoinCode.NO_EXPIRY, decoded.expiresAtEpochSec)
+        assertEquals(original.groupId, decoded.groupId)
+        assertArrayEquals(original.key, decoded.key)
+        assertEquals(code, JoinCode.encode(decoded))
+        val bytes = java.util.Base64.getUrlDecoder().decode(code)
+        assertEquals(4.toByte(), bytes[0])
+        bytes[0] = 3
+        assertNull(JoinCode.decode(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)))
+    }
+
+    @Test
+    fun `permanent version refuses a finite expiry instead of changing its meaning`() {
+        val bytes = java.util.Base64.getUrlDecoder().decode(JoinCode.encode(JoinCode.generate("Timed")))
+        assertEquals(3.toByte(), bytes[0])
+        bytes[0] = 4
+        assertNull(JoinCode.decode(java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)))
+    }
+
+    @Test
     fun `two generated groups never share an id or key`() {
         val a = JoinCode.generate("A")
         val b = JoinCode.generate("B")

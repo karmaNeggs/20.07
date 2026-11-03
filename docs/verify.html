@@ -73,7 +73,7 @@
 <main>
 
   <h1>Verify your install</h1>
-  <p class="updated">20.07 — v0.10.2-dev</p>
+  <p class="updated">20.07 — v0.10.3-dev</p>
 
   <div class="summary-box">
     20.07 is installed from a file, not from an app store, so nobody else checks it for you. Two checks tell you the file is the one published here: its checksum, and the fingerprint of the key it is signed with.
@@ -87,14 +87,14 @@
   <h2>2. The file checksum (before you install)</h2>
   <table>
     <tr><th>File</th><th>SHA-256</th></tr>
-    <tr><td><code>20.07-v0.10.2-dev-release.apk</code></td><td><code>a0849e44a6de92307cd392f195a5f0e98172fdef65895067d955e00c536ffea6</code></td></tr>
+    <tr><td><code>20.07-v0.10.3-dev-release.apk</code></td><td><code>534d89ece6c8e51576efadc10101627a24e2e8f2a04f496df1e8947c29d1c499</code></td></tr>
   </table>
   <p>The same value is in <a href="https://github.com/karmaNeggs/20.07/raw/main/releases/SHA256SUMS">SHA256SUMS</a> next to the APK, and in the notes of each GitHub release.</p>
-  <p>On Linux or macOS: <code>shasum -a 256 20.07-v0.10.2-dev-release.apk</code><br>
-  On Windows (PowerShell): <code>Get-FileHash 20.07-v0.10.2-dev-release.apk -Algorithm SHA256</code></p>
+  <p>On Linux or macOS: <code>shasum -a 256 20.07-v0.10.3-dev-release.apk</code><br>
+  On Windows (PowerShell): <code>Get-FileHash 20.07-v0.10.3-dev-release.apk -Algorithm SHA256</code></p>
 
   <h2>3. Check the signature on a computer (optional)</h2>
-  <p>With the Android SDK build tools: <code>apksigner verify --print-certs 20.07-v0.10.2-dev-release.apk</code>. The line "certificate SHA-256 digest" is the fingerprint above, written without colons and in lower case.</p>
+  <p>With the Android SDK build tools: <code>apksigner verify --print-certs 20.07-v0.10.3-dev-release.apk</code>. The line "certificate SHA-256 digest" is the fingerprint above, written without colons and in lower case.</p>
 
   <h2>If the values differ</h2>
   <p>Do not install the file (or uninstall the app if it is already installed), and download it again from <a href="https://github.com/karmaNeggs/20.07/releases">the GitHub releases page</a>. Report a mismatch through the repository's issues.</p>

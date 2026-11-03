@@ -10,7 +10,15 @@ network that can't help them do it — whether that network is overloaded by too
 there was never much of one there to begin with.
 
 
-## What's new in 0.10.2-dev
+## What's new in 0.10.3-dev
+
+- **Optional "No expiry" group:** next to the timed choices (now 12 h, 48 h default, 72 h, 7 d, 30 d, 6 months) you can create a group that stays until you delete it. Its join code uses a new version, so phones on an older build cannot join it; timed groups work with every build. Messages and files still age out on their normal schedule, and a group that has already expired is not brought back.
+- **SOS wording and accessibility:** the app says an SOS was saved on this phone and that nobody has confirmed receiving it, and points to ordinary emergency channels when you have them. The SOS button in a group chat is 48 dp and works with TalkBack; the general SOS screen shows one status instead of one message per group.
+- **Replay and ttl guards, no wire change:** an SOS or courier envelope whose id does not match its sealed body is rejected; a wire ttl above 8 is treated as 8; evidence that failed its final hash check is discarded and fetched again instead of staying stuck. Phones on 0.10.2-dev keep exchanging SOS, messages and files with this build. Details: `docs/DECISIONS.md` decision 82.
+- **Less congestion:** inbound Internet-reach queues are capped (alerts 64, texts 128, other 256, at most 128 frames handled per step) and per-frame relay log lines were removed.
+- **Phone testing:** the changes in this build were covered by 755 passing unit tests and a clean detekt run; a phone round on this exact build is not recorded here.
+
+## What was new in 0.10.2-dev
 
 - **SOS button moved:** it now sits on the bottom row, left of "Delete group", away from Send, so a stray tap on Send cannot raise an alert.
 - **SOS must be held** for 1.5 s to send (works with an empty box); screenshots are allowed while the app is open; a colour-contrast pass over buttons, light mode, text fields and dialogs.
@@ -114,14 +122,15 @@ hoping it matches. The code gets shared "over whatever channel you already trust
 an existing chat app, read aloud, or scanned as a QR code — same trust model either way, just a
 more reliable payload than a typed passphrase.
 
-**Groups are ephemeral by design and expiry is baked into the code itself.** 20.07 is built for
-ad hoc coordination, not standing chat rooms — a typical group lives 2-3 days, and 6 months is a
-hard ceiling (picked at creation from a lifetime menu: 12h/48h-default/7d/30d/6mo). The expiry
-timestamp is encoded directly into the shareable join code, not tracked separately per phone, so
-every member — whoever created the group, whoever joined an hour later — agrees on the exact same
-expiry moment. Once it passes, every member's own app dismantles the group on its own: the key,
-the messages, the incident photos, all of it, gone, with nothing to "clean up" on a server because
-there isn't one.
+**Choose a timed group or an explicit No expiry group.** The default remains 48 hours;
+the lifetime menu offers 12h/48h/72h/7d/30d/6mo and No expiry. Timed groups carry an absolute
+expiry in the shareable code, so every member agrees on the same end moment regardless of when
+they join. Each phone dismantles the group after expiry. A permanent group remains available
+until you delete it; old messages and evidence still follow the existing retention and relay limits.
+Deleting your copy does not delete another member's copy.
+
+Permanent groups use a new join-code version. Older apps reject those codes; use an updated
+build on every joining phone. Timed codes keep their existing format. Permanent groups are part of 0.10.3-dev and later.
 
 **Discovery uses rotating, anonymous beacon IDs.** Instead of broadcasting anything that
 identifies your group, your phone advertises `HMAC(group_key, current_60s_time_window)` — a
@@ -267,13 +276,12 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
 **What this does *not* protect against** — read this before relying on the app for anything
 where it matters:
 
-- **No forward secrecy, no membership revocation — mitigated, not solved, by groups being
-  short-lived by design.** The group key is a single static secret for the group's lifetime, and
-  there's still no way to remove one member's access short of dismantling the group and recreating
-  it with an entirely new key/code for everyone remaining. What's changed: groups now carry a
-  built-in expiry (2-3 days is the typical/intended use, 6 months is the hard ceiling — see "How it
-  works" above), enforced by every member's own app, not a social convention — so the blast radius
-  of a static key is bounded to however long that particular group actually lived, not forever.
+- **No forward secrecy or membership revocation.** The group key is a static secret for the
+  group's lifetime. To remove someone's access, create a new group with a new code and share it
+  only with the remaining members. Timed groups expire automatically. An explicit No expiry
+  group has no automatic key expiry: anyone who obtains its code can retain access indefinitely.
+  Deleting a local group or letting a timed group expire does not erase someone else's captured
+  ciphertext or leaked keys. Recreate the group after a code leak.
 - **The app does not hide itself.** It shows as "20.07" on the home screen and in Settings →
   Apps, and its foreground-service notification names it. The recent-apps thumbnail is blank
   (`FLAG_SECURE` is switched on only while the app is in the background; screenshots work while
@@ -419,7 +427,7 @@ value (see Known Limitations above) but hasn't had its own dedicated hardware ro
 ## Specs
 
 - **Platform**: Android only. Min SDK 26 (Android 8.0+), target/compile SDK 36.
-- **Package**: `org.offlinemesh.app`. `versionName` `0.10.2-dev` — pre-1.0, see Known Limitations.
+- **Package**: `org.offlinemesh.app`. `versionName` `0.10.3-dev` — pre-1.0, see Known Limitations.
 - **Distribution**: **APK only, no Play Store.** Download the APK from this repo (see below) or
   build it yourself; sideloading is the only install path by design.
 - **Language/stack**: Kotlin, Jetpack Compose (Material 3), Room (SQLite), plain
@@ -435,25 +443,24 @@ A switch on the home screen lets a phone with a connection (Wi-Fi, hotspot or mo
 end-to-end-encrypted messages and live locations to group members it cannot reach by Bluetooth, through public
 Nostr relay servers. Two phones with **Bluetooth off** can use it alone, and a phone with Bluetooth plus
 internet bridges nearby Bluetooth-only phones to internet-only ones. Relays see only ciphertext, rotating group
-codes, your IP address and timing; **both mates need the switch on**. Design: `PLAN-v2.md` Part 13 and
+codes, your IP address and timing; **both mates need the switch on**. Treat a copied join code as a secret: it contains the group key and can remain in clipboard history. Design: `PLAN-v2.md` Part 13 and
 `docs/DECISIONS.md` decisions 66-72.
 
-**Status (0.10.2-dev):** a three-phone round on 2026-10-13 passed for the bridge case (Bluetooth-only phone, internet-only phone with
+**Status (0.10.2-dev):** the author confirmed on 2026-10-27 that the signed release APK was physically tested on 4-5 phones. A three-phone round on 2026-10-13 passed for the bridge case (Bluetooth-only phone, internet-only phone with
 Bluetooth off, and a phone with both between them): messages, SOS alerts, positions and files crossed in about 3-7 s, "Last seen" showed
 mates who went quiet, and the Offline tile paused and resumed the internet side within seconds. Earlier tests: two phones with Bluetooth off,
-simulation (1000 users, outages, shared carrier addresses, alert storms) and public relays. **Stranger-carrying "mule" mode, battery use
-and a long field run are still to report.** Files travel too (any connection, up to 400 KB, paced, lowest priority), SOS alerts have top
+simulation (1000 users, outages, shared carrier addresses, alert storms) and public relays. **The author later reported stranger carrying and battery/power-saver testing, with no major drain; no quantitative battery figures or long field run are recorded.** Files travel too (any connection, up to 400 KB, paced, lowest priority), SOS alerts have top
 priority, and a mate who went quiet shows under "Last seen" for up to 6 hours, with distance and compass direction measured from your
 current position to where that mate was last heard. Design and evidence: `PLAN-v2.md` Part 13.
 
 ## Get the app
 
-**Prebuilt APK**: [download 20.07 v0.10.2-dev (signed release)](https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.2-dev-release.apk)
+**Prebuilt APK**: [download 20.07 v0.10.3-dev (signed release)](https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.3-dev-release.apk)
 (older builds are on the [Releases](https://github.com/karmaNeggs/20.07/releases) page) and install it —
 you'll need to allow installs from that source once in Android's settings. (The same file also
 sits in the [`releases/`](releases/) folder in-tree if you're browsing the source rather than the
 Releases page.) This is the signed **release** build (minified, no debug-only tooling). The newest build
-(0.10.2-dev) carries Internet reach, now tried on three phones; see "Internet reach" and Known
+(0.10.3-dev) carries Internet reach, now tried on three phones; see "Internet reach" and Known
 Limitations above for what is still thin about its testing history.
 
 **Build from source**:

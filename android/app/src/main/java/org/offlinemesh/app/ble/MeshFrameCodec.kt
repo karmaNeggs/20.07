@@ -639,6 +639,12 @@ object MeshFrameCodec {
     // without re-encrypting on every hop.
     private fun sosNonce(id: String): ByteArray = CryptoUtils.sha256(id.toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
 
+    /** The wire id must name the ciphertext's deterministic nonce,
+     *  or a captured alert could be replayed under a new id. */
+    fun sosIdMatchesSealed(id: String, sealed: ByteArray): Boolean =
+        sealed.size >= GCM_NONCE_LEN + 16 &&
+            CryptoUtils.constantTimeEquals(sealed.copyOfRange(0, GCM_NONCE_LEN), sosNonce(id))
+
     /** Produces JUST the raw AES-GCM sealed bytes — no envelope — for storing as
      *  [SosEntity.sealed]: that field's own doc says it "mirrors [PositionTracker.Record.sealed]'s
      *  exact shape," which is always raw ciphertext (what [decode]'s `FRAME_SOS` case extracts from
@@ -1044,6 +1050,11 @@ object MeshFrameCodec {
      *  sufficient (nonce reuse is only unsafe across DIFFERENT plaintexts under one key; re-sealing
      *  the same id reproduces the same nonce AND the same plaintext, a GCM no-op). */
     private fun courierNonce(id: String): ByteArray = CryptoUtils.sha256(id.toByteArray(UTF8)).copyOf(GCM_NONCE_LEN)
+
+    /** Reject a captured courier body carried under a substituted envelope id before storing it. */
+    fun courierIdMatchesSealed(id: String, sealed: ByteArray): Boolean =
+        sealed.size >= GCM_NONCE_LEN + 16 &&
+            CryptoUtils.constantTimeEquals(sealed.copyOfRange(0, GCM_NONCE_LEN), courierNonce(id))
 
     /** Mirrors [SosBody]'s own shape and doc — see that class for why [signedBytes] is captured
      *  verbatim rather than re-derived. [payload] is opaque to this codec: what a courier actually

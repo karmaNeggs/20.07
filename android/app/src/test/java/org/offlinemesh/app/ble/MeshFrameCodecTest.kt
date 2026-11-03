@@ -1204,4 +1204,21 @@ class MeshFrameCodecTest {
         val macInput = MeshFrameCodec.presenceMacInput("group-1", "sender-1", 1_700_000_000_000L)
         assertTrue(CryptoUtils.constantTimeEquals(CryptoUtils.authTag(contentKey, macInput), relayed.mac))
     }
+
+    @Test
+    fun `sealed SOS cannot be replayed under a new envelope id`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealSosBody(key, "original", "sender", "help", 1_700_000_000_000L, true)
+        assertTrue(MeshFrameCodec.sosIdMatchesSealed("original", sealed))
+        assertFalse(MeshFrameCodec.sosIdMatchesSealed("new-id", sealed))
+        assertFalse(MeshFrameCodec.sosIdMatchesSealed("original", byteArrayOf(1, 2)))
+    }
+
+    @Test
+    fun `sealed courier cannot be replayed under a new envelope id`() {
+        val key = randomKey()
+        val sealed = MeshFrameCodec.sealCourierBody(key, "original", "sender", byteArrayOf(1), 1_700_000_000_000L)
+        assertTrue(MeshFrameCodec.courierIdMatchesSealed("original", sealed))
+        assertFalse(MeshFrameCodec.courierIdMatchesSealed("new-id", sealed))
+    }
 }

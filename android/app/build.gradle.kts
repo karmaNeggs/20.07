@@ -27,8 +27,8 @@ android {
         applicationId = "org.offlinemesh.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 49
-        versionName = "0.10.2-dev"
+        versionCode = 50
+        versionName = "0.10.3-dev"
     }
 
     signingConfigs {

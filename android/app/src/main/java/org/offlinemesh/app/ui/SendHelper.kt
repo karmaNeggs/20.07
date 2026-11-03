@@ -5,17 +5,20 @@ import android.widget.Toast
 import org.offlinemesh.app.ble.MeshService
 
 /**
- * Sends a message or SOS without ever crashing the screen or pretending it went out. Returns true only if the
- * mesh service accepted it. A group that has just expired or been deleted, or a service that is not bound yet,
- * shows a short notice and keeps the user's text; with Offline mode on it says plainly the message is saved.
+ * Saves a message or SOS for the mesh without crashing the screen or claiming recipient delivery. Returns true
+ * only if the mesh service accepted it locally. A group that has just expired or been deleted,
+ * or a service that is not bound yet, shows a short notice and keeps the user's text;
+ * with Offline mode on it says plainly the message is saved.
  */
-@Suppress("SwallowedException") // a rejected send is reported to the user, not an error to propagate
+// Explicit send arguments plus a UI-only switch to avoid duplicate notices in the multi-group SOS screen.
+@Suppress("SwallowedException", "LongParameterList")
 internal suspend fun safeSend(
     context: Context,
     meshService: MeshService?,
     groupId: String,
     text: String,
     isAlert: Boolean,
+    showAlertStatus: Boolean = true,
 ): Boolean {
     if (meshService == null) {
         Toast.makeText(context, "Not ready yet, try again in a moment", Toast.LENGTH_SHORT).show()
@@ -32,8 +35,10 @@ internal suspend fun safeSend(
     if (!sent) {
         Toast.makeText(context, "Couldn't send: this group has ended", Toast.LENGTH_LONG).show()
     } else if (!meshService.meshActive.value) {
-        val note = "Offline mode is on: saved, it will go out when you turn it off"
+        val note = "Offline mode: saved on this phone; turn it off to try delivery"
         Toast.makeText(context, note, Toast.LENGTH_LONG).show()
+    } else if (isAlert && showAlertStatus) {
+        Toast.makeText(context, "SOS saved to send; another person's receipt is unconfirmed", Toast.LENGTH_LONG).show()
     }
     return sent
 }

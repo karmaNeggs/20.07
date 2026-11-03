@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.3-dev] — No expiry groups, clearer SOS status, replay and ttl guards
+
+**New**
+- Optional **No expiry** group alongside the timed lifetimes; a 72 hour lifetime was added. Timed groups and the 48 hour default are unchanged. No expiry codes use join-code version 4 (expiry field zero); older apps reject them.
+
+**Changed**
+- SOS screens say the alert was saved on this phone and that receipt is unconfirmed, and mention ordinary emergency channels. The group-chat SOS button is 48 dp with a TalkBack click action; the general SOS screen shows one status line.
+- Internet reach inbound queues are bounded (alert 64, text 128, other 256) with at most 128 frames processed per step; uplink dedup includes flags; per-frame opaque-relay log lines removed.
+
+**Security (no wire-format change; `VERSION` stays 12)**
+- SOS and courier envelope ids must match the id sealed in the body; resolved handle and courier tag must match the authenticated creation time.
+- A wire ttl above 8 is clamped to 8 on arrival and when forwarding.
+- Evidence whose reassembled bytes fail the hash check has its stored symbols and seen markers discarded, so valid symbols can be accepted again.
+- Decision 82 in `docs/DECISIONS.md` lists what was left open (unauthenticated evidence symbols, blind-relay dedup key, nickname timestamp lock).
+
+**Verification**
+- 755 unit tests pass (1 skipped), detekt and the release build are clean. The release APK is signed with the same certificate as 0.10.2-dev. A phone round on this exact build is not recorded.
+
 ## [0.10.2-dev] — SOS button moved, clearer diagnostics log
 
 **Changed**

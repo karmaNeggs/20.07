@@ -543,6 +543,13 @@ class RelayResponderTest {
         assertTrue(toAnotherPeer.any { it is MeshFrameCodec.Frame.SosSealed })
     }
 
+    private fun courierFixture(tag: ByteArray, id: String, copies: Int): ByteArray {
+        val now = System.currentTimeMillis()
+        val contentKey = CryptoUtils.contentEpochKey(testGroupKey, now / 1000)
+        val sealed = MeshFrameCodec.sealCourierBody(contentKey, id, "sender-1", byteArrayOf(9, 9, 9), now)
+        return MeshFrameCodec.encodeCourier(tag, id, now, copies, sealed)
+    }
+
     // ---------- couriers (P4 slice 3, docs/DECISIONS.md decision 43) ----------
     // repo holds zero active groups in this file (see the class doc above — testGroupKey never goes
     // through repo.groupDao), so any Frame.Courier fed through handleIncoming here is automatically
@@ -550,9 +557,22 @@ class RelayResponderTest {
     // decision 38's own equivalent test relies on for the handle-based blind-relay path.
 
     @Test
+    fun `a captured courier cannot take blind custody under a substituted id`() = runTest {
+        val original = MeshFrameCodec.decode(courierFixture(ByteArray(16), "original", 4))
+            as MeshFrameCodec.Frame.Courier
+        responder.handleIncoming(
+            MeshFrameCodec.encodeCourier(
+                original.tag, "forged-id", original.createdAt, original.copiesRemaining, original.sealed,
+            ),
+            "peer1",
+        ) { }
+        assertEquals(null, AppDatabase.get(context).courierEnvelopeDao().getById("forged-id"))
+    }
+
+    @Test
     fun `an unresolvable courier envelope is stored as blind carry, not opened`() = runTest {
         val tag = ByteArray(16) { it.toByte() }
-        val frame = MeshFrameCodec.encodeCourier(tag, "env-1", System.currentTimeMillis(), 4, byteArrayOf(9, 9, 9))
+        val frame = courierFixture(tag, "env-1", 4)
 
         responder.handleIncoming(frame, "peer1") { }
 
@@ -561,7 +581,7 @@ class RelayResponderTest {
         assertEquals(null, stored.groupId)
         assertEquals(null, stored.senderId)
         assertArrayEquals(tag, stored.tag)
-        assertArrayEquals(byteArrayOf(9, 9, 9), stored.sealed)
+        assertArrayEquals((MeshFrameCodec.decode(frame) as MeshFrameCodec.Frame.Courier).sealed, stored.sealed)
         AppDatabase.get(context).courierEnvelopeDao().pruneOlderThan(Long.MAX_VALUE)
     }
 
@@ -572,7 +592,7 @@ class RelayResponderTest {
         // delivery flows exclusively through the CatalogFilter push cycle (see the tests below).
         // Budget-independent: true whether or not the envelope has spare copiesRemaining.
         val tag = ByteArray(16) { it.toByte() }
-        val frame = MeshFrameCodec.encodeCourier(tag, "env-blind", System.currentTimeMillis(), 4, byteArrayOf(1))
+        val frame = courierFixture(tag, "env-blind", 4)
         responder.handleIncoming(frame, "peer1") { }
 
         val carried = responder.refreshFramesToPush("peer2").mapNotNull { MeshFrameCodec.decode(it) }
@@ -584,7 +604,7 @@ class RelayResponderTest {
     fun `a blind-carried envelope down to its last copy is never offered onward`() = runTest {
         val tag = ByteArray(16) { it.toByte() }
         // copiesRemaining = 1: below CourierHandover.MIN_COPIES_TO_SPLIT, nothing left to hand over.
-        val frame = MeshFrameCodec.encodeCourier(tag, "env-blind-1", System.currentTimeMillis(), 1, byteArrayOf(1))
+        val frame = courierFixture(tag, "env-blind-1", 1)
         responder.handleIncoming(frame, "peer1") { }
 
         val toPush = relay.relayableCourierEnvelopes()
@@ -602,7 +622,7 @@ class RelayResponderTest {
             // deliberately disabled: once copiesRemaining has a real bound, a blind carrier with
             // copies to spare CAN pass some along to a further peer.
             val tag = ByteArray(16) { it.toByte() }
-            val frame = MeshFrameCodec.encodeCourier(tag, "env-blind-4", System.currentTimeMillis(), 4, byteArrayOf(1))
+            val frame = courierFixture(tag, "env-blind-4", 4)
             responder.handleIncoming(frame, "peer1") { }
 
             val peerFilter = CatalogFilter.build(emptyList())
@@ -625,7 +645,7 @@ class RelayResponderTest {
     @Test
     fun `a courier handover is not repeated for the same peer within the rate-limit window`() = runTest {
         val tag = ByteArray(16) { it.toByte() }
-        val frame = MeshFrameCodec.encodeCourier(tag, "env-rate", System.currentTimeMillis(), 4, byteArrayOf(1))
+        val frame = courierFixture(tag, "env-rate", 4)
         responder.handleIncoming(frame, "peer1") { }
 
         val peerFilter = CatalogFilter.build(emptyList())

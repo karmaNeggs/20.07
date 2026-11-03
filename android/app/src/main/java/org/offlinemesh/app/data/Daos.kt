@@ -18,17 +18,18 @@ interface GroupDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(group: GroupEntity)
 
-    // Filters out expired rows entirely at the SQL level — belt-and-braces so an expired group
+    // Zero expiry is an explicitly permanent group. Finite expired rows are filtered at the SQL
+    // level — belt-and-braces so an expired group
     // can never be advertised, relayed for, or have its presence heartbeat sent even in the brief
     // window before GroupRepository.expireGroups' own periodic sweep actually deletes it (up to
     // 30 minutes; see MeshService.startPruning). The real deletion (and the security property that
     // matters — dropping the key, wiping content) still happens in expireGroups, not here; this is
     // only a display/relay-eligibility gate. strftime('%s','now') is UTC epoch seconds (SQLite),
     // matching System.currentTimeMillis()'s own UTC-epoch basis once scaled to millis.
-    @Query("SELECT * FROM groups WHERE expiresAt > CAST(strftime('%s','now') AS INTEGER) * 1000")
+    @Query("SELECT * FROM groups WHERE expiresAt = 0 OR expiresAt > CAST(strftime('%s','now') AS INTEGER) * 1000")
     suspend fun getActiveGroups(): List<GroupEntity>
 
-    @Query("SELECT id FROM groups WHERE expiresAt <= :nowMillis")
+    @Query("SELECT id FROM groups WHERE expiresAt != 0 AND expiresAt <= :nowMillis")
     suspend fun expiredGroupIds(nowMillis: Long): List<String>
 
     // Unfiltered — unlike getActiveGroups, this must include an already-expired-but-not-yet-swept
@@ -52,6 +53,11 @@ interface SeenMessageDao {
 
     @Query("DELETE FROM seen_messages WHERE seenAt < :cutoff")
     suspend fun prune(cutoff: Long)
+
+    /** Forgets every per-symbol marker of one evidence item (ids are "evidenceId:esi"), so a
+     *  poisoned symbol set can be discarded and the genuine symbols accepted again. */
+    @Query("DELETE FROM seen_messages WHERE substr(id, 1, length(:prefix)) = :prefix")
+    suspend fun deleteWithPrefix(prefix: String)
 }
 
 @Dao

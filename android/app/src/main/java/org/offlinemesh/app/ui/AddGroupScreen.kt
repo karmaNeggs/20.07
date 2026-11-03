@@ -169,7 +169,11 @@ fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -> Un
                         val remainingMs =
                             decodedPreview.expiresAtEpochSec * MILLIS_PER_SECOND - System.currentTimeMillis()
                         Text(
-                            "\"${decodedPreview.name}\" — expires in ${formatTimeRemaining(remainingMs)}",
+                            if (decodedPreview.expiresAtEpochSec == JoinCode.NO_EXPIRY) {
+                                "\"${decodedPreview.name}\" — No expiry"
+                            } else {
+                                "\"${decodedPreview.name}\" — expires in ${formatTimeRemaining(remainingMs)}"
+                            },
                             color = AppColors.OnSurfaceMuted, style = MaterialTheme.typography.bodySmall
                         )
                     } else if (code.isNotBlank()) {
@@ -200,7 +204,7 @@ fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -> Un
                     )
                     Spacer(Modifier.height(24.dp))
                     Text(
-                        "Deletes itself after",
+                        "Group lifetime",
                         style = MaterialTheme.typography.titleSmall, color = AppColors.OnSurfaceMuted
                     )
                     Spacer(Modifier.height(8.dp))
@@ -208,6 +212,14 @@ fun AddGroupScreen(repo: GroupRepository, prefillCode: String?, onDone: () -> Un
                         selectedIndex = selectedLifetimeIndex,
                         onChange = { selectedLifetimeIndex = it }
                     )
+                    if (GROUP_LIFETIME_OPTIONS[selectedLifetimeIndex].millis == null) {
+                        Text(
+                            "Stays until you delete it. Anyone with the code keeps access. " +
+                                "Use an updated app on every phone; old messages still expire.",
+                            color = AppColors.OnSurfaceMuted,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                     Spacer(Modifier.weight(1f))
                     Button(
                         enabled = name.isNotBlank(),
@@ -258,34 +270,22 @@ private fun ModeToggle(mode: Mode, onChange: (Mode) -> Unit) {
     }
 }
 
-/** Same segmented-row shape as [ModeToggle], generalized to [GROUP_LIFETIME_OPTIONS]'s 5 choices —
- *  short labels (`"12h"`/`"48h"`/`"7d"`/`"30d"`/`"6mo"`) so all 5 fit one row on a phone width,
- *  matching [GroupLifetimeOption.shortLabel] specifically (the create-flow explainer text uses the
- *  fuller [GroupLifetimeOption.label] instead, where there's room for it). */
+/** A menu keeps all lifetime choices readable at narrow widths and large font sizes. */
 @Composable
 private fun LifetimePicker(selectedIndex: Int, onChange: (Int) -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(AppColors.Surface)
-            .padding(4.dp)
-    ) {
-        GROUP_LIFETIME_OPTIONS.forEachIndexed { index, option ->
-            val selected = index == selectedIndex
-            Box(
-                Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(if (selected) AppColors.Accent else Color.Transparent)
-                    .clickable(onClick = { onChange(index) })
-                    .padding(vertical = 10.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Text(
-                    option.shortLabel,
-                    color = if (selected) AppColors.OnAccent else AppColors.OnSurfaceMuted,
-                    style = MaterialTheme.typography.labelMedium
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(
+            onClick = { expanded = true },
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        ) {
+            Text(GROUP_LIFETIME_OPTIONS[selectedIndex].label)
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            GROUP_LIFETIME_OPTIONS.forEachIndexed { index, option ->
+                DropdownMenuItem(
+                    text = { Text(option.label) },
+                    onClick = { onChange(index); expanded = false },
                 )
             }
         }

@@ -3,7 +3,8 @@ package org.offlinemesh.app.data
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
-/** [expiresAt] is epoch millis, matching [createdAt]'s unit — the DB entity has no wire-size
+/** [expiresAt] is epoch millis, or zero for an explicitly permanent group.
+ *  Finite values match [createdAt]'s unit — the DB entity has no wire-size
  *  constraint the way [JoinCode]'s own compact epoch-seconds field does, so full millis precision
  *  costs nothing here. Always derived from [JoinCode.Parsed.expiresAtEpochSec] (never computed
  *  independently), so every member of a group agrees on the exact same expiry regardless of when
