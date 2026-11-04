@@ -1,9 +1,11 @@
 # 20.07 — architecture notes
 
+*Describes version 0.10.3-dev (wire `VERSION` 12).*
+
 This is not a feature tour (see [`README.md`](../README.md) for that) and not a security audit
 (see README's Security Model / Known Limitations for what this design does *not* protect
 against). It's a short record of how the system is put together, and specifically of the handful
-of pieces that took real engineering to get right rather than being a standard choice applied in
+of pieces that took engineering to get right rather than being a standard choice applied in
 the standard way. Where something here is a known technique borrowed from elsewhere, that's
 said plainly — most of what follows is applying an existing idea correctly to this problem, not
 inventing one.
@@ -34,23 +36,22 @@ in the design — see README for why.
 `BeaconRadio`'s core rule — advertising and scanning are only ever stopped/restarted when the
 thing being transmitted has *actually changed*, never on a fixed timer — sounds obvious written
 down. It wasn't arrived at that way. An earlier version re-asserted the BLE advertiser on every
-loop tick (~every 700–900ms) regardless of whether the payload had changed; that pushed real
-hardware into total, symmetric discovery failure on *both* test phones at once, a known category
+loop tick (~every 700–900ms) regardless of whether the payload had changed; that pushed hardware into total, symmetric discovery failure on *both* test phones at once, a known category
 of chipset instability under rapid stop/start cycling. The fix — compare the candidate payload
-against what's currently on the air, touch the radio only on a real difference — cut a stable
+against what's currently on the air, touch the radio only on a difference — cut a stable
 single-group beacon down to one radio restart roughly every 60 seconds (the rotating-ID window),
 *less* churn than the design before any of this started. Scanning follows the identical rule: one
 `startScan()` per power tier, left running, with `ScanSettings.scanMode` as the only duty-cycle
 lever — an earlier version that start/stopped scanning every few seconds ran into Android's
-undocumented ~5-calls-per-30-seconds throttle, producing a real asymmetric "device A sees B, B
-doesn't see A" bug. Both failures were real, both were only found by testing on physical phones,
+undocumented ~5-calls-per-30-seconds throttle, producing an asymmetric "device A sees B, B
+doesn't see A" bug. Both failures were only found by testing on physical phones,
 and the fix in both cases was the same principle, not two different patches.
 
 ### Advertise-restart jitter, solving a problem the privacy design itself creates
 
 The rotating beacon ID has to flip on a *shared* wall-clock boundary — every phone needs to
 compute the same value at the same moment, or discovery breaks. That requirement has a
-side-effect nobody asked for: at real crowd density, every phone's radio restart lands in the
+side-effect nobody asked for: at crowd density, every phone's radio restart lands in the
 same sub-second window every minute, all at once — a synchronized stop/start burst across
 hundreds of radios simultaneously, not one phone's problem. The fix is a stable, per-device offset
 derived from `sha256(deviceId)` (0–2000ms), applied before the restart — it changes *when* within
@@ -66,12 +67,12 @@ jitter for a different purpose.
 Android's `BluetoothGatt` allows exactly one outstanding operation per connection, of *any* kind —
 not "one write," one operation, full stop. `GattOperationQueue` exists because an earlier version
 fired the CCCD subscription write and then, with no completion handler at all, immediately started
-writing data frames on the same connection. The result was a real, reproducible asymmetry: the
+writing data frames on the same connection. The result was a reproducible asymmetry: the
 peer you connected to (the one you could see) never reliably received anything from you, while
 their notifications back to you worked fine, since those weren't racing anything on your side.
 This exact bug — descriptor write racing a data write on a connection with no serialization — is
 one of the most common latent defects in hand-rolled Android BLE code; it's usually invisible
-until two-device testing under real timing, which is exactly how it was found here.
+until two-device testing under live timing, which is exactly how it was found here.
 
 ### A connection-attempt timeout for a failure mode the platform doesn't document
 
@@ -79,7 +80,7 @@ until two-device testing under real timing, which is exactly how it was found he
 the peer goes out of range mid-attempt or Bluetooth itself toggles during a pending connection.
 Without an explicit timeout, that peer's address stays marked "connecting" forever and is never
 retried. `ConnectionAttemptTracker` adds a 15-second timeout keyed off *whether any callback at
-all* has fired (not whether it succeeded), so a genuinely slow-but-working connection isn't
+all* has fired (not whether it succeeded), so a slow-but-working connection isn't
 force-closed, only a truly stuck one. This one fix resolved three previously-separate-looking
 field reports at once ("breaks after a handful of messages," "breaks if Bluetooth is toggled off
 and on," "a far-away connection doesn't come back") — they were the same bug wearing different
@@ -126,7 +127,7 @@ plotting a confident-looking dot that might be tens to hundreds of metres wrong.
 isn't just "reject obvious garbage": live testing showed many phones deliberately *widen* their
 reported GPS accuracy while stationary (to reduce continuous satellite tracking and save battery),
 then tighten it back up the instant motion is detected — which, at a naive threshold, made a
-peer's dot flicker away while standing genuinely still side-by-side, then reappear on the next
+peer's dot flicker away while standing still side-by-side, then reappear on the next
 step. The threshold now sits high enough to absorb that pattern. The underlying decision — show
 nothing rather than show something false — is applied consistently (radar dots, ring-scale
 labels, staleness fade) rather than left to whichever screen happened to be written first, since
@@ -137,10 +138,10 @@ this logic used to be copy-pasted into three places before being pulled into one
 The optional BT5 Coded-PHY long-range beacon channel uses a simplified Trickle timer
 (`TrickleTimer.kt`) to decide when a device should stay quiet because enough neighbors are already
 covering a group on that channel, versus when it should transmit at full rate because coverage
-looks thin. The real property this buys: redundant long-range traffic scales down with local
+looks thin. The property this buys: redundant long-range traffic scales down with local
 density instead of scaling up with crowd size the way a fixed per-device timer would. This is a
 known algorithm (RFC 6206), simplified (no "inconsistency resets the interval" branch, since this
-timer's one input has no natural "consistent version" to compare against) and applied to a genuine
+timer's one input has no natural "consistent version" to compare against) and applied to a
 sub-problem this project has, not a novel algorithm.
 
 ### Fountain coding, and why not the obvious library
@@ -156,7 +157,7 @@ systematic random-linear fountain code with Gaussian-elimination (GF(2)) decodin
 to reason about directly. One design choice was revised after measurement, not guessed: a
 robust-soliton degree distribution (fountain coding's usual choice, tuned for very large block
 counts) was tried first, then dropped for dense random coefficients after measuring 1.3-2.6x more
-real transmission overhead from soliton at this app's actual evidence-photo block sizes — the
+transmission overhead from soliton at this app's actual evidence-photo block sizes — the
 classic tuning only pays off at scales this app doesn't operate at.
 
 ### Courier handoff: proving copies can't leak or duplicate across a split
@@ -170,7 +171,7 @@ is what got tested: a property test asserting the conservation invariant directl
 copy count, `original.remaining + handedOff.copies` after a split always equals the count before
 it, across the full range of possible values, not just a couple of hand-picked examples. Copy-count
 bugs in spray-style protocols are the kind of thing that looks fine in a two-device manual test and
-then silently drifts wrong after the tenth handoff in a real crowd; testing the invariant itself
+then silently drifts wrong after the tenth handoff in a crowd; testing the invariant itself
 instead of specific input/output pairs is what actually rules that out.
 
 ### An epoch key, not the group key, for anything that goes on the wire repeatedly
@@ -185,7 +186,7 @@ project's own earlier planning doc, which had claimed otherwise). What it actual
 separation from the rotating wire handle (a different derivation of the same root key, used for a
 different purpose, so the two can never collide) and a bounded blast radius: if one epoch key is
 somehow independently recovered, that exposes roughly 24 hours of traffic, not the group's entire
-multi-day-to-months life. A real, if narrower, security property, for the cost of one deterministic
+multi-day-to-months life. A narrower security property, for the cost of one deterministic
 HKDF call already computed once per epoch, not once per message.
 
 ## What this document doesn't cover
@@ -210,3 +211,15 @@ on may hold and forward your sealed frames and upload them; it learns rotating t
 (redundancy is the defence), and cannot read, forge or alter anything. Traffic is prioritised (SOS first, files last), rate-limited per tag,
 budgeted per hour and slowed under congestion so a crowd cannot easily clog the relays. The feature is not available to phones that
 have not switched it on, and a phone that has it off behaves exactly as in v2.
+
+## Version 0.10.3-dev: groups without an end date, and what was tightened
+
+**No expiry groups.** A join code carries an absolute expiry. Timed codes (version 3) keep their original validation: a lifetime up to 180 days, and a decoder that rejects anything beyond it. A No expiry code is a separate code version (4) whose expiry field is zero; version 4 accepts only zero and version 3 rejects zero, so neither can be mistaken for the other. Older apps reject version 4 codes. The group stays on a phone until that phone's user deletes it, the sweep that removes expired groups skips it, and an expired timed group is never revived. Message and file retention is independent of group lifetime, so a permanent group does not keep old content forever. The cost is stated in the README: a static group key in a group that never ends is exposed for as long as the group exists.
+
+**Envelope id bound to the sealed body.** SOS and courier frames derive their nonce from the envelope id, so a receiver now checks that the id on the wire matches the nonce the body was sealed under. A captured SOS cannot be re-sent under a fresh id.
+
+**Hop count from the wire is bounded.** The time-to-live field changes at every hop, so no MAC can cover it. It is clamped to the sender default of 8 when it arrives and when it is forwarded, so a hostile value cannot lengthen a flood.
+
+**A bad evidence symbol no longer sticks.** Fountain-coded symbols are not individually authenticated; the sealed hash in the authenticated header is the check. When reassembly fails that check, the stored symbols and their seen markers are now discarded so valid symbols are accepted on the next request. Authenticating each symbol would need a stored tag per row and a database schema change, and the app's database rebuilds itself on a schema change, which would erase users' groups, so it was not done.
+
+**What SOS promises.** The UI says an SOS was saved on this phone and that receipt is unconfirmed, because a flood-relayed alert has no delivery acknowledgement. The reasoning and the open items are in `docs/DECISIONS.md` decisions 80 to 82.

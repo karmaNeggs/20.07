@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>20.07: Offline Emergency Communication App for Android</title>
+<title>20.07: Offline emergency communication when the network fails</title>
 <meta name="description" content="Free Android app for emergency communication with no signal or internet: Bluetooth mesh, live group radar, SOS and photos. For floods, disasters, rescue and crowds.">
 <meta name="keywords" content="offline communication app, emergency communication, disaster communication, flood emergency app, natural disaster app, search and rescue app, Bluetooth mesh network, no signal messaging, off-grid communication, SOS app, network congestion, stampede safety, festival no signal, open source Android, bitchat alternative, Bluetooth mesh chat alternative, group radar, find friends without signal">
 <meta name="robots" content="index,follow,max-image-preview:large">
@@ -12,7 +12,7 @@
 <link rel="icon" href="banner.png">
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="20.07">
-<meta property="og:title" content="20.07: stay connected when the network fails">
+<meta property="og:title" content="20.07: offline emergency communication when the network fails">
 <meta property="og:description" content="Offline emergency communication for your group: Bluetooth mesh, live radar, SOS, photos, optional internet bridge. Free, open source, no accounts.">
 <meta property="og:url" content="https://rescue2007.com/">
 <meta property="og:image" content="https://rescue2007.com/banner.png">
@@ -59,6 +59,17 @@
   .split{display:grid;grid-template-columns:minmax(0,420px) 1fr;gap:28px;align-items:center}
   .sq{margin:0;max-width:420px}
   @media (max-width:720px){.split{grid-template-columns:1fr}.sq{margin:0 auto}}
+  .shots{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:0;padding:0;list-style:none}
+  .shots figure{margin:0}
+  .shots img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:22px;background:#000}
+  .shots figcaption{margin-top:10px;font-size:14px;color:var(--muted);line-height:1.45}
+  .shots figcaption strong{display:block;color:var(--ink);font-size:15px}
+  .swipe{display:none;color:var(--muted);font-size:13px;margin:0 0 10px}
+  @media (max-width:820px){
+    .shots{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:14px;padding-bottom:12px;margin:0 -20px;padding-left:20px;padding-right:20px;scroll-padding-left:20px;-webkit-overflow-scrolling:touch}
+    .shots li{flex:0 0 68%;max-width:300px;scroll-snap-align:start}
+    .swipe{display:block}
+  }
   footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
   a{color:var(--green)}
   .diagram{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:16px;margin:8px 0 22px;background:#000}
@@ -68,7 +79,7 @@
 <div class="wrap">
   <header class="hero">
     <img src="banner.png" alt="20.07 logo: a location pin with a signal trace" width="280" height="268">
-    <h1>Offline emergency communication <span>for when the network fails.</span></h1>
+    <h1>Offline emergency communication <span>when the network fails.</span></h1>
     <p class="lead">Find your group, call for help and share photos with <strong>no cell signal and no internet</strong>. Phones relay for each other over Bluetooth, and an optional internet bridge carries your group further, even with Bluetooth off. Free, open source, no accounts.</p>
     <div class="cta">
       <a class="btn primary" href="https://github.com/karmaNeggs/20.07/raw/main/releases/20.07-v0.10.3-dev-release.apk">Download the APK (v0.10.3)</a>
@@ -80,6 +91,18 @@
       <span class="badge">No servers of ours</span><span class="badge">Encrypted for your group</span>
     </div>
   </header>
+
+  <section id="screens">
+    <h2>What it looks like</h2>
+    <p class="sub">Screens from version 0.10.3 on two phones. The invite code and QR are blurred here; every group gets its own.</p>
+    <p class="swipe">Swipe for more screens &rarr;</p>
+    <ul class="shots">
+      <li><figure><img src="shots/home.jpg" width="540" height="1200" loading="lazy" alt="20.07 home screen: a radar showing a group member nearby, a Last seen entry, SOS, Power, Internet and Offline buttons, and two groups, one expiring in 47 hours and one with no expiry."><figcaption><strong>Home</strong>Radar, last seen, one-tap SOS, and your groups.</figcaption></figure></li>
+      <li><figure><img src="shots/chat.jpg" width="540" height="1200" loading="lazy" alt="A group chat with a radar on top, a short message exchange, a red SOS message, an SOS button and a note that SOS receipt is not confirmed."><figcaption><strong>Group chat</strong>Messages, SOS in red, and a plain note that receipt is not confirmed.</figcaption></figure></li>
+      <li><figure><img src="shots/invite.jpg" width="540" height="1200" loading="lazy" alt="The invite dialog for a group with the QR code and written code blurred out, and Copy link, Close and Copy code buttons."><figcaption><strong>Invite</strong>Any member can invite by QR, link or code. Shown blurred.</figcaption></figure></li>
+      <li><figure><img src="shots/create.jpg" width="540" height="1200" loading="lazy" alt="The Add a group screen on the Create tab with a group name field and a group lifetime of 48 hours."><figcaption><strong>Create a group</strong>Name it and pick how long it lasts, up to no expiry.</figcaption></figure></li>
+    </ul>
+  </section>
 
   <section id="why">
     <h2>Built for when networks fail</h2>
@@ -99,10 +122,11 @@
     <p class="sub">Three core tools, plus an optional bridge when any phone has a connection.</p>
     <div class="grid">
       <div class="card"><h3>Live group radar</h3><p>A radar of your group around you: walk toward the dot. Works on Bluetooth alone, with a hot/cold fallback if you decline location.</p></div>
-      <div class="card"><h3>SOS that goes first</h3><p>An authenticated distress alert that hops from phone to phone, with distance shown in hops, and is sent ahead of all other traffic.</p></div>
+      <div class="card"><h3>SOS that goes first</h3><p>An authenticated distress alert that hops from phone to phone, with distance shown in hops, and is sent ahead of all other traffic. Hold the button to send. The app tells you plainly that receipt is not confirmed, so you also call local emergency services when you can.</p></div>
       <div class="card"><h3>Photos and files</h3><p>Encrypted incident photos and files up to 400 KB relay across the mesh, so proof does not live on just one phone.</p></div>
       <div class="card"><h3>Last seen</h3><p>A mate who dropped out shows as "name, 14 min ago, 3.2 km NE" for up to six hours, held in memory only.</p></div>
       <div class="card"><h3>Internet reach (optional)</h3><p>One off-by-default switch. A phone with Wi-Fi or mobile data carries your group's encrypted traffic to mates out of Bluetooth range, even with Bluetooth off.</p></div>
+      <div class="card"><h3>Groups that last as long as you need</h3><p>Pick 12 hours to 6 months, or no expiry for a group that stays until you delete it. Old messages still age out on their own schedule.</p></div>
       <div class="card"><h3>Stranger carrying</h3><p>Phones outside your group, with the switch on, can carry your sealed frames onward. They see sizes and timing, never content.</p></div>
     </div>
   </section>
@@ -157,7 +181,7 @@
     <details><summary>What about network congestion at a festival, stadium or rally?</summary><p>Phones relay for each other, so your group stays connected when the tower is overloaded. SOS alerts are sent first, and the app slows its own background traffic under load.</p></details>
     <details><summary>Is it private and secure?</summary><p>Everything is encrypted with a key only your group holds; there are no accounts and no servers of ours. With Internet reach on, public relays can see your phone's internet address, message sizes and timing, but not content. Read the <a href="privacy.html">privacy policy</a>.</p></details>
     <details><summary>Is it free? How do I install it?</summary><p>Free and open source (MIT). Not on the Play Store: download the signed APK above, allow installs from that source once, and share the file with friends offline.</p></details>
-    <details><summary>How many people can use it together?</summary><p>A group suits a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour is tested in simulation, not yet in the field. See the <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations-honest-ones">known limitations</a>.</p></details>
+    <details><summary>How many people can use it together?</summary><p>A group suits a few to several people who stay together, and every phone with the app can relay for others. Large-crowd behaviour is tested in simulation, not yet in the field. See the <a href="https://github.com/karmaNeggs/20.07/blob/main/README.md#known-limitations">known limitations</a>.</p></details>
       <details><summary>How is 20.07 different from bitchat?</summary><p><strong>The same ideas:</strong> a Bluetooth mesh where every phone relays, no accounts or phone numbers, open source, and routing ideas such as hop limits, de-duplication, jitter and store-and-forward couriers, plus padding message sizes. <strong>What differs:</strong> bitchat is a chat app; 20.07 is for keeping a private group together and safe. It adds a live radar to find your people, an SOS that is sent ahead of everything else, photos and files, a "last seen" list, and an optional internet bridge (through public relays) so phones with Bluetooth off or out of range can still be reached. Groups are private: a random shared key from a QR code, with rotating radio IDs instead of public identities.</p></details>
     <details><summary>Is 20.07 compatible with bitchat?</summary><p>No. The two apps use different wire formats and service IDs, so they cannot talk to each other. 20.07 borrows design ideas, not the protocol, and is not affiliated with bitchat.</p></details>
   </section>

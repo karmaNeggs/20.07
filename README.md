@@ -1,5 +1,7 @@
 # 20.07
 
+**Offline emergency communication when the network fails.**
+
 A phone-to-phone Bluetooth mesh app for finding your group, navigating toward them, calling for
 help, and sharing incident photos — when cellular networks are jammed, overloaded, unavailable, or
 not trusted. No servers of ours, no account, and no internet dependency: it works fully offline. An optional,
@@ -78,13 +80,13 @@ See Security model below for exactly what this app's own design does *not* prote
 
 See [`docs/WHITEPAPER.md`](docs/WHITEPAPER.md) for a short architecture writeup — not a feature
 tour, just the handful of pieces (radio-touch discipline, GATT operation queueing, the Bloom-filter
-catalog sync, and a few others) that took real engineering to get right, and an honest note on
+catalog sync, and a few others) that took engineering to get right, and a note on
 which parts are borrowed techniques rather than original ones. [`docs/DECISIONS.md`](docs/DECISIONS.md)
 records the specific designs this project tried and walked back after live-device testing, and why.
 
 ## What it does (3 features, on purpose — nothing else)
 
-1. **Navigate** — a forward-up radar: your group members show up as dots at their real bearing
+1. **Navigate** — a forward-up radar: your group members show up as dots at their bearing
    and distance from you, computed from GPS coordinates shared over the mesh (never stored —
    kept in memory for about two minutes, then gone), then rotated by your phone's compass so
    "up" means "in front of you right now" — walk toward the dot, don't read a map. If GPS isn't
@@ -148,7 +150,7 @@ just your handful of group members: strangers' phones act as blind couriers.
 versions connected to a peer just long enough to exchange a "here's the diff" bitset and sync up,
 then disconnected — content only ever moved at the moment two phones happened to connect, which
 got slower the more crowded the area got. Links now stay open (minutes, not seconds) for as long
-as they're useful, held against real signal-diversity rather than whoever connected first. The
+as they're useful, held against signal-diversity rather than whoever connected first. The
 moment something new exists — you send an SOS, one relays to you — it floods immediately across
 every other link currently open, no reconnect required. This is also what makes "a passing phone
 carries content between two separated members" actually work: if your phone is briefly connected
@@ -170,7 +172,7 @@ then rotates that by its own compass heading so "up" on screen always means "in 
 right now," not true north. The compass reading is smoothed and the app surfaces a
 low-confidence warning when the sensor itself reports poor accuracy, since magnetometers drift
 and get thrown off by exactly the kind of things common in dense crowds (metal barricades,
-vehicles, structures) — that's a real, known weak point, shown rather than hidden. When GPS
+vehicles, structures) — that's a known weak point, shown rather than hidden. When GPS
 isn't available it falls back to a hop-count "hot/cold" indicator: no direction, just whether
 the number of relay-hops to your nearest group member is rising or falling as you move. That
 part depends on nothing but Bluetooth, so it still works when GPS doesn't. (Hop-count-to-presence
@@ -191,7 +193,7 @@ propagate independently through whoever's nearby, group member or not.
 ## Permissions — and why each one is there
 
 - **Bluetooth (scan / advertise / connect)** — the entire mesh transport.
-- **Location — a real, intentional use now.** Powers the GPS radar. This is a deliberate
+- **Location — an intentional use now.** Powers the GPS radar. This is a deliberate
   tradeoff your group should knowingly accept, not a hidden cost: your phone briefly holds
   other members' recent positions in memory (never written to disk, never added to the app's
   database) so it can relay them onward and plot the radar. Entries expire on their own after
@@ -219,7 +221,7 @@ propagate independently through whoever's nearby, group member or not.
 - **Uninstalling wipes everything.** Groups, keys, messages, and incident-photo files all live in the
   app's private storage (Room database, `EncryptedSharedPreferences`, internal files dir) with
   `android:allowBackup="false"` — nothing here is written anywhere Android preserves across an
-  uninstall or could restore from a backup. Removing the app is a real, complete wipe.
+  uninstall or could restore from a backup. Removing the app is a complete wipe.
 
 ## Power tiers
 
@@ -231,7 +233,7 @@ Two BLE tuning profiles, switched automatically — no setting to think about in
 
 A **Power saver** toggle on the home screen (off by default) manually pins the Relay tier even
 while the app is open, for someone who wants to trade responsiveness for runtime regardless of
-what they're doing. The tradeoff either way is real, not hidden: Relay tier means slower
+what they're doing. The tradeoff either way is not hidden: Relay tier means slower
 discovery — fewer chances for a peer's scan window to catch your advertisement, and vice versa.
 
 ## Security model
@@ -248,8 +250,7 @@ discovery — fewer chances for a peer's scan window to catch your advertisement
   confidentiality; see `docs/DECISIONS.md` decision 39 for the full reasoning.
 - **Authenticity**: incident-photo headers, nicknames, and presence heartbeats (none of which carry
   confidential content) carry a truncated **HMAC-SHA256** (128-bit) tag under the group key
-  instead of a full seal. A phone without the key can relay these but cannot forge one a real
-  member will act on — verified with a constant-time comparison.
+  instead of a full seal. A phone without the key can relay these but cannot forge one a member will act on — verified with a constant-time comparison.
 - **Per-sender authenticity, additive to the above**: every member also has their own per-group
   Ed25519 keypair (not a per-device identity — a device gets a fresh keypair for each group it
   joins, so it can't be linked across groups). A signature under this key rides alongside the
@@ -293,11 +294,11 @@ where it matters:
   or clipboard-manager app. A copied code contains the group's raw key; treat "copy code" as
   leaving a trace outside the app's control.
 
-## Known limitations (honest ones)
+## Known limitations
 
 - **BLE stack behavior varies by phone manufacturer.** Connection stability, MTU negotiation,
-  and background-scanning limits are inconsistent across Android OEMs. Real debugging happens
-  on real devices, not in a compiler.
+  and background-scanning limits are inconsistent across Android OEMs. Debugging happens
+  on devices, not in a compiler.
 - **Two phones minimum to see anything work.** Discovery, navigation, and relay need at least
   two devices in the same group, physically near each other.
 - **Only hardware-tested at small scale so far (4 physical phones, all Android 12+, many live
@@ -306,12 +307,11 @@ where it matters:
   The actual operating envelope is a small group (3-8 people) whose *carrier medium* — the total
   local population of app users acting as blind relays, per "Every phone relays for every group"
   above — can vary from a couple of people to hundreds (`PLAN-v2.md` §5.5). The high end of that
-  is validated only in a JVM discrete-event simulator driving the real connection/relay/dedup
+  is validated only in a JVM discrete-event simulator driving the connection/relay/dedup
   classes from D=3 to D=400 (`android/app/src/test/.../sim/`), not on physical hardware — no crowd-scale
   live test has been run. A defensive cap on simultaneous inbound BLE connections exists
-  (`MeshGattServer`) but its enforcement is currently **disabled** (logging only) pending real
-  dense-crowd data on whether it's needed and safe.
-- **Large files take real time.** A short low-res photo should propagate through a populated
+  (`MeshGattServer`) but its enforcement is currently **disabled** (logging only) pending dense-crowd data on whether it's needed and safe.
+- **Large files take time.** A short low-res photo should propagate through a populated
   area in minutes. Anything larger depends heavily on how continuously populated the physical
   area is between sender and destination — a gap in coverage is a gap no protocol can bridge.
 - **Hop-count-to-presence is capped at "in direct range or not," not a true extending gradient.**
@@ -324,10 +324,10 @@ where it matters:
   service and asks once for a battery-optimization exemption, but aggressive OEM battery
   managers (common on some manufacturers) are known to kill foreground services regardless of
   correct API usage — there is no code-level guarantee against this, only the standard mitigation.
-- **The release build is now signed (as of v0.7.28-dev)** — a real key exists, kept entirely out of
+- **The release build is now signed (as of v0.7.28-dev)** — a key exists, kept entirely out of
   git (`keystore.properties`/`keystore/*.jks` are both gitignored; a fresh clone still builds
   `release`/`playstoreRelease` fine without them, just unsigned, so contributing never needs the
-  real signing material). `releases/` and the download link below now point at this signed
+  signing material). `releases/` and the download link below now point at this signed
   **release** build (R8-minified, ~90% smaller than debug, no debug-only tooling compiled in) —
   not the debug build the way earlier versions did. Still worth knowing: this is a fresh key with
   no track record, and end-to-end device testing of the *minified* release build specifically
@@ -343,11 +343,11 @@ where it matters:
   group presence, a multi-hop presence-distance gradient, a single-hop live position (reuses the
   same AES-GCM sealing/signing GATT position frames already use — no new crypto), and an SOS
   hop-gradient plus a short authenticated content preview (id + hop + a ≤120-byte message, keyed on
-  the real SOS id so the hop-gradient composes with GATT flood-forward's own tracking instead of a
+  the SOS id so the hop-gradient composes with GATT flood-forward's own tracking instead of a
   separate rough estimate — the full authoritative record still arrives over GATT once connected).
   The content preview deliberately uses a SEPARATE mac scheme from GATT's own SOS authentication
   (`MeshFrameCodec.broadcastSosMacInput`, excludes `senderId`) specifically so it doesn't broadcast
-  a per-install device id in the clear — a real threat-model tradeoff (Tier B makes content
+  a per-install device id in the clear — a threat-model tradeoff (Tier B makes content
   passively readable by any nearby BLE scanner, not just connection-gated as over GATT) that was
   raised explicitly and decided by the user, not assumed. Hardware `ScanFilter` and degree-gated
   scan-report batching also included. Generalized from what was originally a Coded-PHY-only
@@ -358,20 +358,19 @@ where it matters:
   — on unsupported hardware, or if anything about it misbehaves, it's a silent no-op that can't
   affect the proven legacy discovery path.
 - **Delivery is a forwarding protocol, not just a sync protocol — hardware-confirmed across many
-  live rounds since, most recently a real ~1-hour multi-phone session (2026-08-10) that included
+  live rounds since, most recently a ~1-hour multi-phone session (2026-08-10) that included
   mid-session group deletes/rejoins, a sender/receiver role swap, and an app uninstall on a relay
   phone.** SOS floods immediately across every open link the moment it's created or received, and
-  links stay open for minutes instead of seconds (`docs/DECISIONS.md` decisions 18-19). Two real
-  gaps found by live rounds since the original four are now closed: SOS/incident-photo-header/
+  links stay open for minutes instead of seconds (`docs/DECISIONS.md` decisions 18-19). Two gaps found by live rounds since the original four are now closed: SOS/incident-photo-header/
   nickname delivery used to silently stop once a link had been open for a few minutes, because the catalog
   exchange those depend on was only ever sent once per connection (decision 59, fixed by folding it
   into the same periodic refresh presence/position already used); and hop count could read higher
-  than the mesh's real topology because a distance-vector loop guard compared raw, rotating BLE
+  than the mesh's topology because a distance-vector loop guard compared raw, rotating BLE
   addresses instead of stable peer identity (decision 59, fixed). One thing intentionally NOT fixed
   yet: a group row's "N hop(s) away" reading can still read stale for up to one staleness window
   (up to several minutes) after a member walks out of range, tracked as its own item and rebuilt
   (decision 60) but **not yet hardware-confirmed** — the fix needs a round that walks a phone
-  genuinely far away for a sustained period to prove the number actually rises.
+  far away for a sustained period to prove the number actually rises.
 - **A peer with only a low-accuracy GPS fix doesn't show up on the radar at all, with no
   on-screen explanation why.** `placePeerOnRadar` deliberately refuses to plot a dot when your
   accuracy plus theirs exceeds ~250m combined, rather than show a confidently-wrong position —
@@ -380,27 +379,27 @@ where it matters:
   radar dot never appears, and nothing on screen says why. Confirmed live to trigger more often
   than just "indoors": many phones deliberately widen their reported GPS accuracy while
   stationary (less continuous satellite tracking to save battery when not moving), then tighten
-  it back up the instant motion is detected — so a dot can disappear while genuinely standing
+  it back up the instant motion is detected — so a dot can disappear while standing
   still, even right next to the other phone, and reappear on the next step. The threshold was
   raised (from an original 150m) specifically to make this less common, but the underlying
-  silent-failure mode is unchanged: a real fix (surface *something* for a hop-away-but-imprecise
+  silent-failure mode is unchanged: a fix (surface *something* for a hop-away-but-imprecise
   peer instead of silence) is scoped but not yet built.
 - **`GattOperationQueue`'s per-peer write lock isn't guaranteed to release if a connection hangs
   between `CONNECTED` and `DISCONNECTED`.** Once a connection gets past the initial `CONNECTED`
   callback, `MeshGattClient`'s stuck-attempt timeout (see `docs/DECISIONS.md`, decision 5) no
   longer watches it — if the underlying radio then goes silent without ever firing `DISCONNECTED`
   (the same class of undocumented Android BLE failure decision 5 fixed for the *pre-connect* case),
-  that peer's queue entries leak and it can never be reconnected to. Real but narrow; a proper fix
+  that peer's queue entries leak and it can never be reconnected to. But narrow; a proper fix
   needs a second, later connection-lifecycle timeout — deliberately not attempted blind here given
   how much live 2-phone testing this exact GATT lifecycle code has already needed to get right.
 - **Automated test coverage is logic-only.** 525 pure-JVM/Robolectric unit tests cover crypto,
   wire-format encode/decode, connection/dedup state machines, the catalog-sync round trip, and (as
-  of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the real connection/
+  of `PLAN-v2.md`'s scaling work) a discrete-event crowd simulator driving the connection/
   relay classes from D=3 to D=400 (`./gradlew test`). There are no automated UI tests and no CI
   pipeline — both are manual/planned, not built.
 
 See [`TESTING.md`](TESTING.md) for how the test suite is organized, and
-[`test_rubric.md`](test_rubric.md) for the manual, physical-device test plan real bugs in this
+[`test_rubric.md`](test_rubric.md) for the manual, physical-device test plan bugs in this
 project have actually been found by (BLE radio behavior at this level doesn't show up in a
 compiler or an emulator).
 
@@ -475,7 +474,7 @@ Needs the Android SDK (platform 34, build-tools 34.0.0) — Android Studio sets 
 automatically, or install the command-line SDK tools and set `ANDROID_HOME`/`local.properties`
 yourself. `./gradlew assembleRelease` also works without any extra setup — it just produces an
 *unsigned* release APK unless you supply your own `keystore.properties` in `android/` (the Gradle root) (the
-project's own real signing key is intentionally never in git).
+project's own signing key is intentionally never in git).
 
 ## How to use it
 
@@ -490,7 +489,7 @@ project's own real signing key is intentionally never in git).
    - A red **SOS** button — tap it, optionally add a short message, send. It broadcasts to
      the group and lets others navigate toward you.
    - A **Navigate** button — opens the radar. With a GPS fix, group members show up as dots at
-     their real bearing and distance, rotated so "up" is always the direction you're currently
+     their bearing and distance, rotated so "up" is always the direction you're currently
      facing — walk toward the dot. Without a fix, it falls back to a hop-count number and a
      trend ("getting closer" / "getting farther") that only needs Bluetooth.
    - A **Send incident photo** button — opens your photo gallery, pick an image, it gets compressed,

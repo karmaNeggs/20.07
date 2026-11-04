@@ -25,3 +25,6 @@ keystore.properties
 # Kotlin/Java
 *.class
 *.log
+
+# raw phone screenshots (unblurred join QR/key); only blurred copies in docs/shots/ are published
+20.07 app screenshots/

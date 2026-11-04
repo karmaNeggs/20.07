@@ -15,7 +15,7 @@ you a review round-trip.
 - **For anything touching the BLE/mesh layer** (`android/app/src/main/java/org/offlinemesh/app/ble/`),
   check [`docs/DECISIONS.md`](docs/DECISIONS.md) for whether this exact thing has been tried
   before. A lot of entries there are "this looked like the obvious fix, here's the live-hardware
-  failure it caused" — real prior art, not just a changelog.
+  failure it caused" — prior art, not just a changelog.
 
 ## Development setup
 
@@ -37,10 +37,10 @@ the full three-tier test breakdown (pure logic / Compose UI / manual device).
       shape and density of these; a PR that changes behavior with no corresponding test is the
       single most common reason for a slow review here.
 - [ ] `./gradlew lint` has no new warnings.
-- [ ] If the change touches real device behavior (BLE radio, GATT, background service lifecycle,
-      permissions) — **say plainly in the PR whether it's been tested on a real phone or only
+- [ ] If the change touches device behavior (BLE radio, GATT, background service lifecycle,
+      permissions) — **say plainly in the PR whether it's been tested on a phone or only
       compiled.** This project has a hard-won rule: a fix that's only compile-verified gets shipped
-      labeled as such, not implied to be working. Several real regressions in this project's
+      labeled as such, not implied to be working. Several regressions in this project's
       history came from skipping that distinction — see `docs/DECISIONS.md` for the receipts. If
       you can't test on hardware yourself, say so and it'll get flagged for a hardware round before
       merge, not silently assumed safe.
@@ -51,19 +51,19 @@ the full three-tier test breakdown (pure logic / Compose UI / manual device).
 ## Code style, briefly
 
 - Comments explain **why**, not what — a well-named function already says what it does. Only
-  comment a genuinely non-obvious constraint, a workaround for a specific platform bug, or a
+  comment a non-obvious constraint, a workaround for a specific platform bug, or a
   tradeoff someone reading the code later would otherwise re-litigate.
 - No speculative abstraction. If the codebase does something in three lines instead of a new
   helper class, that's usually deliberate, not an oversight — see `docs/WHITEPAPER.md`'s intro for
   the project's own stated bias here.
 - Match the detekt config already in place (`app/config/detekt/detekt.yml`) rather than adding
-  inline suppressions for style you'd prefer differently. If a rule is genuinely wrong for this
+  inline suppressions for style you'd prefer differently. If a rule is wrong for this
   codebase, that's its own PR with its own justification, not bundled into a feature change.
 
 ## Reporting bugs
 
 Open an issue using the bug report template. For anything in the BLE/mesh layer specifically, the
-phones/Android versions/chipsets involved are more useful than a stack trace — most real bugs here
+phones/Android versions/chipsets involved are more useful than a stack trace — most bugs here
 have been radio-behavior ones that only show up on physical hardware, not in a compiler or
 emulator (see `TESTING.md` for why). If you can, attach a `DiagnosticsLog` export (debug builds
 only — the export button is on the Home screen) rather than describing symptoms from memory.

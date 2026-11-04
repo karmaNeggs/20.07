@@ -1,6 +1,6 @@
 # keystore/
 
-Holds `release.jks`, this project's real Android release-signing key (generated 2026-08-10, valid
+Holds `release.jks`, this project's Android release-signing key (generated 2026-08-10, valid
 until 2053). The `.jks` file itself is gitignored — only this note is committed.
 
 **This key must never be lost.** Every future update to a release built with it (including any

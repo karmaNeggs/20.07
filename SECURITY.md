@@ -1,6 +1,6 @@
 # Security Policy
 
-20.07 handles real GPS positions, SOS alerts, and photo evidence for people who may be relying on
+20.07 handles GPS positions, SOS alerts, and photo evidence for people who may be relying on
 it in an actual emergency. Security reports are taken seriously even though this is a solo-
 maintained project with no formal SLA.
 
@@ -12,8 +12,7 @@ against the [latest release](https://github.com/karmaNeggs/20.07/releases/latest
 
 ## Reporting a vulnerability
 
-**Please do not open a public issue for a vulnerability that's actively exploitable against real
-users** (e.g. a way to decrypt another group's traffic, deanonymize a device, or remotely crash/
+**Please do not open a public issue for a vulnerability that's actively exploitable against users** (e.g. a way to decrypt another group's traffic, deanonymize a device, or remotely crash/
 compromise the app from a malicious BLE peer).
 
 Instead, use GitHub's private reporting:
@@ -26,7 +25,7 @@ needed, and nothing is public until a fix is ready (or you choose to disclose ea
 
 For anything **not** actively exploitable — a design tradeoff you think is wrong, a theoretical
 weakness with no practical attack, or something already listed in
-[README's Known Limitations](README.md#known-limitations-honest-ones) — a regular public issue is
+[README's Known Limitations](README.md#known-limitations) — a regular public issue is
 fine and preferred, since it's useful for other people evaluating the project too.
 
 ## Scope
@@ -35,10 +34,10 @@ fine and preferred, since it's useful for other people evaluating the project to
 — confidentiality/authenticity of sealed content, the blind-relay privacy property, identity
 correlation across groups or over time, key storage, or a memory-safety/crash bug reachable from
 an untrusted BLE peer (this app talks to devices it has no reason to trust by design — a crash or
-worse from malformed input on that path is a real security bug, not just a stability one).
+worse from malformed input on that path is a security bug, not just a stability one).
 
-**Already known, please check first**: [README's Known Limitations](README.md#known-limitations-honest-ones)
-documents several real, currently-unresolved gaps honestly (no forward secrecy, a few narrow connection-lifecycle edge cases, and more) — these don't need
+**Already known, please check first**: [README's Known Limitations](README.md#known-limitations)
+documents several currently-unresolved gaps (no forward secrecy, a few narrow connection-lifecycle edge cases, and more) — these don't need
 a fresh report unless you've found a way to actually exploit one in practice, which *would* be
 useful to know.
 
@@ -56,6 +55,6 @@ Android's job, not this app's), and social-engineering the group's invite code/Q
 ## Response
 
 No formal SLA (solo-maintained project), but security reports get priority over ordinary feature
-work. You'll get an acknowledgment via the GitHub advisory thread; a real fix's timeline depends on
+work. You'll get an acknowledgment via the GitHub advisory thread; a fix's timeline depends on
 severity and whether it needs hardware confirmation before shipping (see `CONTRIBUTING.md` for why
 that distinction matters in this codebase specifically).
