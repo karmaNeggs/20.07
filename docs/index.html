@@ -33,7 +33,7 @@
   body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
   .wrap{max-width:980px;margin:0 auto;padding:0 20px}
   header.hero{text-align:center;padding:44px 0 24px}
-  header.hero img{width:min(100%,280px);height:auto;border-radius:20px}
+  header.hero img{display:block;margin:0 auto -21px;width:min(100%,280px);height:auto;border-radius:20px}
   h1{font-size:clamp(26px,5vw,42px);line-height:1.15;margin:20px 0 10px}
   h1 span{color:var(--green)}
   .lead{max-width:720px;margin:0 auto;color:var(--muted);font-size:18px}
@@ -59,16 +59,14 @@
   .split{display:grid;grid-template-columns:minmax(0,420px) 1fr;gap:28px;align-items:center}
   .sq{margin:0;max-width:420px}
   @media (max-width:720px){.split{grid-template-columns:1fr}.sq{margin:0 auto}}
-  .shots{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:0;padding:0;list-style:none}
+  .shots{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin:28px 0 0;padding:0;list-style:none}
   .shots figure{margin:0}
   .shots img{display:block;width:100%;height:auto;border:1px solid var(--line);border-radius:22px;background:#000}
   .shots figcaption{margin-top:10px;font-size:14px;color:var(--muted);line-height:1.45}
   .shots figcaption strong{display:block;color:var(--ink);font-size:15px}
-  .swipe{display:none;color:var(--muted);font-size:13px;margin:0 0 10px}
   @media (max-width:820px){
-    .shots{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:14px;padding-bottom:12px;margin:0 -20px;padding-left:20px;padding-right:20px;scroll-padding-left:20px;-webkit-overflow-scrolling:touch}
+    .shots{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;gap:14px;padding-bottom:12px;margin:24px -20px 0;padding-left:20px;padding-right:20px;scroll-padding-left:20px;-webkit-overflow-scrolling:touch}
     .shots li{flex:0 0 68%;max-width:300px;scroll-snap-align:start}
-    .swipe{display:block}
   }
   footer{padding:32px 0 60px;color:var(--muted);font-size:14px;text-align:center}
   a{color:var(--green)}
@@ -92,18 +90,6 @@
     </div>
   </header>
 
-  <section id="screens">
-    <h2>What it looks like</h2>
-    <p class="sub">Screens from version 0.10.3 on two phones. The invite code and QR are blurred here; every group gets its own.</p>
-    <p class="swipe">Swipe for more screens &rarr;</p>
-    <ul class="shots">
-      <li><figure><img src="shots/home.jpg" width="540" height="1200" loading="lazy" alt="20.07 home screen: a radar showing a group member nearby, a Last seen entry, SOS, Power, Internet and Offline buttons, and two groups, one expiring in 47 hours and one with no expiry."><figcaption><strong>Home</strong>Radar, last seen, one-tap SOS, and your groups.</figcaption></figure></li>
-      <li><figure><img src="shots/chat.jpg" width="540" height="1200" loading="lazy" alt="A group chat with a radar on top, a short message exchange, a red SOS message, an SOS button and a note that SOS receipt is not confirmed."><figcaption><strong>Group chat</strong>Messages, SOS in red, and a plain note that receipt is not confirmed.</figcaption></figure></li>
-      <li><figure><img src="shots/invite.jpg" width="540" height="1200" loading="lazy" alt="The invite dialog for a group with the QR code and written code blurred out, and Copy link, Close and Copy code buttons."><figcaption><strong>Invite</strong>Any member can invite by QR, link or code. Shown blurred.</figcaption></figure></li>
-      <li><figure><img src="shots/create.jpg" width="540" height="1200" loading="lazy" alt="The Add a group screen on the Create tab with a group name field and a group lifetime of 48 hours."><figcaption><strong>Create a group</strong>Name it and pick how long it lasts, up to no expiry.</figcaption></figure></li>
-    </ul>
-  </section>
-
   <section id="why">
     <h2>Built for when networks fail</h2>
     <p class="sub">Cellular networks assume normal conditions. They break down in a recurring set of situations, whether the network is overloaded by too many people or there was never much of it. In each case the same needs return: find your group, call for help, get proof of what is happening out.</p>
@@ -117,18 +103,22 @@
     </div>
   </section>
 
-  <section id="features">
-    <h2>What you get</h2>
-    <p class="sub">Three core tools, plus an optional bridge when any phone has a connection.</p>
+  <section id="design">
+    <h2>Our design</h2>
     <div class="grid">
-      <div class="card"><h3>Live group radar</h3><p>A radar of your group around you: walk toward the dot. Works on Bluetooth alone, with a hot/cold fallback if you decline location.</p></div>
-      <div class="card"><h3>SOS that goes first</h3><p>An authenticated distress alert that hops from phone to phone, with distance shown in hops, and is sent ahead of all other traffic. Hold the button to send. The app tells you plainly that receipt is not confirmed, so you also call local emergency services when you can.</p></div>
-      <div class="card"><h3>Photos and files</h3><p>Encrypted incident photos and files up to 400 KB relay across the mesh, so proof does not live on just one phone.</p></div>
-      <div class="card"><h3>Last seen</h3><p>A mate who dropped out shows as "name, 14 min ago, 3.2 km NE" for up to six hours, held in memory only.</p></div>
-      <div class="card"><h3>Internet reach (optional)</h3><p>One off-by-default switch. A phone with Wi-Fi or mobile data carries your group's encrypted traffic to mates out of Bluetooth range, even with Bluetooth off.</p></div>
-      <div class="card"><h3>Groups that last as long as you need</h3><p>Pick 12 hours to 6 months, or no expiry for a group that stays until you delete it. Old messages still age out on their own schedule.</p></div>
-      <div class="card"><h3>Stranger carrying</h3><p>Phones outside your group, with the switch on, can carry your sealed frames onward. They see sizes and timing, never content.</p></div>
+      <div class="card"><h3>Walk toward your group</h3><p>A live radar shows where your people are. Someone drops out? They move to Last seen: name, minutes ago, distance, direction.</p></div>
+      <div class="card"><h3>SOS first. Then words and photos.</h3><p>Hold to send. Your alert hops phone to phone ahead of all other traffic. Messages and encrypted photos follow. Receipt is never confirmed, so call emergency services too.</p></div>
+      <div class="card"><h3>Blind relay</h3><p>Every phone carries traffic, even from groups it is not in. It cannot read, forge or alter any of it.</p></div>
+      <div class="card"><h3>Internet bridge, optional</h3><p>One switch, off by default. Any phone with a connection carries your group's encrypted traffic to mates out of Bluetooth range, even with Bluetooth off.</p></div>
+      <div class="card"><h3>No accounts. You set the clock.</h3><p>One QR or link makes a group. No owner, no sign-up, no server of ours. It lasts 12 hours to 6 months, or until you delete it.</p></div>
+      <div class="card"><h3>Private by default</h3><p>Your radio ID changes every 60 seconds. Positions stay in memory, never on disk. Everything is encrypted for your group.</p></div>
     </div>
+    <ul class="shots">
+      <li><figure><img src="shots/home.jpg" width="540" height="1200" loading="lazy" alt="20.07 home screen: a radar showing a group member nearby, a Last seen entry, SOS, Power, Internet and Offline buttons, and two groups, one expiring in 47 hours and one with no expiry."><figcaption><strong>Home</strong>Radar, last seen, one-tap SOS, and your groups.</figcaption></figure></li>
+      <li><figure><img src="shots/chat.jpg" width="540" height="1200" loading="lazy" alt="A group chat with a radar on top, a short message exchange, a red SOS message, an SOS button and a note that SOS receipt is not confirmed."><figcaption><strong>Group chat</strong>Messages, SOS in red, and a plain note that receipt is not confirmed.</figcaption></figure></li>
+      <li><figure><img src="shots/invite.jpg" width="540" height="1200" loading="lazy" alt="The invite dialog for a group with the QR code and written code blurred out, and Copy link, Close and Copy code buttons."><figcaption><strong>Invite</strong>Any member can invite by QR, link or code. Shown blurred.</figcaption></figure></li>
+      <li><figure><img src="shots/create.jpg" width="540" height="1200" loading="lazy" alt="The Add a group screen on the Create tab with a group name field and a group lifetime of 48 hours."><figcaption><strong>Create a group</strong>Name it and pick how long it lasts, up to no expiry.</figcaption></figure></li>
+    </ul>
   </section>
 
   <section id="how">
@@ -155,17 +145,6 @@
           <li><strong>Private.</strong> Positions are encrypted for your group and live in memory only.</li>
         </ul>
       </div>
-    </div>
-  </section>
-
-  <section id="design">
-    <h2>Design choices</h2>
-    <div class="grid">
-      <div class="card"><h3>No accounts, ever</h3><p>One QR code creates a group. No owner is tied to it: removing one person does not expose or kill the group.</p></div>
-      <div class="card"><h3>Blind relay by design</h3><p>Every phone, even ones outside your group, can carry your traffic that is architecturally opaque to them, not just "encrypted so please don't look".</p></div>
-      <div class="card"><h3>The radio ID rotates</h3><p>Your Bluetooth advertising ID changes every 60 seconds, so passive scanning sees a changing, meaningless value.</p></div>
-      <div class="card"><h3>GPS never touches disk</h3><p>Positions live in memory only and are gone when the app is force-quit.</p></div>
-      <div class="card"><h3>Built for crowds</h3><p>SOS first, files last, slow-down under congestion and per-hour limits protect relays. Simulated up to 10,000 users.</p></div>
     </div>
   </section>
 
