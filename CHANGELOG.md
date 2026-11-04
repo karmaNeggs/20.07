@@ -16,7 +16,7 @@
 - Decision 82 in `docs/DECISIONS.md` lists what was left open (unauthenticated evidence symbols, blind-relay dedup key, nickname timestamp lock).
 
 **Verification**
-- 755 unit tests pass (1 skipped), detekt and the release build are clean. The release APK is signed with the same certificate as 0.10.2-dev. A phone round on this exact build is not recorded.
+- 755 unit tests pass (1 skipped), detekt and the release build are clean. The release APK is signed with the same certificate as 0.10.2-dev. The published build was tried on two phones over Bluetooth and over the internet (2026-11-04), with no problems reported; mixed old/new builds and crowds were not tried on phones.
 
 ## [0.10.2-dev] — SOS button moved, clearer diagnostics log
 

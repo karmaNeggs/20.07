@@ -18,7 +18,7 @@ there was never much of one there to begin with.
 - **SOS wording and accessibility:** the app says an SOS was saved on this phone and that nobody has confirmed receiving it, and points to ordinary emergency channels when you have them. The SOS button in a group chat is 48 dp and works with TalkBack; the general SOS screen shows one status instead of one message per group.
 - **Replay and ttl guards, no wire change:** an SOS or courier envelope whose id does not match its sealed body is rejected; a wire ttl above 8 is treated as 8; evidence that failed its final hash check is discarded and fetched again instead of staying stuck. Phones on 0.10.2-dev keep exchanging SOS, messages and files with this build. Details: `docs/DECISIONS.md` decision 82.
 - **Less congestion:** inbound Internet-reach queues are capped (alerts 64, texts 128, other 256, at most 128 frames handled per step) and per-frame relay log lines were removed.
-- **Phone testing:** the changes in this build were covered by 755 passing unit tests and a clean detekt run; a phone round on this exact build is not recorded here.
+- **Phone testing:** 755 passing unit tests and a clean detekt run. The author tried the published build on two phones, over Bluetooth and over the internet (2026-11-04), with no problems reported. Mixed old and new builds and crowds have not been tried on phones.
 
 ## What was new in 0.10.2-dev
 
